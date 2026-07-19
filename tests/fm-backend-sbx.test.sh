@@ -46,7 +46,7 @@ run_adapter() {
   PATH="$fakebin:$BASE_PATH" \
     FM_FAKE_SBX_LOG="$world/sbx.log" FM_FAKE_SBX_LS_FILE="$world/ls.json" \
     FM_SBX_SIGNALS_ROOT="$world/signals" FM_SBX_RESURRECT_SETTLE=0 \
-    FM_SBX_RESURRECT_READY_TRIES=0 \
+    FM_SBX_RESURRECT_READY_TRIES=0 FM_SBX_KEEPALIVE_MAX=0 \
     env "$@" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source sbx; '"$snippet" "$ROOT"
 }
 
@@ -288,6 +288,22 @@ test_resurrection_refuses_dead_pane_delivery() {
   pass "send path: a failed resume (pane still a shell) is refused loudly, nothing delivered"
 }
 
+test_send_starts_keepalive_after_delivery() {
+  local w fb
+  w=$(new_sbx_world keepalive); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # sbx auto-stop is host-connection-based: a delivered steer starts a guest
+  # turn that dies with the VM unless one exec stays pinned until the turn
+  # ends. The keeper is fire-and-forget, so give its async log line a beat.
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"; sleep 0.5' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 \
+    || fail "a steer with keep-alive enabled should succeed"
+  assert_contains "$(cat "$w/sbx.log")" "$w/signals/x/x.turn-ended 60" \
+    "delivery must start a keep-alive exec watching the id's turn-ended mount file"
+  pass "send path: delivery pins the VM with a turn-end-bounded keep-alive exec"
+}
+
 test_send_skips_resurrection_when_stack_alive() {
   local w fb
   w=$(new_sbx_world no-resurrect); fb=$(make_fake_sbx "$w")
@@ -436,6 +452,7 @@ test_send_resurrects_dead_guest_stack
 test_resume_template_quoting
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
+test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
 test_sweep_leaves_stopped_secondmate_untouched

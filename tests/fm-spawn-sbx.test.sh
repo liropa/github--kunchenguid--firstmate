@@ -69,7 +69,7 @@ run_spawn() {  # <world> <fakebin> <args...> -> stdout+stderr; rc preserved
   shift 2
   PATH="$fb:$BASE_PATH" FM_SPAWN_NO_GUARD=1 TMUX='' HERDR_ENV='' FM_BACKEND=sbx \
     FM_HOME="$w/home" FM_SBX_SIGNALS_ROOT="$w/signals" FM_SBX_RESURRECT_SETTLE=0 \
-    FM_SBX_RESURRECT_READY_TRIES=0 \
+    FM_SBX_RESURRECT_READY_TRIES=0 FM_SBX_KEEPALIVE_MAX=0 \
     FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
     FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-smx running)" \
     FM_FAKE_SBX_WRITE_DIR="$w/guest-writes" \
