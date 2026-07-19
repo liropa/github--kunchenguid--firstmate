@@ -444,6 +444,28 @@ shell_quote() {
   printf "'"
 }
 
+# replace_all <string> <from> <to>: literal replace of every occurrence.
+# Exists because macOS's system bash 3.2 mis-parses ${var//"$from"/"$to"} when
+# the QUOTED pattern contains a '/': the first slash is taken as the
+# pattern/replacement delimiter even inside quotes, which scrambles the result
+# (verified live - the guest brief's status path came out as
+# 'x.status//mount/x.status/x.status'). '%%'/'#' expansions never treat '/'
+# specially, so peel prefixes instead; correct under bash 3.2 and later alike.
+replace_all() {
+  local s=$1 from=$2 to=$3 out=
+  case "$from" in '') printf '%s' "$s"; return 0 ;; esac
+  while :; do
+    case "$s" in
+      *"$from"*)
+        out="$out${s%%"$from"*}$to"
+        s=${s#*"$from"}
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$out$s"
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -1111,8 +1133,10 @@ if [ "$BACKEND" = sbx ]; then
   # the same file, so the charter's status protocol works verbatim from
   # inside the VM.
   sbx_brief_content=$(cat "$BRIEF")
-  sbx_brief_content=${sbx_brief_content//"$STATE/$ID.status"/"$SIG_DIR/$ID.status"}
-  sbx_brief_content=${sbx_brief_content//"$STATE_REAL/$ID.status"/"$SIG_DIR/$ID.status"}
+  # replace_all, not ${var//...}: the pattern contains slashes, which macOS's
+  # bash 3.2 mis-parses inside a quoted patsub pattern (see the helper).
+  sbx_brief_content=$(replace_all "$sbx_brief_content" "$STATE/$ID.status" "$SIG_DIR/$ID.status")
+  sbx_brief_content=$(replace_all "$sbx_brief_content" "$STATE_REAL/$ID.status" "$SIG_DIR/$ID.status")
   printf '%s\n' "$sbx_brief_content" | fm_backend_sbx_guest_write "$W" "$BRIEF" || {
     echo "error: failed to seed the brief into sandbox $W" >&2
     exit 1
@@ -1134,6 +1158,24 @@ if [ "$BACKEND" = sbx ]; then
       }
       # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
       sbx exec "$W" -- sh -c 'printf "%s\n" ".claude/settings.local.json" >> "$1/.git/info/exclude"' _ "$PROJ_ABS" || true
+      ;;
+    codex*)
+      # codex's directory-trust TUI gate blocks a non-interactive first
+      # launch in a fresh clone-mode home (verified live, codex 0.142.5: the
+      # dialog parks the pane before the brief is read, and
+      # --dangerously-bypass-approvals-and-sandbox does NOT cover it). Seed
+      # the guest config's project-trust entry for the home before launch;
+      # the [projects."<path>"] shape is what codex itself persists on
+      # accept. Idempotent for respawns over a kept sandbox. Hook trust is
+      # deliberately NOT seeded here - its trusted_hash scheme is
+      # codex-internal - so the launch and resume templates carry
+      # --dangerously-bypass-hook-trust instead (bin/backends/sbx.sh).
+      # shellcheck disable=SC2016  # single quotes deliberate: $1/$HOME expand in the guest sh, not here
+      printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PROJ_ABS" \
+        | sbx exec -i "$W" -- sh -c 'mkdir -p "$HOME/.codex" && { grep -qsF "[projects.\"$1\"]" "$HOME/.codex/config.toml" || cat >> "$HOME/.codex/config.toml"; }' _ "$PROJ_ABS" || {
+        echo "error: failed to seed codex project trust in sandbox $W" >&2
+        exit 1
+      }
       ;;
   esac
 fi

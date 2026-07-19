@@ -135,10 +135,18 @@ test_claude_spawn_wires_signal_bridge() {
 
   brief_copy=$(guest_write_file "$w" "$w/sm/data/charter.md")
   [ -f "$brief_copy" ] || fail "the brief should have been seeded into the guest at its own path"
-  assert_contains "$(cat "$brief_copy")" "$sig/smx.status" \
-    "the guest brief's status path must point at the mount file"
+  # Exact-line assert, not a bare substring: macOS's bash 3.2 patsub bug
+  # scrambled the rewrite into 'smx.status//<mount>/smx.status/smx.status',
+  # which still CONTAINED the mount path as a substring and slipped past the
+  # original looser assertion (found live; see fm-spawn.sh's replace_all).
+  assert_contains "$(cat "$brief_copy")" ">> '$sig/smx.status'" \
+    "the guest brief's status path must be rewritten to the mount file INTACT"
   assert_not_contains "$(cat "$brief_copy")" "$w/home/state/smx.status" \
     "the guest brief must not name the primary's state path (unreachable from the VM)"
+  assert_not_contains "$(cat "$brief_copy")" "smx.status//" \
+    "the rewrite must not scramble the path (bash-3.2 quoted-patsub regression shape)"
+  [ ! -e "$w/guest-writes/codex-config.toml" ] \
+    || fail "a claude spawn must not seed codex project trust"
 
   hook_copy=$(guest_write_file "$w" "$w/sm/.claude/settings.local.json")
   [ -f "$hook_copy" ] || fail "claude's Stop hook should have been written into the guest clone"
@@ -163,9 +171,34 @@ test_codex_launch_carries_mount_notify() {
     "the codex launch should carry the notify= turn-end hook"
   assert_contains "$(cat "$w/sbx.log")" "touch '$sig/smx.turn-ended' '$sig/smx.beat'" \
     "codex's notify hook must touch the mount's turn-ended AND beat files"
+  assert_contains "$(cat "$w/sbx.log")" "--dangerously-bypass-hook-trust" \
+    "the codex launch must bypass the hook-trust TUI gate (no one is in the pane to answer it)"
   [ ! -e "$(guest_write_file "$w" "$w/sm/.claude/settings.local.json")" ] \
     || fail "a codex spawn must not install a claude hook file"
-  pass "spawn: codex sbx secondmate's launch carries the mount-path notify hook"
+  [ -f "$w/guest-writes/codex-config.toml" ] \
+    || fail "a codex spawn must seed the guest's project-trust config (the directory-trust dialog blocks the launch otherwise)"
+  assert_contains "$(cat "$w/guest-writes/codex-config.toml")" "[projects.\"$w/sm\"]" \
+    "the seeded trust entry must name the secondmate home"
+  assert_contains "$(cat "$w/guest-writes/codex-config.toml")" 'trust_level = "trusted"' \
+    "the seeded trust entry must mark the home trusted"
+  pass "spawn: codex sbx secondmate's launch carries the mount-path notify hook, hook-trust bypass, and seeded project trust"
+}
+
+test_refuses_worktree_home() {
+  local w fb out rc=0
+  w=$(new_world refuse-worktree); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # A linked git worktree's .git is a FILE (gitdir pointer). sbx clone mode
+  # refuses that shape, so the spawn must refuse it first, before any sandbox
+  # or signal wiring exists.
+  printf 'gitdir: /somewhere/.git/worktrees/sm\n' > "$w/sm/.git"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an sbx spawn over a linked-worktree home must be refused"
+  assert_contains "$out" "plain-clone home" \
+    "the refusal should state the plain-clone requirement"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the refusal must land before any sandbox is created"
+  pass "spawn: a linked-worktree home is refused before sandbox creation"
 }
 
 test_preexisting_status_history_is_folded() {
@@ -187,6 +220,7 @@ test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
 test_claude_spawn_wires_signal_bridge
 test_codex_launch_carries_mount_notify
+test_refuses_worktree_home
 test_preexisting_status_history_is_folded
 
 echo "# all fm-spawn-sbx tests passed"

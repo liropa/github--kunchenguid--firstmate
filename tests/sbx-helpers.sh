@@ -22,6 +22,10 @@
 #   FM_FAKE_SBX_WRITE_DIR    when set, `exec -i ... sh -c 'mkdir ... cat > ...'`
 #                            captures stdin to <dir>/<guest-path with / -> _>
 #   FM_FAKE_SBX_CAPTURE      file `exec ... tmux capture-pane` prints
+#   FM_FAKE_SBX_FG           what `exec ... tmux display-message` prints as the
+#                            pane's foreground process (default codex; set to
+#                            bash to simulate a resume that died back to the
+#                            guest shell)
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -69,6 +73,21 @@ case "$cmd" in
         [ -n "${FM_FAKE_SBX_CAPTURE:-}" ] && cat "$FM_FAKE_SBX_CAPTURE"
         exit 0
         ;;
+      "tmux display-message"*)
+        printf '%s\n' "${FM_FAKE_SBX_FG:-codex}"
+        exit 0
+        ;;
+      "sh -c mkdir -p"*"cat >> "*)
+        # fm-spawn's codex project-trust seed appends to the guest's
+        # ~/.codex/config.toml; capture it under a fixed key so tests can
+        # assert the seeded content.
+        if [ "$interactive" = 1 ] && [ -n "${FM_FAKE_SBX_WRITE_DIR:-}" ]; then
+          cat >> "$FM_FAKE_SBX_WRITE_DIR/codex-config.toml"
+        else
+          cat > /dev/null 2>/dev/null || true
+        fi
+        exit 0
+        ;;
       "sh -c mkdir -p"*"cat > "*)
         # fm_backend_sbx_guest_write: last argv word is the guest path.
         if [ "$interactive" = 1 ] && [ -n "${FM_FAKE_SBX_WRITE_DIR:-}" ]; then
@@ -80,6 +99,7 @@ case "$cmd" in
         exit 0
         ;;
       *)
+        [ "$interactive" = 1 ] && { cat > /dev/null 2>/dev/null || true; }
         exit 0
         ;;
     esac
