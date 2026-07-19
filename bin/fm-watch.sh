@@ -94,12 +94,19 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # appended to that garbage. Arithmetic under `set -u` then aborts on the stray
 # token (e.g. the word "File" read as an unset variable), which silently kills the
 # watcher mid-cycle. Detect the platform once and pick the right form.
+# -L (follow symlinks) is LOAD-BEARING on the BSD arm: sbx secondmates' signal
+# files are state/ SYMLINKS onto the signal-bridge mount, and BSD stat without
+# -L reports the link itself - whose size (the target path string) and mtime
+# (spawn time) never change - so every signal after the first would be
+# invisible on macOS (verified live: the .seen marker froze at the link's
+# signature and later guest writes never woke the watcher). GNU stat already
+# follows by default; -L keeps both arms explicit and identical.
 if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
+  stat_mtime() { stat -L -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_sig()   { stat -L -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
 else
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
+  stat_mtime() { stat -L -c %Y "$1" 2>/dev/null; }
+  stat_sig()   { stat -L -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
