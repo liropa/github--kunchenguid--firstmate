@@ -209,10 +209,12 @@ test_send_resurrects_dead_guest_stack() {
   log=$(cat "$w/sbx.log")
   assert_contains "$log" "tmux new-session -d -s fm -n fm-x -c /sm/home" \
     "resurrection must rebuild the guest tmux session at the recorded home"
-  assert_contains "$log" "codex resume --last --dangerously-bypass-approvals-and-sandbox" \
-    "resurrection must relaunch the agent in its harness's RESUME mode"
-  assert_contains "$log" "touch $w/signals/x/x.turn-ended $w/signals/x/x.beat" \
-    "the resumed codex launch must re-wire the turn-end hook at the mount's turn-ended AND beat"
+  assert_contains "$log" "codex resume --last --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" \
+    "resurrection must relaunch the agent in RESUME mode with codex's hook-trust TUI gate bypassed"
+  assert_contains "$log" "touch '$w/signals/x/x.turn-ended' '$w/signals/x/x.beat'" \
+    "the resumed codex launch must re-wire the turn-end hook at the mount's turn-ended AND beat, shell-quoted"
+  assert_contains "$log" 'notify=[\"bash\",\"-c\",\"touch ' \
+    "the notify JSON's escaped quotes must reach the guest intact (bash printf formats eat them)"
   assert_contains "$log" "send-keys -t fm:fm-x steer text Enter" \
     "the original steer must still be delivered after resurrection"
   # Rebuild strictly before delivery.
@@ -221,6 +223,40 @@ test_send_resurrects_dead_guest_stack() {
     || fail "resurrection must complete before the steer is delivered"
 
   pass "send path: dead guest stack is resurrected (tmux + resume relaunch) before delivery"
+}
+
+test_resume_template_quoting() {
+  local w fb out
+  w=$(new_sbx_world resume-quote); fb=$(make_fake_sbx "$w")
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_resume_template codex /sig/x.turn-ended /sig/x.beat')
+  assert_contains "$out" 'codex resume --last' \
+    "codex resurrection must resume the most recent session"
+  assert_contains "$out" '--dangerously-bypass-hook-trust' \
+    "codex resume must bypass the hook-trust TUI gate (no one is in the pane to answer it)"
+  assert_contains "$out" 'notify=[\"bash\",\"-c\",\"touch '\''/sig/x.turn-ended'\'' '\''/sig/x.beat'\''\"]' \
+    "the notify JSON's escaped quotes and shell-quoted paths must survive template construction (bash printf formats eat \\\" - verified live)"
+  pass "fm_backend_sbx_resume_template: notify quoting intact, paths shell-quoted, hook trust bypassed"
+}
+
+test_resurrection_refuses_dead_pane_delivery() {
+  local w fb
+  w=$(new_sbx_world resurrect-dead); fb=$(make_fake_sbx "$w")
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # The resume died back to the guest shell (FG=bash). Delivering there would
+  # EXECUTE the steer text as a shell command on the guest (observed live
+  # before the foreground check existed).
+  if run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 FM_FAKE_SBX_FG=bash 2>/dev/null; then
+    fail "a resurrection whose pane stays on the guest shell must fail, not deliver"
+  fi
+  assert_not_contains "$(cat "$w/sbx.log")" "steer text" \
+    "the steer text must never be typed into a dead (shell) pane"
+  pass "send path: a failed resume (pane still a shell) is refused loudly, nothing delivered"
 }
 
 test_send_skips_resurrection_when_stack_alive() {
@@ -368,6 +404,8 @@ test_agent_alive_dispatcher_routes_sbx
 test_target_exists_never_execs
 test_capture_gated_on_running
 test_send_resurrects_dead_guest_stack
+test_resume_template_quoting
+test_resurrection_refuses_dead_pane_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
 test_sweep_leaves_stopped_secondmate_untouched

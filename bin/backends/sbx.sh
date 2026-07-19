@@ -57,6 +57,16 @@ fm_backend_sbx_state_dir() {
   printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 }
 
+# fm_backend_sbx_shell_quote: single-quote <s> for a guest shell command line
+# (same form as fm-spawn.sh's shell_quote; duplicated here because the adapter
+# is sourced standalone by fm-send/fm-crew-state, where fm-spawn's helpers are
+# out of scope).
+fm_backend_sbx_shell_quote() {  # <s>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 # fm_backend_sbx_name_of_target: `sbx:<name>` -> `<name>`. A bare name (no
 # prefix) passes through, defensively.
 fm_backend_sbx_name_of_target() {  # <target>
@@ -239,11 +249,18 @@ fm_backend_sbx_agent_for_harness() {  # <harness>
 # Stop hook written into the guest clone by fm-spawn (it cannot ride the
 # launch command); codex's rides `-c notify=[...]`, touching turn-ended AND
 # beat in one hook - both files, every turn boundary (design §6.1).
+# codex additionally carries --dangerously-bypass-hook-trust (verified live,
+# codex 0.142.5): the home clone ships .codex/hooks.json, and codex's
+# hook-trust TUI gate would otherwise park the launch on a dialog no one is
+# there to answer. Its trusted_hash scheme is codex-internal, so the trust
+# cannot be pre-seeded the way fm-spawn seeds directory trust; the bypass
+# flag is codex's own escape hatch for automation whose hook sources are
+# already vetted - here, the home clone this same spawn just provisioned.
 fm_backend_sbx_launch_template() {  # <harness>
   # shellcheck disable=SC2016  # single quotes deliberate: $(cat ...) expands in the guest pane
   case "$1" in
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
-    codex)  printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__ __BEAT__\"]" "$(cat __BRIEF__)"' ;;
+    codex)  printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__ __BEAT__\"]" "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -254,10 +271,23 @@ fm_backend_sbx_launch_template() {  # <harness>
 # survives in the clone's .claude/settings.local.json, so resume needs no
 # re-wiring; codex's notify= must be re-supplied on the resume command.
 fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
-  local harness=$1 turnend=$2 beat=$3
+  local harness=$1 turnend=$2 beat=$3 cmd
   case "$harness" in
     claude) printf '%s' 'claude --continue --dangerously-skip-permissions' ;;
-    codex)  printf 'codex resume --last --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch %s %s\"]"' "$turnend" "$beat" ;;
+    codex)
+      # Built by placeholder substitution into a single-quoted literal, with
+      # the signal paths shell-quoted - never via a printf FORMAT string:
+      # bash's printf rewrites \" escapes inside the format, which strips the
+      # notify JSON's quoting; the guest shell then word-splits the paths
+      # into phantom positional args, which `codex resume --last` rejects
+      # ("--last cannot be used with '[PROMPT]'", verified live). The launch
+      # template passes its string as a %s argument for the same reason.
+      # shellcheck disable=SC2016  # single quotes deliberate: the notify JSON must reach the guest verbatim
+      cmd='codex resume --last --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__ __BEAT__\"]"'
+      cmd=${cmd/__TURNEND__/$(fm_backend_sbx_shell_quote "$turnend")}
+      cmd=${cmd/__BEAT__/$(fm_backend_sbx_shell_quote "$beat")}
+      printf '%s' "$cmd"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -284,7 +314,7 @@ fm_backend_sbx_guest_tmux_ready() {  # <name>
 # back on VM start; the resumed agent restarts them on demand - its brief owns
 # that knowledge, not this transport.
 fm_backend_sbx_ensure_stack() {  # <target>
-  local target=$1 name id meta harness home turnend beat resume
+  local target=$1 name id meta harness home turnend beat resume fg
   name=$(fm_backend_sbx_name_of_target "$target")
   case "$(fm_backend_sbx_state "$name")" in
     running|stopped) ;;
@@ -314,6 +344,20 @@ fm_backend_sbx_ensure_stack() {  # <target>
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$resume" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter || return 1
   sleep "$FM_SBX_RESURRECT_SETTLE"
+  # A resume that dies (bad flags, missing session) drops the pane back to
+  # the guest shell, and "delivering" the caller's message there would
+  # EXECUTE it as a shell command on the guest (observed live before this
+  # check existed). One cheap foreground-process read separates the two: a
+  # shell name (or an unreadable pane) means the harness never took the
+  # pane, so fail loudly and deliver nothing. Rebuild-path only - the
+  # tmux-ready fast path above keeps v1's documented no-read-back posture.
+  fg=$(sbx exec "$name" -- tmux display-message -p -t "$(fm_backend_sbx_guest_tmux_target "$name")" '#{pane_current_command}' 2>/dev/null) || fg=
+  case "$fg" in
+    ''|bash|sh|dash|zsh|ash)
+      echo "error: resurrection of $name did not bring harness '$harness' up (pane foreground: ${fg:-unreadable}); refusing to deliver into a dead pane" >&2
+      return 1
+      ;;
+  esac
   return 0
 }
 
@@ -367,6 +411,15 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1
+  # sbx clone mode refuses linked git worktrees outright ("--clone is not
+  # supported when run from a Git worktree", verified live) - and secondmate
+  # homes can be exactly that (treehouse-leased homes). Refuse first with the
+  # fm-side rule: an sbx secondmate home must be a PLAIN clone (fm-home-seed's
+  # git-clone path), never a linked worktree whose .git is a file.
+  if [ -f "$home_abs/.git" ]; then
+    echo "error: home $home_abs is a linked git worktree (.git is a file); sbx clone mode needs a plain-clone home - seed one with fm-home-seed.sh <id> <path> instead of a treehouse lease (docs/sbx-backend.md)" >&2
+    return 1
+  fi
   if [ "$(fm_backend_sbx_state "$name")" != absent ]; then
     echo "error: sandbox $name already exists (or sbx state is unreadable); refusing to create over it" >&2
     return 1
