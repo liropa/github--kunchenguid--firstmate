@@ -46,6 +46,7 @@ run_adapter() {
   PATH="$fakebin:$BASE_PATH" \
     FM_FAKE_SBX_LOG="$world/sbx.log" FM_FAKE_SBX_LS_FILE="$world/ls.json" \
     FM_SBX_SIGNALS_ROOT="$world/signals" FM_SBX_RESURRECT_SETTLE=0 \
+    FM_SBX_RESURRECT_READY_TRIES=0 \
     env "$@" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source sbx; '"$snippet" "$ROOT"
 }
 
@@ -238,6 +239,34 @@ test_resume_template_quoting() {
   pass "fm_backend_sbx_resume_template: notify quoting intact, paths shell-quoted, hook trust bypassed"
 }
 
+test_resurrection_waits_for_stable_pane() {
+  local w fb log resume_line ready_line steer_line
+  w=$(new_sbx_world resurrect-ready); fb=$(make_fake_sbx "$w")
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf 'restored transcript\n' > "$w/pane.txt"
+  : > "$w/sbx.log"
+  # A resumed TUI drops keys while it redraws (observed live): delivery must
+  # wait for pane stability - the ready poll's capture-pane reads land
+  # between the resume relaunch and the steer.
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_CAPTURE="$w/pane.txt" FM_SBX_RESURRECT_READY_TRIES=3 \
+    || fail "a steer with the ready poll enabled should still succeed"
+  log=$(cat "$w/sbx.log")
+  assert_contains "$log" "tmux capture-pane" \
+    "the ready poll must read the pane before delivering"
+  resume_line=$(grep -n 'codex resume' "$w/sbx.log" | head -1 | cut -d: -f1)
+  ready_line=$(grep -n 'capture-pane' "$w/sbx.log" | head -1 | cut -d: -f1)
+  steer_line=$(grep -n 'steer text' "$w/sbx.log" | head -1 | cut -d: -f1)
+  [ "$resume_line" -lt "$ready_line" ] && [ "$ready_line" -lt "$steer_line" ] \
+    || fail "the ready poll must run after the resume relaunch and before delivery"
+  pass "send path: resurrection waits for a stable pane before delivering the steer"
+}
+
 test_resurrection_refuses_dead_pane_delivery() {
   local w fb
   w=$(new_sbx_world resurrect-dead); fb=$(make_fake_sbx "$w")
@@ -405,6 +434,7 @@ test_target_exists_never_execs
 test_capture_gated_on_running
 test_send_resurrects_dead_guest_stack
 test_resume_template_quoting
+test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
