@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# tests/fm-backend-sbx.test.sh - the sbx (Docker Sandboxes) backend adapter:
+# bin/backends/sbx.sh's state probe, the three-valued agent-liveness mapping,
+# state-gated capture, the steering resurrection sequence, and
+# bin/fm-bootstrap.sh's secondmate_liveness_sweep acting on sbx verdicts.
+#
+# The guarantees under test (agent-dotfiles design doc
+# firstmate-sbx-secondmate-event-bridge.md §7.3/§8; docs/sbx-backend.md):
+#   - fm_backend_sbx_state distinguishes running/stopped/ABSENT (a parse-clean
+#     inventory positively lacking the name) from ERROR (CLI failure, bad
+#     JSON, unrecognized status vocabulary).
+#   - fm_backend_sbx_agent_alive maps: fresh beat -> alive with NO sbx CLI
+#     call; running -> alive; stopped -> alive (idle-resumable - respawning
+#     would destroy intact VM state); absent -> dead; error -> unknown, NEVER
+#     dead (a transient CLI hiccup must not trigger a duplicate-supervisor
+#     respawn).
+#   - Probe-shaped reads (target_exists, capture) never `sbx exec`, because
+#     exec AUTO-STARTS a stopped sandbox; capture is refused outright unless
+#     the sandbox is already running.
+#   - The send path owns resurrection: a running-but-no-tmux guest (the
+#     post-auto-stop state) is rebuilt - tmux session at the recorded home,
+#     agent relaunched with its harness's RESUME command - before delivery.
+#   - The session-start liveness sweep respawns an sbx secondmate only on
+#     confirmed-absent, leaves running/stopped untouched, and reports an
+#     inconclusive probe as skipped without acting.
+set -u
+
+# shellcheck source=tests/sbx-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; exit 0; }
+
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+fm_git_identity fmtest fmtest@example.com
+
+TMP_ROOT=$(fm_test_tmproot fm-backend-sbx)
+
+# run_adapter <fakebin> <world> <snippet> [env k=v...]: run <snippet> in a bash
+# that sourced fm-backend.sh + the sbx adapter, with the fake sbx first in
+# PATH and the world's log/ls-file/signals-root wired. Echoes the snippet's
+# stdout.
+run_adapter() {
+  local fakebin=$1 world=$2 snippet=$3
+  shift 3
+  # shellcheck disable=SC2016  # single quotes deliberate: $0 expands in the inner bash
+  PATH="$fakebin:$BASE_PATH" \
+    FM_FAKE_SBX_LOG="$world/sbx.log" FM_FAKE_SBX_LS_FILE="$world/ls.json" \
+    FM_SBX_SIGNALS_ROOT="$world/signals" FM_SBX_RESURRECT_SETTLE=0 \
+    env "$@" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source sbx; '"$snippet" "$ROOT"
+}
+
+new_sbx_world() {  # <name>
+  local w="$TMP_ROOT/$1"
+  mkdir -p "$w/signals" "$w/state"
+  : > "$w/sbx.log"
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  printf '%s\n' "$w"
+}
+
+# --- unit level: fm_backend_sbx_state ---------------------------------------
+
+test_state_probe_classifies() {
+  local w fb out
+  w=$(new_sbx_world state-probe); fb=$(make_fake_sbx "$w")
+
+  sbx_ls_json fm-x running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = running ] || fail "a listed running sandbox should read running, got '$out'"
+
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = stopped ] || fail "a listed stopped sandbox should read stopped, got '$out'"
+
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = absent ] || fail "a parse-clean inventory lacking the name should read ABSENT, got '$out'"
+
+  sbx_ls_json fm-other running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = absent ] || fail "another sandbox's entry must not mask this name's absence, got '$out'"
+
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x' FM_FAKE_SBX_LS_RC=1)
+  [ "$out" = error ] || fail "a failing sbx CLI should read ERROR, never absent, got '$out'"
+
+  printf 'not json at all\n' > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = error ] || fail "unparseable ls output should read ERROR, never absent, got '$out'"
+
+  sbx_ls_json fm-x hibernating > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = error ] || fail "an unrecognized status vocabulary should read ERROR (ambiguous), got '$out'"
+
+  pass "fm_backend_sbx_state: running/stopped/absent vs error classification"
+}
+
+# --- unit level: fm_backend_sbx_agent_alive ---------------------------------
+
+test_agent_alive_matrix() {
+  local w fb out
+  w=$(new_sbx_world alive-matrix); fb=$(make_fake_sbx "$w")
+
+  # Fresh beat: alive from one host stat, with NO sbx CLI call at all.
+  mkdir -p "$w/signals/x"
+  touch "$w/signals/x/x.beat"
+  : > "$w/sbx.log"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x')
+  [ "$out" = alive ] || fail "a fresh beat should read alive, got '$out'"
+  [ ! -s "$w/sbx.log" ] || fail "a fresh-beat verdict must not spend any sbx CLI call: $(cat "$w/sbx.log")"
+
+  # Stale beat falls through to the state probe.
+  touch -t 202001010000 "$w/signals/x/x.beat"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x')
+  [ "$out" = alive ] || fail "stale beat + running should read alive, got '$out'"
+
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x')
+  [ "$out" = alive ] || fail "an idle-STOPPED sandbox is resumable and must read alive (a respawn would destroy intact state), got '$out'"
+
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x')
+  [ "$out" = dead ] || fail "a confirmed-absent sandbox should read dead, got '$out'"
+
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x' FM_FAKE_SBX_LS_RC=1)
+  [ "$out" = unknown ] || fail "a CLI error must read UNKNOWN, never dead (false-dead -> duplicate supervisor), got '$out'"
+
+  sbx_ls_json fm-x hibernating > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:fm-x')
+  [ "$out" = unknown ] || fail "an ambiguous status must read UNKNOWN, never dead, got '$out'"
+
+  # A non-fm-* sandbox name has no derivable task id: no beat probe, still a
+  # correct state-based verdict.
+  sbx_ls_json custom running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_alive sbx:custom')
+  [ "$out" = alive ] || fail "a non-fm-* name should still classify from state, got '$out'"
+
+  pass "fm_backend_sbx_agent_alive: beat/running/stopped/absent/error -> alive/alive/alive/dead/unknown"
+}
+
+test_agent_alive_dispatcher_routes_sbx() {
+  local w fb out
+  w=$(new_sbx_world dispatch); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_agent_alive sbx sbx:fm-x')
+  [ "$out" = alive ] || fail "the generic dispatcher should route sbx to fm_backend_sbx_agent_alive, got '$out'"
+  pass "fm_backend_agent_alive: routes sbx to the adapter"
+}
+
+# --- probe reads never exec (auto-start protection) -------------------------
+
+test_target_exists_never_execs() {
+  local w fb
+  w=$(new_sbx_world exists); fb=$(make_fake_sbx "$w")
+
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_target_exists sbx sbx:fm-x' \
+    || fail "a stopped sandbox is a PRESENT (resumable) endpoint"
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "the presence probe must never sbx exec (exec auto-starts a stopped sandbox)"
+
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  if run_adapter "$fb" "$w" 'fm_backend_target_exists sbx sbx:fm-x'; then
+    fail "an absent sandbox must not read as present"
+  fi
+
+  pass "fm_backend_target_exists: state-probe only, stopped is present, no exec"
+}
+
+test_capture_gated_on_running() {
+  local w fb out
+  w=$(new_sbx_world capture); fb=$(make_fake_sbx "$w")
+
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  : > "$w/sbx.log"
+  if run_adapter "$fb" "$w" 'fm_backend_sbx_capture sbx:fm-x 40'; then
+    fail "capture of a STOPPED sandbox must be refused (exec would auto-start it)"
+  fi
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "a refused capture must not have exec'd (that would have auto-started the VM)"
+
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf 'guest pane text\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_capture sbx:fm-x 40' FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+  [ "$out" = "guest pane text" ] || fail "a running sandbox's capture should read the guest pane, got '$out'"
+  assert_contains "$(cat "$w/sbx.log")" "tmux capture-pane -p -t fm:fm-x -S -40" \
+    "capture should target the in-guest tmux pane with the bounded tail"
+
+  pass "fm_backend_sbx_capture: refused while stopped, guest tmux capture while running"
+}
+
+# --- steering: resurrection sequence (design §8.3) --------------------------
+
+test_send_resurrects_dead_guest_stack() {
+  local w fb log
+  w=$(new_sbx_world resurrect); fb=$(make_fake_sbx "$w")
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+
+  # Post-auto-stop shape: the sandbox reads running once exec'd, but the guest
+  # tmux server is gone (has-session fails).
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  log=$(cat "$w/sbx.log")
+  assert_contains "$log" "tmux new-session -d -s fm -n fm-x -c /sm/home" \
+    "resurrection must rebuild the guest tmux session at the recorded home"
+  assert_contains "$log" "codex resume --last --dangerously-bypass-approvals-and-sandbox" \
+    "resurrection must relaunch the agent in its harness's RESUME mode"
+  assert_contains "$log" "touch $w/signals/x/x.turn-ended $w/signals/x/x.beat" \
+    "the resumed codex launch must re-wire the turn-end hook at the mount's turn-ended AND beat"
+  assert_contains "$log" "send-keys -t fm:fm-x steer text Enter" \
+    "the original steer must still be delivered after resurrection"
+  # Rebuild strictly before delivery.
+  [ "$(grep -n 'new-session' "$w/sbx.log" | head -1 | cut -d: -f1)" \
+    -lt "$(grep -n 'steer text' "$w/sbx.log" | head -1 | cut -d: -f1)" ] \
+    || fail "resurrection must complete before the steer is delivered"
+
+  pass "send path: dead guest stack is resurrected (tmux + resume relaunch) before delivery"
+}
+
+test_send_skips_resurrection_when_stack_alive() {
+  local w fb
+  w=$(new_sbx_world no-resurrect); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=0 \
+    || fail "a steer of a live stack should succeed"
+  assert_not_contains "$(cat "$w/sbx.log")" "new-session" \
+    "a live guest stack must never be rebuilt (that would clobber the running agent)"
+  pass "send path: a live guest stack is delivered to directly, never rebuilt"
+}
+
+test_send_refuses_absent_sandbox() {
+  local w fb
+  w=$(new_sbx_world send-absent); fb=$(make_fake_sbx "$w")
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  : > "$w/sbx.log"
+  if run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" 2>/dev/null; then
+    fail "steering a confirmed-absent sandbox must fail loudly"
+  fi
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "an absent sandbox must not be exec'd"
+  pass "send path: a confirmed-absent sandbox is refused, not exec'd"
+}
+
+# --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
+
+# make_toolchain <dir>: the fixed stub set bin/fm-bootstrap.sh's read-only
+# diagnostics need to stay quiet (mirrors tests/fm-secondmate-liveness.test.sh's
+# make_toolchain - duplication between suites is this repo's accepted pattern).
+make_toolchain() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir/toolchain")
+  fm_fake_exit0 "$fakebin" node gh gh-axi chrome-devtools-axi lavish-axi quota-axi tmux
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease]'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.1.1' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  printf '%s\n' "$fakebin"
+}
+
+# new_sweep_world <name>: a scratch primary home with one sbx secondmate meta
+# (sm1, harness=codex so the respawn's launch template resolves without config
+# lookups beyond crew-harness) plus a seeded secondmate home dir.
+new_sweep_world() {
+  local name=$1 w home
+  w=$(new_sbx_world "$name")
+  mkdir -p "$w/home/state" "$w/home/config" "$w/home/data"
+  touch "$w/home/state/.last-watcher-beat"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  home="$w/sm1"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'sm1\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  fm_write_meta "$w/home/state/sm1.meta" \
+    "window=sbx:fm-sm1" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "projects=alpha" "sbx_signals_dir=$w/signals/sm1"
+  printf '%s\n' "$w"
+}
+
+run_sweep() {  # <world> <fakebin> <toolchain> [env k=v...] -> stdout+stderr
+  local w=$1 fb=$2 tc=$3
+  shift 3
+  PATH="$fb:$tc:$BASE_PATH" TMUX='' FM_BACKEND=sbx FM_HOME="$w/home" \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" FM_SBX_RESURRECT_SETTLE=0 \
+    env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_sweep_leaves_stopped_secondmate_untouched() {
+  local w fb tc out
+  w=$(new_sweep_world sweep-stopped); fb=$(make_fake_sbx "$w"); tc=$(make_toolchain "$w")
+  sbx_ls_json fm-sm1 stopped > "$w/ls.json"
+  : > "$w/sbx.log"
+  out=$(run_sweep "$w" "$fb" "$tc")
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "a stopped (idle-resumable) secondmate is healthy and must be silent"
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "a stopped secondmate must never be removed"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "a stopped secondmate must never be respawned"
+  pass "sweep: a stopped sbx secondmate is left untouched (no rm, no respawn)"
+}
+
+test_sweep_never_acts_on_probe_error() {
+  local w fb tc out
+  w=$(new_sweep_world sweep-error); fb=$(make_fake_sbx "$w"); tc=$(make_toolchain "$w")
+  : > "$w/sbx.log"
+  out=$(run_sweep "$w" "$fb" "$tc" FM_FAKE_SBX_LS_RC=1)
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: liveness probe inconclusive (backend=sbx)" \
+    "an inconclusive sbx probe should be reported as skipped"
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "an inconclusive reading must NEVER remove the sandbox (would risk a duplicate agent)"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "an inconclusive reading must NEVER respawn"
+  pass "sweep: an sbx CLI error is reported but never acted on"
+}
+
+test_sweep_respawns_confirmed_absent_secondmate() {
+  local w fb tc out
+  w=$(new_sweep_world sweep-absent); fb=$(make_fake_sbx "$w"); tc=$(make_toolchain "$w")
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  : > "$w/sbx.log"
+  out=$(run_sweep "$w" "$fb" "$tc" \
+    FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-sm1 running)")
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed" \
+    "the respawn of a confirmed-absent secondmate should succeed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-sm1 codex" \
+    "a confirmed-absent secondmate should be re-provisioned through the sbx spawn branch"
+  pass "sweep: a confirmed-absent sbx secondmate is respawned"
+}
+
+test_state_probe_classifies
+test_agent_alive_matrix
+test_agent_alive_dispatcher_routes_sbx
+test_target_exists_never_execs
+test_capture_gated_on_running
+test_send_resurrects_dead_guest_stack
+test_send_skips_resurrection_when_stack_alive
+test_send_refuses_absent_sandbox
+test_sweep_leaves_stopped_secondmate_untouched
+test_sweep_never_acts_on_probe_error
+test_sweep_respawns_confirmed_absent_secondmate
+
+echo "# all fm-backend-sbx tests passed"

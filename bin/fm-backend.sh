@@ -65,9 +65,13 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# sbx is EXPERIMENTAL and secondmate-only: each task is a clone-mode Docker
+# Sandbox microVM supervised through a bind-mounted signal directory instead
+# of pane polling (docs/sbx-backend.md; fm-spawn.sh refuses ship/scout sbx
+# spawns, so spawn-capable here means secondmate spawns).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux sbx"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux sbx"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -315,6 +319,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    sbx)    printf '%s' 'sbx jq' ;;
     *) return 1 ;;
   esac
 }
@@ -457,6 +462,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    sbx)
+      if [ -z "${_FM_BACKEND_SBX_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/sbx.sh
+        . "$FM_BACKEND_LIB_DIR/backends/sbx.sh" || return 1
+        _FM_BACKEND_SBX_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -528,6 +540,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    sbx) fm_backend_sbx_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -543,6 +556,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    sbx) fm_backend_sbx_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -560,6 +574,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    sbx) fm_backend_sbx_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -577,6 +592,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    sbx) fm_backend_sbx_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -688,6 +704,14 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    sbx)
+      # State-probe based, never `sbx exec` (exec auto-starts a stopped
+      # sandbox; a passive presence read must not churn an idle VM). A
+      # stopped sandbox is PRESENT: its disk state is intact and it resumes
+      # on the next steer (docs/sbx-backend.md).
+      fm_backend_source sbx || return 1
+      fm_backend_sbx_target_present "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -706,11 +730,14 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
 # Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
+# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe"),
 # herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# classifier"), and sbx (docs/sbx-backend.md - beat-file freshness plus the
+# sandbox state probe; `stopped` is ALIVE because sbx auto-stops idle VMs and
+# their disk state resumes intact). zellij, orca, and cmux report unknown
+# until independently verified - future work, not a functional gap for the
+# backends --secondmate spawns actually support today plus tmux's reference
+# path.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
@@ -721,6 +748,7 @@ fm_backend_agent_alive() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
+    sbx) fm_backend_sbx_agent_alive "$target" ;;
     *) printf 'unknown' ;;
   esac
 }

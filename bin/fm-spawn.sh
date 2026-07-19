@@ -24,6 +24,12 @@
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   sbx is EXPERIMENTAL and SECONDMATE-ONLY (never auto-detected): the
+#   secondmate runs inside a clone-mode Docker Sandbox microVM and is
+#   supervised through a bind-mounted signal directory (state/<id>.status and
+#   state/<id>.turn-ended become host symlinks onto it); supported harnesses
+#   are claude and codex, and ship/scout sbx spawns are refused
+#   (docs/sbx-backend.md).
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -84,7 +90,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -184,6 +190,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
 fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+  exit 1
+fi
+if [ "$BACKEND" = sbx ] && [ "$KIND" != secondmate ]; then
+  # sbx is secondmate-only by design: crewmate/scout tasks live in treehouse
+  # worktrees supervised through host panes, while an sbx task is a whole
+  # microVM supervised through the signal bridge (docs/sbx-backend.md).
+  echo "error: backend=sbx only supports --secondmate spawns" >&2
   exit 1
 fi
 if [ "$BACKEND" = orca ]; then
@@ -765,6 +778,35 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  sbx)
+    # One clone-mode microVM per secondmate (docs/sbx-backend.md; the sbx
+    # backend is secondmate-only, enforced above). The signal-bridge mount is
+    # created HERE, at provision, so `sbx create` can bind it read-write at
+    # the same absolute path in the guest; state/<id>.status and
+    # state/<id>.turn-ended become host-side symlinks onto it below, which is
+    # what keeps fm-watch.sh's scan_signals byte-for-byte unchanged for sbx
+    # secondmates. fm_backend_sbx_create_task refuses harnesses without a
+    # verified sbx launch+resume shape (claude|codex) BEFORE creating
+    # anything, so meta can only ever record an in-VM harness the liveness
+    # sweep's verified list accepts.
+    SIG_DIR="$FM_SBX_SIGNALS_ROOT/$ID"
+    fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR" || exit 1
+    T="sbx:$W"
+    # The guest-side launch command lives in the adapter, next to its resume
+    # variant, so resurrection can never drift from spawn (its codex template
+    # carries the notify= turn-end hook that touches the mount's turn-ended
+    # AND beat files). A raw launch command (unverified-adapter escape hatch)
+    # still runs verbatim in the guest pane.
+    case "$ARG3" in
+      *' '*) : ;;
+      *)
+        LAUNCH=$(fm_backend_sbx_launch_template "$HARNESS") || {
+          echo "error: no sbx launch template for harness '$HARNESS'" >&2
+          exit 1
+        }
+        ;;
+    esac
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -804,6 +846,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    sbx) fm_backend_sbx_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -821,6 +864,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    sbx) fm_backend_sbx_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -830,6 +874,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    sbx) fm_backend_sbx_send_key "$1" "$2" ;;
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
@@ -873,6 +918,15 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+FM_SBX_BEAT_PATH=""
+if [ "$BACKEND" = sbx ]; then
+  # The guest's turn-end hook must write onto the signal-bridge mount, not
+  # the primary's state dir (unreachable from inside the VM). The host-side
+  # state/<id>.turn-ended becomes a symlink onto this same mount file below,
+  # so the watcher's scan still reads its usual state/ paths.
+  TURNEND="$SIG_DIR/$ID.turn-ended"
+  FM_SBX_BEAT_PATH="$SIG_DIR/$ID.beat"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1022,6 +1076,9 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  if [ "$BACKEND" = sbx ]; then
+    echo "sbx_signals_dir=$SIG_DIR"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1029,8 +1086,61 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+if [ "$BACKEND" = sbx ]; then
+  # Host-side signal wiring: state/<id>.status and state/<id>.turn-ended
+  # become symlinks onto the signal-bridge mount, so scan_signals, triage,
+  # grace coalescing, and the wake queue run genuinely unchanged - the
+  # symlink set is also the id allowlist (only names the host chose to link
+  # are scan-visible; a guest inventing another id's file changes nothing).
+  # A pre-existing REGULAR signal file (e.g. a host secondmate migrating to
+  # sbx) is folded into the mount file first so its history survives.
+  for sig in status turn-ended; do
+    host_sig="$STATE_REAL/$ID.$sig"
+    mount_sig="$SIG_DIR/$ID.$sig"
+    if [ -e "$host_sig" ] && [ ! -L "$host_sig" ]; then
+      cat "$host_sig" >> "$mount_sig" 2>/dev/null || true
+    fi
+    rm -f "$host_sig"
+    ln -s "$mount_sig" "$host_sig"
+  done
+  # Guest-side private surface: clone mode carries only COMMITTED files, so
+  # the brief (and claude's hook file) must be seeded into the guest
+  # explicitly. The brief copy lands at the SAME absolute path the launch's
+  # `$(cat __BRIEF__)` names, with the primary's status-file path rewritten
+  # to the mount file - the host symlink above makes both names converge on
+  # the same file, so the charter's status protocol works verbatim from
+  # inside the VM.
+  sbx_brief_content=$(cat "$BRIEF")
+  sbx_brief_content=${sbx_brief_content//"$STATE/$ID.status"/"$SIG_DIR/$ID.status"}
+  sbx_brief_content=${sbx_brief_content//"$STATE_REAL/$ID.status"/"$SIG_DIR/$ID.status"}
+  printf '%s\n' "$sbx_brief_content" | fm_backend_sbx_guest_write "$W" "$BRIEF" || {
+    echo "error: failed to seed the brief into sandbox $W" >&2
+    exit 1
+  }
+  # The GOTMPDIR export below lands in the guest pane; create its target
+  # inside the VM (the host-side mkdir above cannot reach the guest's /tmp).
+  sbx exec "$W" -- mkdir -p "$TASK_TMP/gotmp" || true
+  case "$HARNESS" in
+    claude*)
+      # claude's turn-end signal cannot ride the launch command; write its
+      # Stop hook into the guest clone, touching the mount's turn-ended AND
+      # beat files (design §6.1: the beat is the same touch). Kept out of
+      # the clone's git view so the secondmate's own home never reads dirty.
+      printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch %s %s"}]}]}}\n' \
+        "'$TURNEND'" "'$FM_SBX_BEAT_PATH'" \
+        | fm_backend_sbx_guest_write "$W" "$PROJ_ABS/.claude/settings.local.json" || {
+        echo "error: failed to install the claude turn-end hook in sandbox $W" >&2
+        exit 1
+      }
+      # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
+      sbx exec "$W" -- sh -c 'printf "%s\n" ".claude/settings.local.json" >> "$1/.git/info/exclude"' _ "$PROJ_ABS" || true
+      ;;
+  esac
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
+sq_beat=$(shell_quote "${FM_SBX_BEAT_PATH:-}")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
@@ -1040,6 +1150,7 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__BEAT__/$sq_beat}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
