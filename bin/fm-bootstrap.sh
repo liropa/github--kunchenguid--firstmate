@@ -437,6 +437,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    sbx) echo "https://docs.docker.com/ai/sandboxes/" ;;
     *) return 1 ;;
   esac
 }

@@ -138,6 +138,16 @@ EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    sbx)
+      # State probe, never a capture: `sbx exec` auto-starts a stopped
+      # sandbox, so a capture-based readability check would churn an
+      # idle-stopped secondmate's VM on every triage - and its failure would
+      # misread that healthy, resumable endpoint as gone instead of letting
+      # the status-log fallback below classify it (design §7.3). A stopped
+      # sandbox is PRESENT; only confirmed-absent/unreadable fails here.
+      fm_backend_source sbx >/dev/null 2>&1 || return 1
+      fm_backend_sbx_target_present "$1"
+      ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }

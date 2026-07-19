@@ -451,6 +451,29 @@ test_herdr_install_requires_manual_action() {
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
 }
 
+test_sbx_install_requires_manual_action() {
+  local case_dir fakebin out status
+
+  case_dir="$TMP_ROOT/sbx-backend-missing-cli"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' sbx > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_fake_exit0 "$fakebin" jq
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING_MANUAL: sbx (instructions: https://docs.docker.com/ai/sandboxes/)" ] \
+    || fail "backend=sbx should report Docker Sandboxes manual install guidance, got: $out"
+
+  out=$("$ROOT/bin/fm-bootstrap.sh" install sbx 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "install sbx should fail instead of evaluating its manual-install hint"
+  [ "$out" = "error: sbx requires manual installation (instructions: https://docs.docker.com/ai/sandboxes/)" ] \
+    || fail "install sbx should return actionable manual-install guidance, got: $out"
+  pass "bootstrap: sbx manual-install guidance is never executed as a shell command"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -475,7 +498,7 @@ test_unknown_backend_reports_invalid_configuration() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux)" \
+  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux sbx)" \
     "bootstrap should report an unknown resolved backend"
   assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
@@ -517,6 +540,7 @@ SH
 herdr
 zellij
 cmux
+sbx
 ROWS
   pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
@@ -793,6 +817,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_sbx_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
