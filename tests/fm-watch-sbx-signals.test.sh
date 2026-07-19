@@ -76,6 +76,37 @@ test_mount_write_surfaces_through_symlink() {
   pass "a guest mount write surfaces through the state/ symlink; dangling symlinks stay quiescent"
 }
 
+test_second_mount_write_surfaces_again() {
+  # The regression that motivated stat -L (fm-watch.sh): BSD stat without -L
+  # signs the SYMLINK itself - target-path length as size, spawn time as
+  # mtime, both immutable - so the first surfaced wake froze the .seen
+  # marker at that signature forever and every later guest write was
+  # invisible on macOS (found live: a resumed secondmate's done: line never
+  # woke the watcher). A second append through the same symlink must fire a
+  # second wake.
+  local dir state mount out pid
+  dir=$(make_case second-write); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  printf 'needs-decision: first write\n' >> "$mount/x.status"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the first mount write"
+
+  printf 'needs-decision: second write\n' >> "$mount/x.status"
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "watcher did not surface a SECOND write through the symlink - the .seen signature must track the TARGET file, not the link"
+  grep -F "signal: $state/x.status" "$out" >/dev/null \
+    || fail "the second wake should reference the scanned state/ path: $(cat "$out")"
+
+  pass "a second mount write through the same symlink surfaces again (signatures follow the target)"
+}
+
 test_foreign_id_file_is_invisible() {
   local dir state mount out pid
   dir=$(make_case foreign-id); state="$dir/state"; out="$dir/watch.out"
@@ -100,6 +131,7 @@ test_foreign_id_file_is_invisible() {
 }
 
 test_mount_write_surfaces_through_symlink
+test_second_mount_write_surfaces_again
 test_foreign_id_file_is_invisible
 
 echo "# all fm-watch-sbx-signals tests passed"
