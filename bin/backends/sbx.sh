@@ -54,6 +54,11 @@ FM_SBX_RESURRECT_SETTLE=${FM_SBX_RESURRECT_SETTLE:-8}
 # fm_backend_sbx_ensure_stack; 0 disables the poll, unit tests do).
 FM_SBX_RESURRECT_READY_TRIES=${FM_SBX_RESURRECT_READY_TRIES:-15}
 
+# Cap (seconds) on how long a keep-alive exec pins the VM waiting for the
+# guest agent's current turn to end (fm_backend_sbx_keepalive). 0 disables
+# keep-alives entirely (unit tests do).
+FM_SBX_KEEPALIVE_MAX=${FM_SBX_KEEPALIVE_MAX:-7200}
+
 # In-guest tmux session name. One secondmate per sandbox, so a fixed session
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
@@ -297,6 +302,44 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
   esac
 }
 
+# --- keep-alive: pin the VM through a guest turn -----------------------------
+
+# fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until <id>'s
+# turn-ended mount file advances past its current mtime (the guest agent
+# finished the turn) or FM_SBX_KEEPALIVE_MAX elapses. Why this exists:
+# Docker Sandboxes' auto-stop is HOST-CONNECTION-based, not guest-workload-
+# based - a VM with no live exec/attach stops within roughly a minute even
+# with a CPU-busy guest process (verified live; a detached in-guest tmux
+# agent gets no protection at all, unlike agent-as-exec rigs where the run
+# IS the connection). Without a keeper, any launch or steered turn that
+# outlasts the post-disconnect grace is killed mid-work: the turn never
+# ends, no signal lands, and the secondmate silently freezes until the next
+# steer resurrects it into the same trap. The keeper is the narrow fix: one
+# connection, held exactly for the expected-work window, self-terminating on
+# the guest side (it reads the same mount file at the same path), so an
+# idle VM still auto-stops - design §8's stopped-is-healthy premise stays.
+# Fire-and-forget: callers never wait on it, and a keeper left waiting by a
+# turn that never comes is bounded by the cap. Multiple keepers (one per
+# steer) are harmless - all exit on the same next turn-end.
+fm_backend_sbx_keepalive() {  # <name> <id>
+  local name=$1 id=$2 turnend
+  [ "$FM_SBX_KEEPALIVE_MAX" -gt 0 ] 2>/dev/null || return 0
+  turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
+  # shellcheck disable=SC2016  # single quotes deliberate: $1/$2 expand in the guest sh loop, not here
+  nohup sbx exec "$name" -- sh -c '
+    t=$1 max=$2
+    start=$(date +%s)
+    base=$(stat -c %Y "$t" 2>/dev/null || echo 0)
+    while :; do
+      now=$(date +%s)
+      [ $((now - start)) -ge "$max" ] && exit 0
+      cur=$(stat -c %Y "$t" 2>/dev/null || echo 0)
+      [ "$cur" -gt "$base" ] && exit 0
+      sleep 5
+    done' _ "$turnend" "$FM_SBX_KEEPALIVE_MAX" >/dev/null 2>&1 &
+  return 0
+}
+
 # --- steering: resurrection + delivery (design §8.3) -------------------------
 
 # fm_backend_sbx_guest_tmux_ready: 0 when the guest tmux server is up with the
@@ -386,25 +429,40 @@ fm_backend_sbx_ensure_stack() {  # <target>
   return 0
 }
 
+# Every successful delivery is followed by a fire-and-forget keep-alive: the
+# delivered text (a steer, or fm-spawn's launch command - the spawn's sends
+# dispatch through these same functions) starts a guest turn, and without a
+# pinned connection the auto-stop would kill that turn mid-work (see
+# fm_backend_sbx_keepalive). A non-fm-* name has no derivable id/signal
+# path, so no keeper - nothing host-side would ever see its turn end anyway.
+fm_backend_sbx_send_keepalive() {  # <target>
+  local target=$1 id
+  id=$(fm_backend_sbx_task_of_target "$target") || return 0
+  fm_backend_sbx_keepalive "$(fm_backend_sbx_name_of_target "$target")" "$id"
+}
+
 fm_backend_sbx_send_key() {  # <target> <key> [expected-label]
   local target=$1 key=$2 name
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key"
+  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key" || return 1
+  fm_backend_sbx_send_keepalive "$target"
 }
 
 fm_backend_sbx_send_text_line() {  # <target> <text>
   local target=$1 text=$2 name
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$text" Enter
+  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$text" Enter || return 1
+  fm_backend_sbx_send_keepalive "$target"
 }
 
 fm_backend_sbx_send_literal() {  # <target> <text>
   local target=$1 text=$2 name
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text"
+  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text" || return 1
+  fm_backend_sbx_send_keepalive "$target"
 }
 
 # fm_backend_sbx_send_text_submit: type once, submit, echo a verdict. v1 does
@@ -421,6 +479,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter \
     || { printf 'send-failed'; return 1; }
   sleep "$settle"
+  fm_backend_sbx_send_keepalive "$target"
   printf 'unknown'
 }
 
