@@ -49,6 +49,11 @@ FM_SBX_SIGNALS_ROOT=${FM_SBX_SIGNALS_ROOT:-$HOME/dev/fm-signals}
 # delivered, so the resumed agent's composer exists to receive it.
 FM_SBX_RESURRECT_SETTLE=${FM_SBX_RESURRECT_SETTLE:-8}
 
+# After the settle, resurrection additionally waits for the resumed TUI to
+# stop redrawing before delivering - up to this many 2 s capture polls (see
+# fm_backend_sbx_ensure_stack; 0 disables the poll, unit tests do).
+FM_SBX_RESURRECT_READY_TRIES=${FM_SBX_RESURRECT_READY_TRIES:-15}
+
 # In-guest tmux session name. One secondmate per sandbox, so a fixed session
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
@@ -315,6 +320,7 @@ fm_backend_sbx_guest_tmux_ready() {  # <name>
 # that knowledge, not this transport.
 fm_backend_sbx_ensure_stack() {  # <target>
   local target=$1 name id meta harness home turnend beat resume fg
+  local ready_prev ready_now ready_i
   name=$(fm_backend_sbx_name_of_target "$target")
   case "$(fm_backend_sbx_state "$name")" in
     running|stopped) ;;
@@ -358,6 +364,25 @@ fm_backend_sbx_ensure_stack() {  # <target>
       return 1
       ;;
   esac
+  # The foreground check proves the harness PROCESS took the pane, not that
+  # its TUI accepts input yet: codex's resume spends seconds redrawing the
+  # restored conversation and DROPS keys typed into that window (observed
+  # live - the fg check passed at settle+8s and the steer vanished into the
+  # redraw). Readiness is two consecutive identical pane captures - the same
+  # stability idiom the watcher uses for idleness - so no per-harness UI
+  # signature is needed. A pane still changing past the cap (e.g. the agent
+  # resumed busy) falls through and delivers anyway: a live TUI queues input.
+  ready_prev=
+  ready_i=0
+  while [ "$ready_i" -lt "$FM_SBX_RESURRECT_READY_TRIES" ]; do
+    ready_now=$(sbx exec "$name" -- tmux capture-pane -p -t "$(fm_backend_sbx_guest_tmux_target "$name")" -S -5 2>/dev/null) || ready_now=
+    if [ -n "$ready_now" ] && [ "$ready_now" = "$ready_prev" ]; then
+      break
+    fi
+    ready_prev=$ready_now
+    ready_i=$((ready_i + 1))
+    sleep 2
+  done
   return 0
 }
 
