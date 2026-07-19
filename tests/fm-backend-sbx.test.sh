@@ -288,6 +288,55 @@ test_resurrection_refuses_dead_pane_delivery() {
   pass "send path: a failed resume (pane still a shell) is refused loudly, nothing delivered"
 }
 
+# --- send_text_submit: verify-and-retry (resume-time notices eat keys) ------
+
+test_submit_confirms_busy_pane() {
+  local w fb out
+  w=$(new_sbx_world submit-ok); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  { printf '%s steer text and more\n' '> [marker]'; printf 'esc to interrupt\n'; } > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "> [marker] steer text and more words" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+  [ "$out" = submitted ] || fail "a pane showing the text and the busy footer should confirm the submit, got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "a confirmed submit must have typed the text exactly once"
+  pass "send_text_submit: text visible + busy pane -> submitted, typed once"
+}
+
+test_submit_retypes_when_text_swallowed() {
+  local w fb out
+  w=$(new_sbx_world submit-eaten); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # The pane never shows the text - the resume-time-notice swallow observed
+  # live: the delivery must be retyped, not just re-Entered.
+  printf 'some other pane content\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text that vanished" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+  [ "$out" = unknown ] || fail "an unconfirmable submit should stay conservative (unknown), got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -ge 2 ] \
+    || fail "swallowed text must be retyped on retry"
+  assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "a retype must clear any partial composer state first"
+  pass "send_text_submit: swallowed text is cleared and retyped, verdict stays unknown"
+}
+
+test_submit_reenters_when_enter_swallowed() {
+  local w fb out
+  w=$(new_sbx_world submit-reenter); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # Text sits in the composer (visible, pane not busy): Enter was eaten -
+  # re-send Enter only, NEVER type the text a second time.
+  printf '> steer text still in composer\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text still in composer" 2 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+  [ "$out" = unknown ] || fail "text stuck in the composer never confirms, got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "the text must be typed exactly once (no-double-text rule)"
+  [ "$(grep -c 'send-keys -t fm:fm-x Enter' "$w/sbx.log")" -ge 2 ] \
+    || fail "a swallowed Enter must be re-sent"
+  pass "send_text_submit: swallowed Enter re-sends Enter only, text typed once"
+}
+
 test_send_starts_keepalive_after_delivery() {
   local w fb
   w=$(new_sbx_world keepalive); fb=$(make_fake_sbx "$w")
@@ -452,6 +501,9 @@ test_send_resurrects_dead_guest_stack
 test_resume_template_quoting
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
+test_submit_confirms_busy_pane
+test_submit_retypes_when_text_swallowed
+test_submit_reenters_when_enter_swallowed
 test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox

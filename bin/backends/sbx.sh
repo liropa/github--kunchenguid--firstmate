@@ -465,20 +465,70 @@ fm_backend_sbx_send_literal() {  # <target> <text>
   fm_backend_sbx_send_keepalive "$target"
 }
 
-# fm_backend_sbx_send_text_submit: type once, submit, echo a verdict. v1 does
-# not read the guest composer back (that would spend a capture exec per
-# verification round), so like zellij's adapter it reports `unknown` and the
-# caller's conservative fallback policy owns the rest. Retries/enter-sleep/
-# settle are accepted for dispatcher-signature parity.
+# fm_backend_sbx_send_text_submit: type, submit, VERIFY, retry - echo a
+# verdict. Verification reads the pane back after Enter, which the first v1
+# cut skipped to save a capture exec per steer; the live rig proved it
+# necessary: a freshly resumed codex TUI shows stable-looking notices that
+# swallow the first keystrokes nondeterministically, so a fire-and-forget
+# type+Enter can vanish without a trace while the very same keys land fine
+# seconds later (verified live, twice). The check distinguishes the two
+# swallow modes: text absent from the pane -> retype from scratch; text
+# still sitting in the composer (Enter eaten, pane not busy) -> re-send
+# Enter only, never retype (fm-send's no-double-text rule). A pane that
+# shows the busy signature or no longer shows the text after Enter counts
+# as submitted.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 settle=${5:-1} name
+  local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
+  local name pane_t probe pane tries typed
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text" \
-    || { printf 'send-failed'; return 1; }
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter \
-    || { printf 'send-failed'; return 1; }
-  sleep "$settle"
+  pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
+  # The verification needle: a text-distinctive prefix long enough to not
+  # false-match, short enough to survive composer line-wrapping. Bash
+  # substring, not cut -c: the from-firstmate marker is multibyte and a
+  # byte-split needle would never match the pane.
+  probe=${text//$'\n'/ }
+  probe=${probe:0:24}
+  typed=0
+  tries=0
+  while [ "$tries" -le "$retries" ]; do
+    if [ "$typed" -eq 0 ]; then
+      sbx exec "$name" -- tmux send-keys -t "$pane_t" -l "$text" \
+        || { printf 'send-failed'; return 1; }
+      typed=1
+    fi
+    sbx exec "$name" -- tmux send-keys -t "$pane_t" Enter \
+      || { printf 'send-failed'; return 1; }
+    sleep "$settle"
+    pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null) || pane=
+    if [ -n "$pane" ]; then
+      case "$pane" in
+        *"$probe"*)
+          # Text visible: submitted if the harness is busy on it; otherwise
+          # it is still sitting in the composer - loop re-sends Enter only.
+          if printf '%s' "$pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}"; then
+            fm_backend_sbx_send_keepalive "$target"
+            printf 'submitted'
+            return 0
+          fi
+          ;;
+        *)
+          if [ "$tries" -lt "$retries" ]; then
+            # Text vanished unsubmitted (a resume-time notice ate it):
+            # clear any partial composer state and retype from scratch.
+            sbx exec "$name" -- tmux send-keys -t "$pane_t" C-u || true
+            typed=0
+          fi
+          ;;
+      esac
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -le "$retries" ] && sleep "$enter_sleep"
+  done
+  # Out of retries with no positive confirmation: the last state read is
+  # ambiguous (unreadable pane, or text present but the busy footer never
+  # showed). Deliver the conservative verdict and let the caller's fallback
+  # policy own it - the text was never typed twice.
   fm_backend_sbx_send_keepalive "$target"
   printf 'unknown'
 }
