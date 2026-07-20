@@ -541,7 +541,7 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # as submitted.
 # Presence means NEWLY appeared, not merely visible: steers routinely share
 # the needle prefix (the from-firstmate marker plus a repeated verb), and a
-# prior steer's rendered line stays inside the 30-line capture window.
+# prior steer's rendered line can stay in captured scrollback.
 # Verified live in the 5-secondmate soak: a freshly resumed codex ate the
 # typed text, the previous turn's steer line matched the needle, and the
 # loop re-Entered an empty composer to a clean "sent" exit while the steer
@@ -563,7 +563,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # Baseline AFTER ensure_stack: a resume's history re-render repaints old
   # steer lines, and a pre-redraw baseline would attribute them to our type.
   # ensure_stack's ready poll has already settled the pane here.
-  base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null) || base_pane=
+  base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || base_pane=
   base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
   typed=0
@@ -577,7 +577,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
     sbx exec "$name" -- tmux send-keys -t "$pane_t" Enter \
       || { printf 'send-failed'; return 1; }
     sleep "$settle"
-    pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null) || pane=
+    pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || pane=
     if [ -n "$pane" ]; then
       cur=$(printf '%s' "$pane" | grep -cF -- "$probe") || cur=0
       case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
