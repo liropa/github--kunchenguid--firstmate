@@ -550,7 +550,7 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # composer text.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
-  local name pane_t probe base_pane pane tries typed base cur base_busy busy
+  local name pane_t probe base_pane pane tries typed base cur busy
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
   pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
@@ -566,8 +566,6 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null) || base_pane=
   base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
-  base_busy=0
-  printf '%s' "$base_pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}" && base_busy=1
   typed=0
   tries=0
   while [ "$tries" -le "$retries" ]; do
@@ -585,14 +583,15 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
       case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
       busy=0
       printf '%s' "$pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}" && busy=1
-      if [ "$cur" -gt 0 ] && [ "$busy" -eq 1 ] && [ "$base_busy" -eq 0 ]; then
-        fm_backend_sbx_send_keepalive "$target"
-        printf 'submitted'
-        return 0
-      elif [ "$cur" -gt "$base" ]; then
-        # Text NEWLY visible but the harness is not busy on it, so it is still
-        # sitting in the composer - loop re-sends Enter only.
-        :
+      if [ "$cur" -gt "$base" ]; then
+        # Text NEWLY visible: submitted if the harness is busy on it;
+        # otherwise it is still sitting in the composer - loop re-sends
+        # Enter only.
+        if [ "$busy" -eq 1 ]; then
+          fm_backend_sbx_send_keepalive "$target"
+          printf 'submitted'
+          return 0
+        fi
       elif [ "$tries" -lt "$retries" ]; then
         # No occurrence beyond the baseline: the type vanished unsubmitted
         # (a resume-time notice ate it), and any needle match is a stale

@@ -27,8 +27,6 @@
 #                            the capture file - models a terminal that renders
 #                            what was typed; unset = the type is eaten (the
 #                            resume-time swallow)
-#   FM_FAKE_SBX_TYPE_ECHO_SHIFT_FIRST
-#                            drops the first capture line before echoing text
 #   FM_FAKE_SBX_ENTER_BUSY   appends the default busy footer on Enter
 #   FM_FAKE_SBX_FG           what `exec ... tmux display-message` prints as the
 #                            pane's foreground process (default codex; set to
@@ -97,10 +95,6 @@ case "$cmd" in
           case "$guest" in
             *" -l "*)
               for last in "$@"; do :; done
-              if [ -n "${FM_FAKE_SBX_TYPE_ECHO_SHIFT_FIRST:-}" ]; then
-                sed -n '2,$p' "$FM_FAKE_SBX_CAPTURE" > "$FM_FAKE_SBX_CAPTURE.tmp"
-                mv "$FM_FAKE_SBX_CAPTURE.tmp" "$FM_FAKE_SBX_CAPTURE"
-              fi
               printf '%s\n' "$last" >> "$FM_FAKE_SBX_CAPTURE"
               ;;
             *" Enter")
