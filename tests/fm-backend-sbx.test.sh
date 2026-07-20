@@ -294,9 +294,11 @@ test_submit_confirms_busy_pane() {
   local w fb out
   w=$(new_sbx_world submit-ok); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
-  { printf '%s steer text and more\n' '> [marker]'; printf 'esc to interrupt\n'; } > "$w/pane.txt"
+  # The pane starts WITHOUT the text (presence is judged against a pre-type
+  # baseline); the echo knob renders the type, the busy footer confirms it.
+  printf 'esc to interrupt\n' > "$w/pane.txt"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "> [marker] steer text and more words" 1 0 0' \
-    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" FM_FAKE_SBX_TYPE_ECHO=1)
   [ "$out" = submitted ] || fail "a pane showing the text and the busy footer should confirm the submit, got '$out'"
   [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
     || fail "a confirmed submit must have typed the text exactly once"
@@ -324,17 +326,38 @@ test_submit_reenters_when_enter_swallowed() {
   local w fb out
   w=$(new_sbx_world submit-reenter); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
-  # Text sits in the composer (visible, pane not busy): Enter was eaten -
-  # re-send Enter only, NEVER type the text a second time.
-  printf '> steer text still in composer\n' > "$w/pane.txt"
+  # Text lands in the composer (typed and rendered, pane not busy): Enter was
+  # eaten - re-send Enter only, NEVER type the text a second time.
+  printf 'idle notice line\n' > "$w/pane.txt"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text still in composer" 2 0 0' \
-    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" FM_FAKE_SBX_TYPE_ECHO=1)
   [ "$out" = unknown ] || fail "text stuck in the composer never confirms, got '$out'"
   [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
     || fail "the text must be typed exactly once (no-double-text rule)"
   [ "$(grep -c 'send-keys -t fm:fm-x Enter' "$w/sbx.log")" -ge 2 ] \
     || fail "a swallowed Enter must be re-sent"
   pass "send_text_submit: swallowed Enter re-sends Enter only, text typed once"
+}
+
+test_submit_ignores_stale_prefix_line_in_scrollback() {
+  local w fb out
+  w=$(new_sbx_world submit-stale); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # Verified live in the 5-secondmate soak: repeated steers share the needle's
+  # 24-char prefix ("[fm-from-firstmate]soak turn 2" vs "... turn 3"), and the
+  # previous turn's rendered steer line still sits in the captured scrollback.
+  # When the freshly typed text is eaten by resume-time init, that stale line
+  # must NOT read as parked/submitted - the type has to be retried, exactly as
+  # if the pane never showed the text.
+  printf '> [fm-from-firstmate]soak turn 2\nidle notice line\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
+  [ "$out" = unknown ] || fail "a stale-prefix match never confirms, got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -ge 2 ] \
+    || fail "an eaten type must be retyped even when an older steer matches the needle prefix"
+  assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "the retype must clear any partial composer state first"
+  pass "send_text_submit: a stale same-prefix scrollback line does not mask an eaten type"
 }
 
 test_send_starts_keepalive_after_delivery() {
@@ -729,6 +752,7 @@ test_resurrection_refuses_dead_pane_delivery
 test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed
+test_submit_ignores_stale_prefix_line_in_scrollback
 test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
