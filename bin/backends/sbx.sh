@@ -563,7 +563,8 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # Baseline AFTER ensure_stack: a resume's history re-render repaints old
   # steer lines, and a pre-redraw baseline would attribute them to our type.
   # ensure_stack's ready poll has already settled the pane here.
-  base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || base_pane=
+  base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) \
+    || { printf 'send-failed'; return 1; }
   base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
   typed=0
