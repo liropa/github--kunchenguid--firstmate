@@ -288,14 +288,18 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BACKEND=herdr HERDR_ENV=1)
 
+  assert_not_contains "$out" "respawn failed" \
+    "a default-tmux meta must respawn through its resolved backend, not ambient backend selection: $out"
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
     "a successfully respawned secondmate should be handled silently"
   assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
+  assert_not_contains "$(cat "$w/home/state/sm1.meta")" "backend=" \
+    "an explicitly pinned default-tmux respawn must keep legacy meta byte shape"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
