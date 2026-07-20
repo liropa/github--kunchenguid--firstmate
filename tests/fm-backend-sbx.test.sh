@@ -295,10 +295,11 @@ test_submit_confirms_busy_pane() {
   w=$(new_sbx_world submit-ok); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
   # The pane starts WITHOUT the text (presence is judged against a pre-type
-  # baseline); the echo knob renders the type, the busy footer confirms it.
-  printf 'esc to interrupt\n' > "$w/pane.txt"
+  # baseline); the echo knob renders the type, Enter starts the busy footer.
+  printf 'idle notice line\n' > "$w/pane.txt"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "> [marker] steer text and more words" 1 0 0' \
-    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" FM_FAKE_SBX_TYPE_ECHO=1)
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1)
   [ "$out" = submitted ] || fail "a pane showing the text and the busy footer should confirm the submit, got '$out'"
   [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
     || fail "a confirmed submit must have typed the text exactly once"
@@ -358,6 +359,22 @@ test_submit_ignores_stale_prefix_line_in_scrollback() {
   assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
     "the retype must clear any partial composer state first"
   pass "send_text_submit: a stale same-prefix scrollback line does not mask an eaten type"
+}
+
+test_submit_confirms_when_stale_prefix_scrolls_out() {
+  local w fb out
+  w=$(new_sbx_world submit-stale-scroll); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  { printf '> [fm-from-firstmate]soak turn 2\n'; printf 'idle notice line\n'; } > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_TYPE_ECHO_SHIFT_FIRST=1 FM_FAKE_SBX_ENTER_BUSY=1)
+  [ "$out" = submitted ] || fail "a new busy submit must confirm even when an older prefix line scrolls out, got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "a confirmed submit with scrollback churn must not retype"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "a confirmed submit with scrollback churn must not clear the composer"
+  pass "send_text_submit: stale same-prefix scrollout does not trigger retype"
 }
 
 test_send_starts_keepalive_after_delivery() {
@@ -753,6 +770,7 @@ test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed
 test_submit_ignores_stale_prefix_line_in_scrollback
+test_submit_confirms_when_stale_prefix_scrolls_out
 test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
