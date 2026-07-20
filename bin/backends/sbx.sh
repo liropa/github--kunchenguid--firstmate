@@ -225,6 +225,65 @@ fm_backend_sbx_kill() {  # <target>
   sbx rm --force "$name" 2>/dev/null || true
 }
 
+# fm_backend_sbx_unlanded_work: does <target>'s guest hold work that
+# fm_backend_sbx_kill's `sbx rm --force` would destroy? This is the in-VM half
+# of fm-teardown.sh's landed-work contract: a secondmate's real work lives in
+# the in-guest clone at the SAME absolute path as the recorded home= (clone
+# mode), which the host worktree safety check cannot see. Mirrors that check,
+# reaching inside the VM. Prints a human-readable reason and returns:
+#   0  safe to destroy - the guest is clean and every commit is on a remote,
+#      OR the sandbox is confirmed ABSENT (already gone - nothing to lose).
+#   1  UNSAFE - the guest holds uncommitted changes, or commits that live
+#      nowhere but the VM disk, OR the state could not be verified (fail-safe:
+#      an unreadable sandbox or a git error is NEVER treated as clean).
+# Unlike routine triage, this inspects a STOPPED VM too (its disk holds the
+# work), and `sbx exec` auto-starts it - acceptable because retire/teardown is
+# an explicit, one-shot, captain-initiated act, not a poll, and the VM is about
+# to be destroyed or deliberately preserved either way. No PR-merged /
+# content-in-default fallback like the host ship check: a secondmate lands by
+# pushing, and reproducing gh/PR resolution inside the VM is out of scope - the
+# captain confirms a squash-merged-but-unpushed guest with --force.
+fm_backend_sbx_unlanded_work() {  # <target> <home>
+  local target=$1 home=$2 name state dirty unpushed
+  name=$(fm_backend_sbx_name_of_target "$target")
+  if [ -z "$home" ]; then
+    printf 'cannot verify in-guest work for %s: no home path recorded in meta' "$name"
+    return 1
+  fi
+  state=$(fm_backend_sbx_state "$name")
+  case "$state" in
+    absent) return 0 ;;
+    running|stopped) ;;
+    *)
+      printf 'cannot verify in-guest work for %s: sandbox state is unreadable (%s)' "$name" "$state"
+      return 1
+      ;;
+  esac
+  # Uncommitted changes are never landed. Same untracked ignores as the host
+  # check, though provisioning already excludes the seeded hook file from the
+  # guest git view.
+  if ! dirty=$(sbx exec "$name" -- git -C "$home" status --porcelain 2>/dev/null); then
+    printf 'cannot verify in-guest work for %s: git status failed in %s' "$name" "$home"
+    return 1
+  fi
+  dirty=$(printf '%s\n' "$dirty" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+  if [ -n "$dirty" ]; then
+    printf 'sandbox %s has uncommitted changes in %s' "$name" "$home"
+    return 1
+  fi
+  # Commits reachable from HEAD but from no remote-tracking branch (a fork
+  # counts as a remote) exist nowhere but the VM disk.
+  if ! unpushed=$(sbx exec "$name" -- git -C "$home" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+    printf 'cannot verify in-guest work for %s: git log failed in %s' "$name" "$home"
+    return 1
+  fi
+  if [ -n "$unpushed" ]; then
+    printf 'sandbox %s has commits not on any remote in %s' "$name" "$home"
+    return 1
+  fi
+  return 0
+}
+
 # --- launch / resume templates ----------------------------------------------
 #
 # The guest-side launch commands live HERE, not in fm-spawn.sh's host

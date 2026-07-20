@@ -597,6 +597,23 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_unlanded_work: does this backend hold task work that teardown's
+# destructive cleanup (fm_backend_kill) would LOSE, beyond what the host
+# worktree safety check already covers? Only sbx has a hidden environment - the
+# in-VM clone - that the host git checks cannot see; every other backend keeps
+# its work in host worktrees that validate_worktree_teardown_safety already
+# inspects, so they answer "nothing hidden" (rc 0). Prints a human-readable
+# reason on rc 1. See bin/backends/sbx.sh's fm_backend_sbx_unlanded_work.
+fm_backend_unlanded_work() {  # <backend> <target> <home>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    sbx) fm_backend_sbx_unlanded_work "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

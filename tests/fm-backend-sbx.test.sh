@@ -492,6 +492,218 @@ test_sweep_respawns_confirmed_absent_secondmate() {
   pass "sweep: a confirmed-absent sbx secondmate is respawned"
 }
 
+# --- teardown: in-guest landed-work check (fm_backend_sbx_unlanded_work) -----
+#
+# fm_backend_sbx_kill's `sbx rm --force` destroys the whole VM, including the
+# in-guest clone where a secondmate's real work lives. fm-teardown.sh's
+# landed-work contract requires verifying that work landed BEFORE the kill; the
+# host git checks cannot see inside the VM, so the adapter probes the guest.
+# Safe (rc 0) only for a clean, fully-pushed guest or a confirmed-absent
+# sandbox; every other reading - dirty, unpushed, unreadable - is UNSAFE
+# (rc 1, fail-safe), mirroring the host worktree safety check.
+
+test_unlanded_work_clean_guest_is_safe() {
+  local w fb
+  w=$(new_sbx_world unlanded-clean); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # Clean guest: git status and git log both empty (GIT_STATUS/GIT_LOG unset).
+  run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+    || fail "a clean, fully-pushed guest must be safe to destroy (rc 0)"
+  assert_contains "$(cat "$w/sbx.log")" "git -C /guest/home status --porcelain" \
+    "a running guest must be inspected for uncommitted changes"
+  pass "unlanded_work: clean + pushed guest -> safe (rc 0)"
+}
+
+test_unlanded_work_dirty_guest_refuses() {
+  local w fb out
+  w=$(new_sbx_world unlanded-dirty); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GIT_STATUS=" M charter.md"); then
+    fail "a guest with uncommitted changes must be refused (rc 1)"
+  fi
+  assert_contains "$out" "uncommitted changes" \
+    "the refusal reason must name the uncommitted in-guest changes"
+  pass "unlanded_work: dirty guest -> unsafe (rc 1) with a reason"
+}
+
+test_unlanded_work_unpushed_guest_refuses() {
+  local w fb out
+  w=$(new_sbx_world unlanded-unpushed); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # Clean tree, but a commit reachable from nowhere but the VM disk.
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GIT_LOG="abc1234 wip in the VM"); then
+    fail "a guest with commits on no remote must be refused (rc 1)"
+  fi
+  assert_contains "$out" "commits not on any remote" \
+    "the refusal reason must name the unpushed in-guest commits"
+  pass "unlanded_work: clean tree but unpushed commits -> unsafe (rc 1)"
+}
+
+test_unlanded_work_absent_is_safe() {
+  local w fb
+  w=$(new_sbx_world unlanded-absent); fb=$(make_fake_sbx "$w")
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+    || fail "a confirmed-absent sandbox has nothing to lose -> safe (rc 0)"
+  assert_not_contains "$(cat "$w/sbx.log")" "git -C" \
+    "an absent sandbox must not be exec'd to probe a VM that is already gone"
+  pass "unlanded_work: confirmed-absent sandbox -> safe, no guest probe"
+}
+
+test_unlanded_work_error_state_refuses() {
+  local w fb out
+  w=$(new_sbx_world unlanded-error); fb=$(make_fake_sbx "$w")
+  : > "$w/sbx.log"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_LS_RC=1); then
+    fail "an unreadable sandbox state must be refused, never treated as clean (rc 1)"
+  fi
+  assert_contains "$out" "unreadable" \
+    "the refusal reason must flag the unverifiable state"
+  assert_not_contains "$(cat "$w/sbx.log")" "git -C" \
+    "an unreadable state must be refused WITHOUT execing into a VM whose liveness is unknown"
+  pass "unlanded_work: unreadable state -> unsafe (rc 1, fail-safe), no guest probe"
+}
+
+test_unlanded_work_git_failure_refuses() {
+  local w fb out
+  w=$(new_sbx_world unlanded-gitfail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GIT_RC=128); then
+    fail "a guest whose git cannot be inspected must be refused (rc 1)"
+  fi
+  assert_contains "$out" "git status failed" \
+    "an in-guest git failure must be reported, never silently treated as clean"
+  pass "unlanded_work: in-guest git failure -> unsafe (rc 1, fail-safe)"
+}
+
+test_unlanded_work_stopped_guest_is_inspected() {
+  local w fb
+  w=$(new_sbx_world unlanded-stopped); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  : > "$w/sbx.log"
+  # A stopped VM's disk still holds the work: teardown must inspect it (exec
+  # auto-starts it), unlike routine triage which leaves a stopped VM alone.
+  run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+    || fail "a stopped-but-clean guest is safe once inspected (rc 0)"
+  assert_contains "$(cat "$w/sbx.log")" "git -C /guest/home status --porcelain" \
+    "a STOPPED VM's disk holds the work, so teardown must inspect it, not skip it"
+  pass "unlanded_work: a stopped VM is inspected (its disk holds the work), not skipped"
+}
+
+test_unlanded_work_dispatcher_routes() {
+  local w fb out
+  w=$(new_sbx_world unlanded-dispatch); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # The generic dispatcher routes sbx to the adapter probe...
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_unlanded_work sbx sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GIT_STATUS=" M x"); then
+    fail "the dispatcher must route sbx to the in-guest probe (rc 1 on a dirty guest)"
+  fi
+  assert_contains "$out" "uncommitted changes" "sbx must reach fm_backend_sbx_unlanded_work"
+  # ...and a host-worktree backend has no hidden VM, so it answers "safe".
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_unlanded_work tmux fm-x /guest/home' \
+    || fail "a host-worktree backend has no hidden in-VM work -> safe (rc 0)"
+  assert_not_contains "$(cat "$w/sbx.log")" "git -C" \
+    "a non-sbx backend must never probe a guest (it has none)"
+  pass "fm_backend_unlanded_work: routes sbx to the adapter, non-sbx answers safe"
+}
+
+# --- teardown integration: real fm-teardown.sh over an sbx secondmate --------
+
+# new_teardown_world <name>: a parent firstmate home with one sbx secondmate
+# (id `domain`) whose plain-clone home is a sibling dir, and NO host-side child
+# metas - so fm-teardown.sh's host in-flight check passes and the in-guest
+# landed-work probe is the gate under test.
+new_teardown_world() {  # <name>
+  local name=$1 w home subhome
+  w=$(new_sbx_world "$name")
+  home="$w/home"; subhome="$w/subhome"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  touch "$home/state/.last-watcher-beat"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=sbx:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$subhome" "projects=alpha" "sbx_signals_dir=$w/signals/domain"
+  printf '%s\n' "$w"
+}
+
+# run_teardown_sbx <world> <fakebin> <extra-args> [env k=v...]: run the real
+# fm-teardown.sh over the world's `domain` secondmate, fake sbx first in PATH.
+run_teardown_sbx() {  # <world> <fakebin> <extra> [env k=v...]
+  local w=$1 fb=$2 extra=$3
+  shift 3
+  PATH="$fb:$PATH" FM_HOME="$w/home" \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" \
+    env "$@" "$ROOT/bin/fm-teardown.sh" domain $extra 2>&1
+}
+
+test_teardown_refuses_unlanded_guest() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-refuse); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "" FM_FAKE_SBX_GIT_STATUS=" M charter.md")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown must refuse an sbx secondmate with uncommitted in-guest work: $out"
+  assert_contains "$out" "in-guest work that teardown would destroy" \
+    "the refusal must name the in-guest hazard"
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "a refused teardown must NEVER destroy the VM"
+  [ -d "$w/subhome" ] || fail "a refused teardown must preserve the secondmate home"
+  [ -e "$w/home/state/domain.meta" ] || fail "a refused teardown must preserve the parent meta"
+  pass "teardown: sbx secondmate with unlanded in-guest work is refused, VM and home preserved"
+}
+
+test_teardown_allows_clean_guest() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-allow); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "")   # clean guest: GIT_STATUS/GIT_LOG unset
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of a clean-guest sbx secondmate should succeed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-domain" \
+    "a clean, pushed guest lets teardown destroy the VM"
+  [ ! -d "$w/subhome" ] || fail "teardown should remove the retired secondmate home"
+  [ ! -e "$w/home/state/domain.meta" ] || fail "teardown should clear the parent meta"
+  pass "teardown: sbx secondmate with a clean, pushed guest is torn down (VM removed, home retired)"
+}
+
+test_teardown_force_skips_guest_probe() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-force); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # A dirty guest would REFUSE without --force; --force is the captain's
+  # explicit discard authority and must skip the probe entirely.
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "--force" FM_FAKE_SBX_GIT_STATUS=" M charter.md")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--force teardown should succeed even with a dirty guest: $out"
+  assert_not_contains "$(cat "$w/sbx.log")" "status --porcelain" \
+    "--force must skip the in-guest probe (the captain already authorized discard)"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-domain" \
+    "--force must still destroy the VM"
+  [ ! -d "$w/subhome" ] || fail "--force teardown should remove the retired secondmate home"
+  pass "teardown: --force discards an sbx secondmate without probing the guest (captain-authorized)"
+}
+
 test_state_probe_classifies
 test_agent_alive_matrix
 test_agent_alive_dispatcher_routes_sbx
@@ -510,5 +722,16 @@ test_send_refuses_absent_sandbox
 test_sweep_leaves_stopped_secondmate_untouched
 test_sweep_never_acts_on_probe_error
 test_sweep_respawns_confirmed_absent_secondmate
+test_unlanded_work_clean_guest_is_safe
+test_unlanded_work_dirty_guest_refuses
+test_unlanded_work_unpushed_guest_refuses
+test_unlanded_work_absent_is_safe
+test_unlanded_work_error_state_refuses
+test_unlanded_work_git_failure_refuses
+test_unlanded_work_stopped_guest_is_inspected
+test_unlanded_work_dispatcher_routes
+test_teardown_refuses_unlanded_guest
+test_teardown_allows_clean_guest
+test_teardown_force_skips_guest_probe
 
 echo "# all fm-backend-sbx tests passed"

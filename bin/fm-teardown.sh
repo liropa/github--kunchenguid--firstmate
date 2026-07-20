@@ -1039,6 +1039,21 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# An sbx secondmate's real work lives INSIDE the microVM (the in-guest clone),
+# which the host worktree safety check cannot see and fm_backend_kill below
+# destroys with `sbx rm --force`. Probe the guest for unlanded work (uncommitted
+# changes, or commits on no remote) and refuse unless the captain explicitly
+# discards with --force. Non-sbx backends answer "nothing hidden" - their work
+# is host-visible and already covered above.
+if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
+  if ! UNLANDED_REASON=$(fm_backend_unlanded_work "$BACKEND" "$T" "$HOME_PATH"); then
+    echo "REFUSED: secondmate $ID has in-guest work that teardown would destroy." >&2
+    [ -n "$UNLANDED_REASON" ] && echo "$UNLANDED_REASON" >&2
+    echo "Land it from inside the VM (commit and push, or land its PR), or get the captain's explicit OK to discard, then --force." >&2
+    exit 1
+  fi
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi

@@ -24,7 +24,7 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-w
 - Auto-stop (and `sbx stop`) kill the guest **process tree**: the agent, its tmux server, and any in-guest daemons die; only disk survives.
   Empirical corroboration from agent-dotfiles: the in-guest no-mistakes daemon does not come back on VM restart.
 - `sbx rm` requires `--force` non-interactively (the confirmation prompt dies on "stdin is not a terminal").
-  `sbx rm --force` destroys the VM **including its disk** - the in-guest home clone's private `data/` and any unlanded work.
+  `sbx rm --force` destroys the VM **including its disk** - the in-guest home clone's private `data/` and any unlanded work, which is why teardown probes the guest first (see "Teardown" below).
 - `sbx exec` against an absent name fails rc 1 with `ERROR: no sandbox named '...'`.
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
@@ -127,14 +127,22 @@ Verified end to end on real sandboxes (design doc §10 "Then (v1)" items 2, 3, 4
 
 All six original codex-rig gaps and the containment-downgrade bug are fixed in this tree: the bash-3.2 brief-rewrite scramble, the printf-format quote-eating in the codex resume template, delivery into a dead pane after a failed resume, codex's trust-dialog launch park, resume-time keystroke swallowing (now a verified submit), the BSD-stat-signs-symlinks watcher freeze, and the sweep's ambient-backend containment downgrade.
 
+## Teardown (`fm_backend_sbx_unlanded_work`)
+
+Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (above), so `fm-teardown.sh` verifies the guest's work landed **before** the kill - the in-VM half of teardown's host worktree safety check, which cannot see inside the microVM. The secondmate teardown path (non-`--force`) probes the guest through the generic `fm_backend_unlanded_work` dispatcher (only sbx implements it; host-worktree backends answer "nothing hidden"):
+
+- The in-guest clone lives at the SAME absolute path as the recorded `home=` (clone mode), so the probe runs `git -C <home> status --porcelain` and `git -C <home> log --oneline HEAD --not --remotes` **inside** the VM.
+- **Safe (proceed)** only for a clean tree whose every commit is on a remote (a fork counts), OR a confirmed-**absent** sandbox (already gone, nothing to lose).
+- **Refuse (preserve the VM and home)** on uncommitted changes, on commits that live nowhere but the VM disk, OR on any *unverifiable* reading - an unreadable sandbox state or an in-guest `git` failure is never treated as clean (fail-safe, mirroring the host check's posture).
+- A **stopped** VM is inspected too (its disk holds the work); `sbx exec` auto-starts it, acceptable because retire is an explicit one-shot act, not routine triage.
+- No PR-merged / content-in-default fallback like the host ship check: a secondmate lands by pushing, and reproducing gh/PR resolution inside the VM is out of scope. `--force` is the captain's explicit discard authority and skips the probe entirely (a squash-merged-but-unpushed guest is confirmed that way).
+
 ## Remaining gaps
 
 - **Keep-alive covers only host-initiated turns** - the pin is armed at delivery (launch and steers). A turn the guest agent starts on its own (its own crew supervision, a scheduled follow-up) has no pin and dies with the ~45-100 s post-disconnect stop if it outlasts it; the auto-stop grace is Docker's heuristic and may change under us. Revisit if sbx grows a keep-alive/idle knob. (Confirmed still open after step 4.)
 - **No mid-session mount-health alarm** - if a running secondmate's host signal mount vanishes mid-session, the watcher silently stops seeing its signals (the safe `[ -e ]` skip above) with no captain-facing alarm until the mount returns. Acceptable given the host signal dir is a plain local directory that does not spontaneously vanish, and consistent with mid-session death detection being out of scope (the beat beacon is the intended future home for both).
 - **Guest-side home provisioning** - only the brief is seeded in v1; the rest of the private surface (`data/captain-shared.md`, `config/*` inheritance) stays absent in the guest, so the secondmate bootstraps with ABSENT markers.
   The full provisioning story is the companion backend design's scope.
-- **Teardown integration** - `fm_backend_sbx_kill` is `sbx rm --force`, which destroys unlanded in-guest work; `fm-teardown.sh`'s landed-work test cannot yet see inside the VM.
-  Retiring an sbx secondmate needs explicit captain authority and a landed-work check first.
 - **Longer multi-secondmate soak** - step 4's isolation, per-id attribution, and independent auto-stop are verified with two secondmates over a focused rig; a sustained many-secondmate soak (host memory/CPU ceilings, many concurrent resurrections) is still worth running before heavy production use.
 
 ## Security posture
