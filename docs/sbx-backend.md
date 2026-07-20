@@ -76,7 +76,7 @@ Mid-session death detection is still session-start-only upstream; the beat file 
 4. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
 5. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
-6. Records `backend=sbx`, `harness=`, `window=sbx:fm-<id>`, and `sbx_signals_dir=` in meta.
+6. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend), including `sbx_template=` when `FM_SBX_TEMPLATE` was set.
 7. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
 Supported harnesses: **claude and codex** (the intersection of the sweep's verified list, sbx's installable agents, and a verified turn-end + resume shape).
