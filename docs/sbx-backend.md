@@ -28,8 +28,18 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-w
 - `sbx exec` against an absent name fails rc 1 with `ERROR: no sandbox named '...'`.
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
+  As of 2026-07-19 the only verified template is agent-dotfiles' `adf-codex:v1` **plus tmux**, saved as **`adf-codex:v2`** (tmux 3.6, claude 2.1.214, codex 0.142.5); `adf-claude:v2`'s tmux presence is still unverified.
 - Clone mode (`sbx create --clone`) clones the workspace repo into the VM **at the same absolute path**, mounts the host repo read-only at `/run/sandbox/source`, and carries only **committed** files (gitignored `data/`, `state/`, `config/` never arrive).
   Extra workspace mounts (the signal directory) are plain bind mounts at the same absolute path, read-write, with sub-millisecond guest-to-host visibility for both appends and mtime-only touches (Gate 0, agent-dotfiles design doc §10).
+- Clone mode **refuses linked git worktrees** outright (`ERROR: --clone is not supported when run from a Git worktree (...); run from the main repository instead`, verified 2026-07-19).
+  Secondmate homes for this backend must be **plain clones** - `fm-home-seed.sh <id> <path>`'s git-clone path, never a treehouse lease; `fm_backend_sbx_create_task` refuses a `.git`-file home before creating anything.
+- **Auto-stop is HOST-CONNECTION-based, not guest-workload-based** (measured 2026-07-19): a VM with no live `sbx exec`/attach stops within roughly 45-100 s of the last connection closing, **even with a CPU-busy guest process**; one held `sbx exec sleep 130` kept the VM running for its full duration and the VM stopped ~45 s after it exited.
+  A detached in-guest tmux agent therefore gets **no auto-stop protection at all** - unlike agent-as-exec rigs, where the run itself is the connection.
+  This is why every delivery starts a keep-alive (below); the exact grace is Docker's heuristic and may change under us.
+- **codex 0.142.5 gates a fresh home's first interactive launch behind TUI dialogs** that no one is in the pane to answer: a directory-trust dialog (cleared by seeding `[projects."<home>"] trust_level = "trusted"` into the guest's `~/.codex/config.toml` - the exact shape codex itself persists on accept) and a hooks-review gate for the home's committed `.codex/hooks.json` (cleared with `--dangerously-bypass-hook-trust` on the launch/resume commands; its `trusted_hash` scheme is codex-internal - not a plain sha256 of the hook command or its JSON object, probed empirically - so it cannot be pre-seeded).
+  `--dangerously-bypass-approvals-and-sandbox` covers **neither** gate.
+- **A freshly resumed codex TUI eats first keystrokes nondeterministically**: stable-looking notices swallow typed text without a trace, while the identical keys land fine seconds later (observed twice).
+  Pane stability cannot distinguish a parked notice from a ready composer, which is why the steer path verifies submission by reading the pane back (below).
 
 ## Agent liveness probe (`fm_backend_sbx_agent_alive`)
 
@@ -59,13 +69,18 @@ Mid-session death detection is still session-start-only upstream; the beat file 
 3. Seeds the brief into the guest at its own absolute path (clone mode drops gitignored files), rewriting the primary's status-file path to the mount file - the host symlink makes both names converge on the same file.
 4. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
-5. Records `backend=sbx`, `harness=`, `window=sbx:fm-<id>`, and `sbx_signals_dir=` in meta.
+5. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
+6. Records `backend=sbx`, `harness=`, `window=sbx:fm-<id>`, and `sbx_signals_dir=` in meta.
+7. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
 Supported harnesses: **claude and codex** (the intersection of the sweep's verified list, sbx's installable agents, and a verified turn-end + resume shape).
 Anything else is refused before any sandbox is created.
 
 Latency budget: worst case ≈ `POLL` (15 s) + `SIGNAL_GRACE` (30 s) + sub-millisecond mount visibility.
 The grace share is deliberate (coalescing a status write with its turn-end saves whole first-mate turns).
+Measured live (2026-07-19, steady-state watcher): **34.5 s** turn-end → wake (≈4 s poll phase + 30 s grace), one coalesced wake for status + turn-end; a full steer of a stopped VM (resurrection + verified delivery) took 16.5 s and the guest's reply landed ~3 s later.
+Idle supervision costs **zero** sbx CLI calls (the scan is pure host stats; stopped VMs stay stopped) - versus an `sbx exec`-polling design's ~240 exec round-trips/hour/secondmate at 302 ms p50 (Gate 0) that would also auto-start every stopped VM on each probe.
+The design doc's v2 latency trigger is **not met**: the wake path is grace-dominated by design, and v2's event layer could only shave the ≤15 s poll share.
 
 ## Steering and resurrection (`fm_backend_sbx_send_*`)
 
@@ -74,25 +89,39 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent/unreadable sandbox.
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ...`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s), then deliver.
+3. No guest tmux server → rebuild: new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
+5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures - the watcher's own stability idiom - then let the caller deliver.
+
+The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: after Enter it reads the pane back; text absent → clear (C-u) and retype; text parked in the composer with no busy footer → re-send Enter only (never retype); busy on the text → `submitted`.
+Retries exhausted stays the conservative `unknown`.
+Every successful delivery then fires a **keep-alive**: one background `sbx exec` that self-terminates guest-side when the id's `turn-ended` mount file advances (or after `FM_SBX_KEEPALIVE_MAX`, default 7200 s), pinning the VM through the guest turn the delivery started - without it, connection-based auto-stop kills any turn that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
+Idle VMs still auto-stop once the turn ends: §8's stopped-is-healthy premise is preserved.
 
 In-guest daemons a workflow needs (e.g. the no-mistakes daemon) do not come back on VM start; the resumed agent restarts them on demand - its brief owns that knowledge.
 
 Triage protection (design doc §7.3): `bin/fm-crew-state.sh`'s `pane_readable` uses the state probe for sbx (a stopped sandbox is present, classified from the status log), and the adapter's capture refuses outright unless the sandbox is already running - so routine triage can never churn an idle-stopped VM.
 
-## Known gaps / pending live verification
+## Live verification status (2026-07-19 rig: codex harness, adf-codex:v2, scratch primary + plain-clone home)
 
-The unit suites drive a fake `sbx` CLI; the following need a live rig pass (design doc §10 "Then (v1)" items 2, 3, 5 and §11 step 3) before production use:
+Verified end to end on a real sandbox (design doc §10 "Then (v1)" items 2, 3, 7 and §11 step 3's single-secondmate rig):
 
-- **In-guest agent launch and resume, end to end** - the launch/resume templates follow the host adapters' verified flag shapes, but have not yet been driven inside a real sandbox.
-  The `claude --continue` / `codex resume --last` resume variants in particular are written from the host harness adapters, not yet exercised in-guest.
-- **Template choice** - a template shipping tmux (and the agent CLIs) is a hard prerequisite; the stock images' tmux absence is verified, the adf-* templates' tmux presence is not yet.
-- **Clone mode over a git worktree** - secondmate homes may be linked worktrees (`.git` is a file); whether `sbx create --clone` handles that shape is unverified.
+- **Full loop**: spawn (dialog-free launch), guest agent reads the brief, appends `working`/`done` to the mount's status file at the rewritten path, `notify=` touches turn-ended AND beat, the watcher coalesces status + turn-end through one grace into a single wake naming both files, `.wake-queue` populated, `.seen-*` advanced.
+- **Auto-stop survival**: signals written before an auto-stop surfaced on the next watcher cycle with the VM left **stopped** through triage; the already-surfaced signatures did not re-deliver.
+- **Resurrection**: steer of a dead-stack sandbox restarts the VM, rebuilds the guest tmux, resumes the conversation (`codex resume --last`), and a routed steer processed by the resumed agent lands a `done` status through the bridge.
+- **Keep-alive**: with a pinned exec the VM survives the whole guest turn (measured inversely: unpinned VMs die ~45-100 s after the last connection, busy or not).
+
+Five of the six original gaps were real and are fixed in this tree: the bash-3.2 brief-rewrite scramble, the printf-format quote-eating in the codex resume template, delivery into a dead pane after a failed resume, codex's trust-dialog launch park, and resume-time keystroke swallowing (now a verified submit).
+
+## Remaining gaps
+
+- **claude-harness in-guest launch/resume** - never live-driven: needs a claude-flavor template with tmux (`adf-claude:v2` tmux presence unverified; build the v3 counterpart of `adf-codex:v2` first). The claude arms of the launch/resume templates and the Stop-hook seeding are fake-CLI-tested only.
+- **Keep-alive covers only host-initiated turns** - the pin is armed at delivery (launch and steers). A turn the guest agent starts on its own (its own crew supervision, a scheduled follow-up) has no pin and dies with the ~45-100 s post-disconnect stop if it outlasts it; the auto-stop grace is Docker's heuristic and may change under us. Revisit if sbx grows a keep-alive/idle knob.
 - **Guest-side home provisioning** - only the brief is seeded in v1; the rest of the private surface (`data/captain-shared.md`, `config/*` inheritance) stays absent in the guest, so the secondmate bootstraps with ABSENT markers.
   The full provisioning story is the companion backend design's scope.
 - **Teardown integration** - `fm_backend_sbx_kill` is `sbx rm --force`, which destroys unlanded in-guest work; `fm-teardown.sh`'s landed-work test cannot yet see inside the VM.
   Retiring an sbx secondmate needs explicit captain authority and a landed-work check first.
-- **Auto-stop survival and no-double-delivery** are covered structurally (signatures live host-side) and by the scan tests, but not yet soaked against real auto-stop cycles.
+- **Multi-secondmate soak** - rollout step 4 (cross-talk, bounded host cost, concurrent auto-stop cycles) has not run yet.
 
 ## Security posture
 
