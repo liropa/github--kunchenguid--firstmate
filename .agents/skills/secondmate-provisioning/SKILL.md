@@ -60,6 +60,7 @@ It may only seed a home with no project clones or project-registry entries, and 
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+For sbx-backed secondmates, seed with an explicit non-`-` home path so `fm-home-seed.sh` creates a plain clone; `docs/sbx-backend.md` owns the clone-mode restriction.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.

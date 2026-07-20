@@ -94,7 +94,7 @@ Orca is experimental and selected only explicitly: Orca owns both worktree and t
 cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: treehouse remains its worktree provider (cmux is a session provider only, like herdr/zellij), and its full verification - the socket access setup requirement with Automation mode recommended, the read-screen-fails-on-a-fresh-surface finding, the close-surface-refuses-on-the-last-surface finding, the source-verified runtime marker and fallback behavior, and known gaps - is recorded in `docs/cmux-backend.md`.
 cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
 sbx is experimental, explicit-only, and secondmate-only: each secondmate runs in a clone-mode Docker Sandbox microVM with an in-guest tmux agent, while firstmate supervises it through a bind-mounted signal directory.
-Its adapter contract, liveness mapping, signal bridge, resurrection path, destructive teardown caveat, and pending live verification are recorded in `docs/sbx-backend.md`.
+Its adapter contract, liveness mapping, signal bridge, resurrection path, live verification status, and remaining caveats are recorded in `docs/sbx-backend.md`.
 Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
 ## Worktrees, not branches in your checkout

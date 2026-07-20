@@ -133,6 +133,7 @@ The concise single-line route contract is owned by the [`secondmate-provisioning
 `fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
 Use `fm-home-seed.sh <id> - {<project>...|--no-projects}` to lease a fresh firstmate worktree for the secondmate home.
+For sbx-backed secondmates, use an explicit non-`-` home path so `fm-home-seed.sh` creates a plain clone; [`docs/sbx-backend.md`](sbx-backend.md) owns the clone-mode restriction.
 Use the deliberate `--no-projects` signal only for a firstmate-repo domain that needs no separate project clones.
 It cannot be combined with a project list, and omitting both still fails loudly.
 A project-less seed requires no existing project clones or `data/projects.md` entries in the home, so it refuses a populated-home conversion without changing that home.
