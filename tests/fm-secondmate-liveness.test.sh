@@ -38,6 +38,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/sbx-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -401,9 +403,74 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+test_sweep_respawn_preserves_sbx_backend_and_template() {
+  # Found live 2026-07-20: a confidently-dead sbx secondmate was respawned by
+  # the sweep through bare ambient backend resolution (HERDR_ENV=1 on the
+  # host), silently migrating a VM-contained secondmate into a host-side
+  # herdr pane - a containment downgrade, not a recovery. The respawn must
+  # re-enter the RECORDED backend (and, for sbx, the recorded template);
+  # the harness deliberately keeps re-resolving through config
+  # (fm-secondmate-harness.test.sh's durable-mode contract).
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; return 0; }
+  local w fb home out meta
+  w=$(new_world sbx-respawn)
+  # fm-spawn resolves the home physically (pwd -P); assert against the same
+  # resolved form (macOS mktemp yields /var/folders/..., a symlink into
+  # /private/var/...) - the fm-spawn-sbx suite's canonicalization dodge.
+  w=$(cd "$w" && pwd -P)
+  home="$w/sm1"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects" \
+    "$w/signals/sm1" "$w/guest-writes"
+  printf 'sm1\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  {
+    printf 'Charter body.\n'
+    printf "Report by appending one line:\n"
+    printf "   \`echo \"{state}: {note}\" >> '%s/home/state/sm1.status'\`\n" "$w"
+  } > "$home/data/charter.md"
+  # The harness must RE-RESOLVE through config on respawn (not pin from meta):
+  # secondmate-harness claude over the world's crew-harness codex proves the
+  # chain ran.
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  {
+    printf 'window=sbx:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=sbx\n'
+    printf 'sbx_template=adf-claude:v99\n'
+    printf 'sbx_signals_dir=%s/signals/sm1\n' "$w"
+    printf 'home=%s\n' "$home"
+  } > "$w/home/state/sm1.meta"
+  fb=$(make_fake_sbx "$w")
+  : > "$w/sbx.log"
+  # No beat file and an empty inventory: the probe falls through fresh-beat to
+  # the state read, which classifies the sandbox absent -> confident dead.
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+
+  out=$(PATH="$fb:$BASE_PATH" TMUX='' HERDR_ENV='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" FM_SBX_RESURRECT_SETTLE=0 FM_SBX_RESURRECT_READY_TRIES=0 \
+    FM_SBX_KEEPALIVE_MAX=0 FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-sm1 running)" FM_FAKE_SBX_WRITE_DIR="$w/guest-writes" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$out" "respawn failed" \
+    "the dead sbx secondmate's respawn should succeed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-sm1 -t adf-claude:v99 claude $home $w/signals/sm1" \
+    "the respawn must re-enter the sbx backend with the recorded template (ambient FM_BACKEND=tmux must lose)"
+  meta=$(cat "$w/home/state/sm1.meta")
+  assert_contains "$meta" "backend=sbx" \
+    "the respawned meta must keep backend=sbx - never a silent host-side downgrade"
+  assert_contains "$meta" "window=sbx:fm-sm1" \
+    "the respawned meta must keep the sbx window target"
+  assert_contains "$meta" "sbx_template=adf-claude:v99" \
+    "the respawned meta must re-record the template so the NEXT respawn reproduces it too"
+  pass "sweep: a dead sbx secondmate respawns into sbx with its recorded template, harness re-resolved via config"
+}
+
 test_tmux_agent_alive_classifies
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
+test_sweep_respawn_preserves_sbx_backend_and_template
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading

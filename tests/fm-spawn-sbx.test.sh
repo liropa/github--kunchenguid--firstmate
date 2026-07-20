@@ -217,11 +217,42 @@ test_preexisting_status_history_is_folded() {
   pass "spawn: a pre-existing regular status file's history is folded into the mount"
 }
 
+test_template_pin_is_recorded_in_meta() {
+  local w fb out meta
+  w=$(new_world template-meta); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(FM_SBX_TEMPLATE=adf-claude:v99 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "templated sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx -t adf-claude:v99 claude" \
+    "sbx create should pin the requested template image"
+  meta=$(cat "$w/home/state/smx.meta")
+  assert_contains "$meta" "sbx_template=adf-claude:v99" \
+    "meta must record the template so a liveness-sweep respawn can reproduce the sandbox"
+
+  pass "spawn: FM_SBX_TEMPLATE is recorded in meta for respawn reproducibility"
+}
+
+test_untemplated_spawn_records_no_template_key() {
+  local w fb out
+  w=$(new_world no-template-meta); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "untemplated sbx secondmate spawn failed: $out"
+  assert_not_contains "$(cat "$w/home/state/smx.meta")" "sbx_template=" \
+    "an untemplated spawn must not write an empty sbx_template= key (meta shape stays stable)"
+
+  pass "spawn: no FM_SBX_TEMPLATE means no sbx_template= meta key"
+}
+
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
 test_claude_spawn_wires_signal_bridge
 test_codex_launch_carries_mount_notify
 test_refuses_worktree_home
 test_preexisting_status_history_is_folded
+test_template_pin_is_recorded_in_meta
+test_untemplated_spawn_records_no_template_key
 
 echo "# all fm-spawn-sbx tests passed"

@@ -387,7 +387,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target verdict out recorded_backend recorded_template
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -408,7 +408,24 @@ secondmate_liveness_sweep() {
         ;;
       dead)
         fm_backend_kill "$backend" "$target" 2>/dev/null || true
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        # Respawn with the meta's RECORDED placement, not ambient detection.
+        # A bare respawn re-resolves the backend from the environment, which
+        # silently migrated a VM-contained sbx secondmate into a host-side
+        # herdr pane (found live 2026-07-20, HERDR_ENV=1) - a containment
+        # downgrade, not a recovery. Explicit --backend wins over every
+        # ambient source in fm-spawn.sh's resolution order, and the recorded
+        # sbx template rides along the same way. The HARNESS is deliberately
+        # NOT pinned here: respawns re-resolve it through
+        # config/secondmate-harness -> config/crew-harness -> own
+        # (fm-secondmate-harness.test.sh's durable-mode contract); an
+        # sbx-unverified resolution is refused loudly before any sandbox is
+        # created.
+        recorded_backend=$(fm_meta_get "$meta" backend)
+        recorded_template=$(fm_meta_get "$meta" sbx_template)
+        set -- "$id" --secondmate
+        [ -z "$recorded_backend" ] || set -- "$@" --backend "$recorded_backend"
+        if out=$(FM_SPAWN_NO_GUARD=1 FM_SBX_TEMPLATE="${recorded_template:-${FM_SBX_TEMPLATE:-}}" \
+            "$FM_ROOT/bin/fm-spawn.sh" "$@" 2>&1); then
           :
         else
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: $(first_line "$out")"
