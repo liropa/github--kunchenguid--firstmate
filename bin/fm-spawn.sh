@@ -1100,6 +1100,10 @@ META_WINDOW=$T
   fi
   if [ "$BACKEND" = sbx ]; then
     echo "sbx_signals_dir=$SIG_DIR"
+    # The template pin is placement state, like the backend itself: the
+    # liveness sweep's respawn must reproduce the sandbox from the meta
+    # alone (a session-start sweep has no FM_SBX_TEMPLATE in its env).
+    [ -z "${FM_SBX_TEMPLATE:-}" ] || echo "sbx_template=$FM_SBX_TEMPLATE"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
