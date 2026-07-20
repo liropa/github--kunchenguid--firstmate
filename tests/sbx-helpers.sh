@@ -83,7 +83,21 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
         ;;
       "tmux capture-pane"*)
-        [ -n "${FM_FAKE_SBX_CAPTURE:-}" ] && cat "$FM_FAKE_SBX_CAPTURE"
+        if [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
+          start=
+          prev=
+          for arg in "$@"; do
+            if [ "$prev" = -S ]; then
+              start=$arg
+              break
+            fi
+            prev=$arg
+          done
+          case "$start" in
+            -[0-9]*) tail -n "${start#-}" "$FM_FAKE_SBX_CAPTURE" ;;
+            *) cat "$FM_FAKE_SBX_CAPTURE" ;;
+          esac
+        fi
         exit 0
         ;;
       "tmux display-message"*)
@@ -91,11 +105,13 @@ case "$cmd" in
         exit 0
         ;;
       "tmux send-keys"*)
-        if [ -n "${FM_FAKE_SBX_TYPE_ECHO:-}" ] && [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
+        if [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
           case "$guest" in
             *" -l "*)
-              for last in "$@"; do :; done
-              printf '%s\n' "$last" >> "$FM_FAKE_SBX_CAPTURE"
+              if [ -n "${FM_FAKE_SBX_TYPE_ECHO:-}" ]; then
+                for last in "$@"; do :; done
+                printf '%s\n' "$last" >> "$FM_FAKE_SBX_CAPTURE"
+              fi
               ;;
             *" Enter")
               [ -n "${FM_FAKE_SBX_ENTER_BUSY:-}" ] && printf 'esc to interrupt\n' >> "$FM_FAKE_SBX_CAPTURE"

@@ -376,6 +376,27 @@ test_submit_retypes_when_stale_prefix_goes_busy() {
   pass "send_text_submit: stale same-prefix busy pane does not confirm"
 }
 
+test_submit_counts_full_history_when_window_scrolls() {
+  local w fb out i
+  w=$(new_sbx_world submit-window-scroll); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf '> [fm-from-firstmate]soak turn 2\n' > "$w/pane.txt"
+  i=2
+  while [ "$i" -le 30 ]; do
+    printf 'idle filler %s\n' "$i" >> "$w/pane.txt"
+    i=$((i + 1))
+  done
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1)
+  [ "$out" = submitted ] || fail "a new busy submit must confirm when an older prefix leaves a 30-line window, got '$out'"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "a window-scroll confirmation must not retype"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "a window-scroll confirmation must not clear the composer"
+  pass "send_text_submit: full-history count survives 30-line window churn"
+}
+
 test_send_starts_keepalive_after_delivery() {
   local w fb
   w=$(new_sbx_world keepalive); fb=$(make_fake_sbx "$w")
@@ -770,6 +791,7 @@ test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed
 test_submit_ignores_stale_prefix_line_in_scrollback
 test_submit_retypes_when_stale_prefix_goes_busy
+test_submit_counts_full_history_when_window_scrolls
 test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
