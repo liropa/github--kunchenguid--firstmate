@@ -539,9 +539,17 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # Enter only, never retype (fm-send's no-double-text rule). A pane that
 # shows the busy signature or no longer shows the text after Enter counts
 # as submitted.
+# Presence means NEWLY appeared, not merely visible: steers routinely share
+# the needle prefix (the from-firstmate marker plus a repeated verb), and a
+# prior steer's rendered line stays inside the 30-line capture window.
+# Verified live in the 5-secondmate soak: a freshly resumed codex ate the
+# typed text, the previous turn's steer line matched the needle, and the
+# loop re-Entered an empty composer to a clean "sent" exit while the steer
+# was lost. The occurrence count is baselined before typing (one extra
+# capture exec per steer); only a count above the baseline is our text.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
-  local name pane_t probe pane tries typed
+  local name pane_t probe pane tries typed base cur
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
   pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
@@ -551,6 +559,12 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # byte-split needle would never match the pane.
   probe=${text//$'\n'/ }
   probe=${probe:0:24}
+  # Baseline AFTER ensure_stack: a resume's history re-render repaints old
+  # steer lines, and a pre-redraw baseline would attribute them to our type.
+  # ensure_stack's ready poll has already settled the pane here.
+  base=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null \
+    | grep -cF -- "$probe") || base=0
+  case "$base" in ''|*[!0-9]*) base=0 ;; esac
   typed=0
   tries=0
   while [ "$tries" -le "$retries" ]; do
@@ -564,25 +578,24 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
     sleep "$settle"
     pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S -30 2>/dev/null) || pane=
     if [ -n "$pane" ]; then
-      case "$pane" in
-        *"$probe"*)
-          # Text visible: submitted if the harness is busy on it; otherwise
-          # it is still sitting in the composer - loop re-sends Enter only.
-          if printf '%s' "$pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}"; then
-            fm_backend_sbx_send_keepalive "$target"
-            printf 'submitted'
-            return 0
-          fi
-          ;;
-        *)
-          if [ "$tries" -lt "$retries" ]; then
-            # Text vanished unsubmitted (a resume-time notice ate it):
-            # clear any partial composer state and retype from scratch.
-            sbx exec "$name" -- tmux send-keys -t "$pane_t" C-u || true
-            typed=0
-          fi
-          ;;
-      esac
+      cur=$(printf '%s' "$pane" | grep -cF -- "$probe") || cur=0
+      case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+      if [ "$cur" -gt "$base" ]; then
+        # Text NEWLY visible: submitted if the harness is busy on it;
+        # otherwise it is still sitting in the composer - loop re-sends
+        # Enter only.
+        if printf '%s' "$pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}"; then
+          fm_backend_sbx_send_keepalive "$target"
+          printf 'submitted'
+          return 0
+        fi
+      elif [ "$tries" -lt "$retries" ]; then
+        # No occurrence beyond the baseline: the type vanished unsubmitted
+        # (a resume-time notice ate it), and any needle match is a stale
+        # scrollback line. Clear partial composer state and retype.
+        sbx exec "$name" -- tmux send-keys -t "$pane_t" C-u || true
+        typed=0
+      fi
     fi
     tries=$((tries + 1))
     [ "$tries" -le "$retries" ] && sleep "$enter_sleep"

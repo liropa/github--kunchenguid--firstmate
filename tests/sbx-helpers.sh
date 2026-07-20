@@ -22,6 +22,11 @@
 #   FM_FAKE_SBX_WRITE_DIR    when set, `exec -i ... sh -c 'mkdir ... cat > ...'`
 #                            captures stdin to <dir>/<guest-path with / -> _>
 #   FM_FAKE_SBX_CAPTURE      file `exec ... tmux capture-pane` prints
+#   FM_FAKE_SBX_TYPE_ECHO    when set (with FM_FAKE_SBX_CAPTURE), a literal
+#                            `tmux send-keys ... -l <text>` appends <text> to
+#                            the capture file - models a terminal that renders
+#                            what was typed; unset = the type is eaten (the
+#                            resume-time swallow)
 #   FM_FAKE_SBX_FG           what `exec ... tmux display-message` prints as the
 #                            pane's foreground process (default codex; set to
 #                            bash to simulate a resume that died back to the
@@ -82,6 +87,17 @@ case "$cmd" in
         ;;
       "tmux display-message"*)
         printf '%s\n' "${FM_FAKE_SBX_FG:-codex}"
+        exit 0
+        ;;
+      "tmux send-keys"*)
+        if [ -n "${FM_FAKE_SBX_TYPE_ECHO:-}" ] && [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
+          case "$guest" in
+            *" -l "*)
+              for last in "$@"; do :; done
+              printf '%s\n' "$last" >> "$FM_FAKE_SBX_CAPTURE"
+              ;;
+          esac
+        fi
         exit 0
         ;;
       "sh -c mkdir -p"*"cat >> "*)
