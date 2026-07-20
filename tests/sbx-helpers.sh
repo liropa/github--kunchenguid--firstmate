@@ -26,6 +26,13 @@
 #                            pane's foreground process (default codex; set to
 #                            bash to simulate a resume that died back to the
 #                            guest shell)
+#   FM_FAKE_SBX_GIT_STATUS   what `exec ... git -C <home> status --porcelain`
+#                            prints (the teardown landed-work probe; empty =
+#                            clean guest)
+#   FM_FAKE_SBX_GIT_LOG      what `exec ... git -C <home> log ...` prints
+#                            (empty = every commit already on a remote)
+#   FM_FAKE_SBX_GIT_RC       non-zero makes the guest `git` calls fail (the
+#                            unverifiable-guest case)
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -96,6 +103,21 @@ case "$cmd" in
         else
           cat > /dev/null 2>/dev/null || true
         fi
+        exit 0
+        ;;
+      "git -C "*)
+        # fm_backend_sbx_unlanded_work's in-guest landed-work probe. Output is
+        # env-driven so a suite can pose a clean / dirty / unpushed / git-error
+        # guest; FM_FAKE_SBX_GIT_RC fails BOTH git calls (unverifiable guest).
+        [ "${FM_FAKE_SBX_GIT_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_GIT_RC}"
+        case "$guest" in
+          *"status --porcelain"*)
+            [ -n "${FM_FAKE_SBX_GIT_STATUS:-}" ] && printf '%s\n' "$FM_FAKE_SBX_GIT_STATUS"
+            ;;
+          *" log "*)
+            [ -n "${FM_FAKE_SBX_GIT_LOG:-}" ] && printf '%s\n' "$FM_FAKE_SBX_GIT_LOG"
+            ;;
+        esac
         exit 0
         ;;
       *)
