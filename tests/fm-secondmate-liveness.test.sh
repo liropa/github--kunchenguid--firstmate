@@ -467,10 +467,60 @@ test_sweep_respawn_preserves_sbx_backend_and_template() {
   pass "sweep: a dead sbx secondmate respawns into sbx with its recorded template, harness re-resolved via config"
 }
 
+test_sweep_respawn_ignores_ambient_template_without_recorded_template() {
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; return 0; }
+  local w fb home out meta
+  w=$(new_world sbx-respawn-untemplated)
+  w=$(cd "$w" && pwd -P)
+  home="$w/sm1"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects" \
+    "$w/signals/sm1" "$w/guest-writes"
+  printf 'sm1\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  {
+    printf 'Charter body.\n'
+    printf "Report by appending one line:\n"
+    printf "   \`echo \"{state}: {note}\" >> '%s/home/state/sm1.status'\`\n" "$w"
+  } > "$home/data/charter.md"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  {
+    printf 'window=sbx:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=sbx\n'
+    printf 'sbx_signals_dir=%s/signals/sm1\n' "$w"
+    printf 'home=%s\n' "$home"
+  } > "$w/home/state/sm1.meta"
+  fb=$(make_fake_sbx "$w")
+  : > "$w/sbx.log"
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+
+  out=$(PATH="$fb:$BASE_PATH" TMUX='' HERDR_ENV='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_SBX_TEMPLATE=ambient-template:v1 FM_SBX_SIGNALS_ROOT="$w/signals" \
+    FM_SBX_RESURRECT_SETTLE=0 FM_SBX_RESURRECT_READY_TRIES=0 FM_SBX_KEEPALIVE_MAX=0 \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-sm1 running)" FM_FAKE_SBX_WRITE_DIR="$w/guest-writes" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$out" "respawn failed" \
+    "the untemplated dead sbx secondmate's respawn should succeed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-sm1 claude $home $w/signals/sm1" \
+    "the respawn must not inherit an ambient FM_SBX_TEMPLATE when meta has no sbx_template"
+  assert_not_contains "$(cat "$w/sbx.log")" "ambient-template:v1" \
+    "ambient FM_SBX_TEMPLATE must be ignored when durable meta records no template"
+  meta=$(cat "$w/home/state/sm1.meta")
+  assert_contains "$meta" "backend=sbx" \
+    "the respawned untemplated meta must keep backend=sbx"
+  assert_not_contains "$meta" "sbx_template=" \
+    "the respawned untemplated meta must keep the missing sbx_template key absent"
+  pass "sweep: an untemplated sbx respawn ignores ambient FM_SBX_TEMPLATE"
+}
+
 test_tmux_agent_alive_classifies
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawn_preserves_sbx_backend_and_template
+test_sweep_respawn_ignores_ambient_template_without_recorded_template
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading

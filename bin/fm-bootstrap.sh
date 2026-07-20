@@ -424,7 +424,7 @@ secondmate_liveness_sweep() {
         recorded_template=$(fm_meta_get "$meta" sbx_template)
         set -- "$id" --secondmate
         [ -z "$recorded_backend" ] || set -- "$@" --backend "$recorded_backend"
-        if out=$(FM_SPAWN_NO_GUARD=1 FM_SBX_TEMPLATE="${recorded_template:-${FM_SBX_TEMPLATE:-}}" \
+        if out=$(FM_SPAWN_NO_GUARD=1 FM_SBX_TEMPLATE="${recorded_template:-}" \
             "$FM_ROOT/bin/fm-spawn.sh" "$@" 2>&1); then
           :
         else
