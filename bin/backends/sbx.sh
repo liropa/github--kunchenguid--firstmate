@@ -259,14 +259,17 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
       return 1
       ;;
   esac
-  # Uncommitted changes are never landed. Same untracked ignores as the host
-  # check, though provisioning already excludes the seeded hook file from the
-  # guest git view.
+  # Uncommitted changes are never landed. This intentionally diverges from the
+  # host worktree check's untracked-file filters: a clean sbx guest already
+  # hides its seeded files from git (`.claude/settings.local.json` is in
+  # `.git/info/exclude`, the brief is under ignored `data/`), and
+  # `.fm-grok-turnend` is not created by the claude/codex-only sbx backend.
+  # Any status output is therefore genuine in-guest work that `sbx rm --force`
+  # would destroy.
   if ! dirty=$(sbx exec "$name" -- git -C "$home" status --porcelain 2>/dev/null); then
     printf 'cannot verify in-guest work for %s: git status failed in %s' "$name" "$home"
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
   if [ -n "$dirty" ]; then
     printf 'sandbox %s has uncommitted changes in %s' "$name" "$home"
     return 1

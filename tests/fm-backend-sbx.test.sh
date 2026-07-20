@@ -528,6 +528,19 @@ test_unlanded_work_dirty_guest_refuses() {
   pass "unlanded_work: dirty guest -> unsafe (rc 1) with a reason"
 }
 
+test_unlanded_work_untracked_claude_file_refuses() {
+  local w fb out
+  w=$(new_sbx_world unlanded-claude-untracked); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_unlanded_work sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GIT_STATUS="?? .claude/notes.md"); then
+    fail "an untracked .claude/ file in the guest must be refused (rc 1)"
+  fi
+  assert_contains "$out" "uncommitted changes" \
+    "the refusal reason must name the uncommitted in-guest changes"
+  pass "unlanded_work: untracked .claude/ guest file -> unsafe (rc 1)"
+}
+
 test_unlanded_work_unpushed_guest_refuses() {
   local w fb out
   w=$(new_sbx_world unlanded-unpushed); fb=$(make_fake_sbx "$w")
@@ -724,6 +737,7 @@ test_sweep_never_acts_on_probe_error
 test_sweep_respawns_confirmed_absent_secondmate
 test_unlanded_work_clean_guest_is_safe
 test_unlanded_work_dirty_guest_refuses
+test_unlanded_work_untracked_claude_file_refuses
 test_unlanded_work_unpushed_guest_refuses
 test_unlanded_work_absent_is_safe
 test_unlanded_work_error_state_refuses
