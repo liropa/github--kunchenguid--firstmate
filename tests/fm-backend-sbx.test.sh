@@ -658,7 +658,7 @@ run_teardown_sbx() {  # <world> <fakebin> <extra> [env k=v...]
   PATH="$fb:$PATH" FM_HOME="$w/home" \
     FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
     FM_SBX_SIGNALS_ROOT="$w/signals" \
-    env "$@" "$ROOT/bin/fm-teardown.sh" domain $extra 2>&1
+    env "$@" "$ROOT/bin/fm-teardown.sh" domain "$extra" 2>&1
 }
 
 test_teardown_refuses_unlanded_guest() {
