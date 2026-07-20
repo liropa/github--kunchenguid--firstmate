@@ -22,6 +22,8 @@
 #   FM_FAKE_SBX_WRITE_DIR    when set, `exec -i ... sh -c 'mkdir ... cat > ...'`
 #                            captures stdin to <dir>/<guest-path with / -> _>
 #   FM_FAKE_SBX_CAPTURE      file `exec ... tmux capture-pane` prints
+#   FM_FAKE_SBX_CAPTURE_FAIL_ONCE
+#                            makes the first capture-pane return non-zero
 #   FM_FAKE_SBX_TYPE_ECHO    when set (with FM_FAKE_SBX_CAPTURE), a literal
 #                            `tmux send-keys ... -l <text>` appends <text> to
 #                            the capture file - models a terminal that renders
@@ -83,6 +85,13 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
         ;;
       "tmux capture-pane"*)
+        if [ -n "${FM_FAKE_SBX_CAPTURE_FAIL_ONCE:-}" ]; then
+          marker="${FM_FAKE_SBX_CAPTURE:-$FM_FAKE_SBX_LOG}.capture-failed"
+          if [ ! -e "$marker" ]; then
+            : > "$marker"
+            exit 1
+          fi
+        fi
         if [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
           start=
           prev=

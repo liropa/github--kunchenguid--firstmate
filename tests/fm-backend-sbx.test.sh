@@ -397,6 +397,22 @@ test_submit_counts_full_history_when_window_scrolls() {
   pass "send_text_submit: full-history count survives 30-line window churn"
 }
 
+test_submit_fails_when_baseline_capture_fails() {
+  local w fb out
+  w=$(new_sbx_world submit-baseline-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf '> [fm-from-firstmate]soak turn 2\nidle notice line\n' > "$w/pane.txt"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_CAPTURE_FAIL_ONCE=1 2>/dev/null); then
+    fail "baseline capture failure must fail before delivery, got '$out'"
+  fi
+  [ "$out" = send-failed ] || fail "baseline capture failure should return send-failed, got '$out'"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x -l" \
+    "baseline capture failure must not type the steer"
+  pass "send_text_submit: baseline capture failure fails before typing"
+}
+
 test_send_starts_keepalive_after_delivery() {
   local w fb
   w=$(new_sbx_world keepalive); fb=$(make_fake_sbx "$w")
@@ -792,6 +808,7 @@ test_submit_reenters_when_enter_swallowed
 test_submit_ignores_stale_prefix_line_in_scrollback
 test_submit_retypes_when_stale_prefix_goes_busy
 test_submit_counts_full_history_when_window_scrolls
+test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
