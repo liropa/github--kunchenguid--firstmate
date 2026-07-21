@@ -536,9 +536,9 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # seconds later (verified live, twice). The check distinguishes the two
 # swallow modes: text absent from the pane -> retype from scratch; text
 # still sitting in the composer (Enter eaten, pane not busy) -> re-send
-# Enter only, never retype (fm-send's no-double-text rule). A pane that
-# shows the busy signature or no longer shows the text after Enter counts
-# as submitted.
+# Enter only, never retype (fm-send's no-double-text rule). Only a newly
+# visible needle plus the busy signature counts as submitted; ambiguous
+# exhausted retries report unknown instead of cleanly claiming delivery.
 # Presence means NEWLY appeared, not merely visible: steers routinely share
 # the needle prefix (the from-firstmate marker plus a repeated verb), and a
 # prior steer's rendered line can stay in captured scrollback.

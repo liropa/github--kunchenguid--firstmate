@@ -561,9 +561,11 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
-# fm_backend_send_text_submit: type text once, then submit and verify,
-# retrying only the submission (never retyping). Echoes the verdict
-# (empty|pending|unknown|send-failed for submit-verifying adapters).
+# fm_backend_send_text_submit: submit and verify text according to the
+# backend's transport contract. Most adapters type once and retry only Enter;
+# sbx may retype when pane verification shows the typed text was swallowed.
+# Echoes the verdict (empty|pending|unknown|send-failed for submit-verifying
+# adapters).
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
