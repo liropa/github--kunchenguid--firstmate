@@ -811,6 +811,40 @@ EOF
     # verified sbx launch+resume shape (claude|codex) BEFORE creating
     # anything, so meta can only ever record an in-VM harness the liveness
     # sweep's verified list accepts.
+    # A projects-bearing home is refused before anything is created: its
+    # projects/ sub-clones are independent gitignored repos that clone mode
+    # structurally cannot carry into the VM, and a secondmate whose charter
+    # references projects that silently don't exist in-guest would burn
+    # turns discovering it. Loud refusal until an in-guest re-clone story
+    # exists (agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md
+    # §4.4/§8). Registry entries and physical clones are both checked, the
+    # same two signals fm-home-seed.sh's --no-projects guard reads - and an
+    # UNINSPECTABLE signal refuses too (fail-safe, matching that guard):
+    # silently spawning a home whose project data cannot be ruled out is the
+    # exact quiet degradation the refusal exists to prevent.
+    if [ -f "$PROJ_ABS/data/projects.md" ] && [ ! -r "$PROJ_ABS/data/projects.md" ]; then
+      echo "error: cannot inspect project registry at $PROJ_ABS/data/projects.md; resolve its access permissions before an sbx spawn (a projects-bearing home must be refused)" >&2
+      exit 1
+    fi
+    if [ -d "$PROJ_ABS/projects" ] && ! find -P "$PROJ_ABS/projects" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1; then
+      echo "error: cannot inspect projects directory at $PROJ_ABS/projects; resolve its access permissions before an sbx spawn (a projects-bearing home must be refused)" >&2
+      exit 1
+    fi
+    sbx_home_projects=
+    if [ -f "$PROJ_ABS/data/projects.md" ]; then
+      sbx_home_projects=$(awk '$1 == "-" && $2 != "" { print $2 }' "$PROJ_ABS/data/projects.md" | tr '\n' ' ')
+    fi
+    for sbx_proj in "$PROJ_ABS/projects"/* "$PROJ_ABS/projects"/.[!.]* "$PROJ_ABS/projects"/..?*; do
+      [ -e "$sbx_proj" ] || [ -L "$sbx_proj" ] || continue
+      case " $sbx_home_projects" in
+        *" ${sbx_proj##*/} "*) ;;
+        *) sbx_home_projects="$sbx_home_projects${sbx_proj##*/} " ;;
+      esac
+    done
+    if [ -n "${sbx_home_projects% }" ]; then
+      echo "error: secondmate home $PROJ_ABS carries projects (${sbx_home_projects% }); sbx clone mode cannot carry nested gitignored project clones into the VM - seed a --no-projects home for sbx, or use a host-pane backend (agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md §4.4)" >&2
+      exit 1
+    fi
     SIG_DIR="$FM_SBX_SIGNALS_ROOT/$ID"
     fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR" || exit 1
     T="sbx:$W"
@@ -1148,6 +1182,19 @@ if [ "$BACKEND" = sbx ]; then
   # The GOTMPDIR export below lands in the guest pane; create its target
   # inside the VM (the host-side mkdir above cannot reach the guest's /tmp).
   sbx exec "$W" -- mkdir -p "$TASK_TMP/gotmp" || true
+  # Guest-home provisioning (agent-dotfiles
+  # docs/firstmate-sbx-guest-home-provisioning.md §4): the rest of the home's
+  # private surface becomes a READ PATH onto the clone-mode RO source mount -
+  # each inherited config/ item and the shared captain file as symlinks, so
+  # every later host-side convergence push (bootstrap sweep, fm-config-push)
+  # is guest-visible with zero sbx CLI calls and a cleared item reads ABSENT
+  # through its dangling link - plus the .fm-secondmate-home identity marker
+  # as a regular file. One idempotent exec, shared with resurrection's
+  # re-assert (bin/backends/sbx.sh).
+  fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" || {
+    echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
+    exit 1
+  }
   case "$HARNESS" in
     claude*)
       # claude's turn-end signal cannot ride the launch command; write its

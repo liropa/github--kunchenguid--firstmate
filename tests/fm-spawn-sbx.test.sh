@@ -22,6 +22,14 @@
 #     mount's turn-ended AND beat files.
 #   - Meta records backend=sbx, window=sbx:fm-<id>, sbx_signals_dir=, and the
 #     actual in-VM harness.
+#   - Guest-home provisioning (agent-dotfiles design doc
+#     firstmate-sbx-guest-home-provisioning.md §4): the home's private
+#     surface becomes a READ PATH - inherited config/ items and the shared
+#     captain file are symlinks onto the clone-mode RO source mount, the
+#     .fm-secondmate-home identity marker is a regular file, presence and
+#     absence both read through the links, a projects-bearing home is
+#     refused before `sbx create`, and a guest whose source mount is not
+#     where FM_SBX_SOURCE_MOUNT says is refused right after create.
 set -u
 
 # shellcheck source=tests/sbx-helpers.sh
@@ -246,6 +254,126 @@ test_untemplated_spawn_records_no_template_key() {
   pass "spawn: no FM_SBX_TEMPLATE means no sbx_template= meta key"
 }
 
+# --- guest-home provisioning (design doc firstmate-sbx-guest-home-provisioning.md §4)
+
+test_spawn_provisions_guest_home() {
+  local w fb out home item
+  w=$(new_world provision); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  home="$w/sm"
+
+  out=$(run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+
+  # The pass must ride ONE guest exec (the fake executes it against the world
+  # home - clone mode puts the guest home at the same absolute path).
+  assert_contains "$(cat "$w/sbx.log")" \
+    "_ $home /run/sandbox/source smx data/captain-shared.md crew-dispatch.json crew-harness backlog-backend" \
+    "the provisioning exec should carry home, mount root, id, captain file, and the declared inheritable list"
+
+  for item in crew-dispatch.json crew-harness backlog-backend; do
+    [ -L "$home/config/$item" ] || fail "config/$item should be a symlink after provisioning"
+    [ "$(readlink "$home/config/$item")" = "/run/sandbox/source/config/$item" ] \
+      || fail "config/$item should read through the RO source mount, got $(readlink "$home/config/$item")"
+  done
+  [ -L "$home/data/captain-shared.md" ] || fail "data/captain-shared.md should be a symlink after provisioning"
+  [ "$(readlink "$home/data/captain-shared.md")" = "/run/sandbox/source/data/captain-shared.md" ] \
+    || fail "data/captain-shared.md should read through the RO source mount"
+
+  # The identity marker is the one residue that must be a REGULAR file
+  # (fm_root_is_secondmate_home hard-refuses [ -L ]), content = the id.
+  [ ! -L "$home/.fm-secondmate-home" ] || fail "the identity marker must never be a symlink"
+  [ -f "$home/.fm-secondmate-home" ] || fail "the identity marker should exist as a regular file"
+  [ "$(cat "$home/.fm-secondmate-home")" = smx ] \
+    || fail "the marker content should be the task id, got '$(cat "$home/.fm-secondmate-home")'"
+  ( . "$ROOT/bin/fm-primary-scope-lib.sh" && fm_root_is_secondmate_home "$home" ) \
+    || fail "fm_root_is_secondmate_home should accept the provisioned marker"
+
+  pass "spawn: guest home gets read-through symlinks onto the source mount and a regular-file marker"
+}
+
+test_spawn_read_through_and_absence_semantics() {
+  local w fb out home mount
+  w=$(new_world read-through); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  home="$w/sm"
+  # A host-side stand-in for the RO source mount (FM_SBX_SOURCE_MOUNT is the
+  # knob the design reserves for upstream path drift, which also makes the
+  # semantics testable): a set item reads through the link, an unset or
+  # cleared item leaves a dangling link whose [ -f ] fails - byte-for-byte
+  # the absence-mirroring semantics of the inherit lib.
+  mount="$w/source-mount"
+  mkdir -p "$mount/config" "$mount/data"
+  printf 'codex\n' > "$mount/config/crew-harness"
+  printf '# prefs\n' > "$mount/data/captain-shared.md"
+
+  out=$(FM_SBX_SOURCE_MOUNT="$mount" run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
+    || fail "spawn with an overridden source mount failed: $out"
+
+  [ "$(cat "$home/config/crew-harness")" = codex ] \
+    || fail "a primary-set item should read the host value through the symlink"
+  [ "$(cat "$home/data/captain-shared.md")" = '# prefs' ] \
+    || fail "the captain file should read through the symlink"
+  [ -L "$home/config/crew-dispatch.json" ] \
+    || fail "an item the primary never set should still get its read-path link"
+  [ ! -f "$home/config/crew-dispatch.json" ] \
+    || fail "an item the primary never set should read ABSENT through the dangling link"
+  rm "$mount/config/crew-harness"
+  [ ! -f "$home/config/crew-harness" ] \
+    || fail "clearing the host item must read ABSENT in-guest ([ -f ] through the dangling link)"
+  pass "spawn: read-through inheritance mirrors presence and absence through the source mount"
+}
+
+test_refuses_projects_bearing_home() {
+  local w fb out rc=0
+  w=$(new_world refuse-projects); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # A registry entry alone refuses: clone mode structurally cannot carry the
+  # nested gitignored project clones the registry promises.
+  printf -- '- alpha [no-mistakes] - test project (added 2026-07-21)\n' > "$w/sm/data/projects.md"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an sbx spawn over a projects-bearing home must be refused"
+  assert_contains "$out" "alpha" "the refusal should name the registry entries"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the registry refusal must land before any sandbox is created"
+
+  # A projects/ clone alone (no registry) refuses too.
+  w=$(new_world refuse-projects-clone); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/sm/projects/beta"
+  rc=0
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an sbx spawn over a home with project clones must be refused"
+  assert_contains "$out" "beta" "the refusal should name the projects/ clones"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the clone refusal must land before any sandbox is created"
+  pass "spawn: a projects-bearing home (registry or clones) is refused before sandbox creation"
+}
+
+test_refuses_missing_source_mount() {
+  local w fb out rc=0
+  w=$(new_world refuse-mount); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  out=$(FM_FAKE_SBX_SOURCE_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a guest without a readable source mount must refuse the spawn (half-provisioned is worse than none)"
+  assert_contains "$out" "source mount" "the refusal should name the missing source mount"
+  assert_contains "$out" "FM_SBX_SOURCE_MOUNT" "the refusal should name the escape-hatch knob"
+  assert_not_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
+    "no launch may be delivered into a half-provisioned sandbox"
+  pass "spawn: a missing source mount is refused loudly right after create"
+}
+
+test_spawn_fails_when_provision_exec_fails() {
+  local w fb out rc=0
+  w=$(new_world provision-fails); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  out=$(FM_FAKE_SBX_PROVISION_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed provisioning exec must fail the spawn loudly"
+  assert_contains "$out" "provision" "the failure should name the provisioning step"
+  assert_not_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
+    "no launch may be delivered when provisioning failed"
+  pass "spawn: a failed guest-home provisioning exec fails the spawn before launch"
+}
+
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
 test_claude_spawn_wires_signal_bridge
@@ -254,5 +382,10 @@ test_refuses_worktree_home
 test_preexisting_status_history_is_folded
 test_template_pin_is_recorded_in_meta
 test_untemplated_spawn_records_no_template_key
+test_spawn_provisions_guest_home
+test_spawn_read_through_and_absence_semantics
+test_refuses_projects_bearing_home
+test_refuses_missing_source_mount
+test_spawn_fails_when_provision_exec_fails
 
 echo "# all fm-spawn-sbx tests passed"
