@@ -79,8 +79,9 @@ This section is the single owner of the secondmate sync and inherited-local-mate
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The locked session-start bootstrap sweep runs the same guarded fast-forward for every live secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
 That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
-The same launch and the same locked bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and the one shared captain-preference file `data/captain-shared.md`.
-Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
+The same launch and the same locked bootstrap sweep also propagate the primary's declared inherited local material into the secondmate's persistent host home: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and the one shared captain-preference file `data/captain-shared.md`.
+Because these paths are gitignored, that host-home propagation is separate, primary-authoritative, and independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
+For sbx-backed secondmates, the in-guest home does not receive another copy; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns the read-through symlink path from the guest clone to the propagated host-home material.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
@@ -95,8 +96,9 @@ After first propagation to an existing home, trim that home's local `data/captai
 Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
 No reread nudge is needed at spawn or respawn because the agent reads `AGENTS.md` fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs one.
 Bootstrap reports successful sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
-For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward or nudging the agents.
+For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change to the host homes without running the tracked-file fast-forward or nudging the agents.
 It uses the same live-home discovery and propagation helper as bootstrap and reports each item as `pushed`, `unchanged`, `skipped`, or `error`.
+Sbx guests observe changed bytes and removals immediately through their existing links, but a newly added `FM_INHERITABLE_CONFIG` item reaches an already-created guest only when sbx provisioning reasserts the link set at resurrection or respawn.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
