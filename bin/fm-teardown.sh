@@ -1152,6 +1152,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+# Beat-beacon markers (fm-watch.sh scan_sbx_beacon; key = id with dots
+# folded to underscores). A leftover .sbx-stranded-alarmed marker would
+# suppress the stranding alarm for a re-provisioned same-id secondmate.
+_beacon_key=$(printf '%s' "$ID" | tr '.' '_')
+rm -f "$STATE/.sbx-beat-te-$_beacon_key" "$STATE/.sbx-beat-status-$_beacon_key" \
+  "$STATE/.sbx-noprogress-$_beacon_key" "$STATE/.sbx-stranded-alarmed-$_beacon_key" \
+  "$STATE/.sbx-mount-alarmed-$_beacon_key"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
