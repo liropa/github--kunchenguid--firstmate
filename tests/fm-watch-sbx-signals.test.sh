@@ -132,11 +132,11 @@ test_foreign_id_file_is_invisible() {
 
 test_mount_vanished_fires_mount_alarm() {
   # The beat-beacon's mount-health consumer (design doc open question 6;
-  # docs/sbx-backend.md "Remaining gaps"): scan_signals' [ -e ] skip makes a
-  # vanished mount SILENT - the watcher goes blind to the secondmate with no
-  # captain-facing alarm. A dangling symlink whose target DIRECTORY exists is
-  # a fresh spawn (quiescent, tested above); a dangling symlink whose target
-  # directory is GONE is a vanished mount and must raise one check wake.
+  # docs/sbx-backend.md "Beat-beacon alarms"): scan_signals' [ -e ] skip stays
+  # quiet on a vanished mount, so scan_sbx_beacon must name the outage.
+  # A dangling symlink whose target DIRECTORY exists is a fresh spawn
+  # (quiescent, tested above); a dangling symlink whose target directory is
+  # GONE is a vanished mount and must raise one check wake.
   local dir state mount out pid
   dir=$(make_case mount-vanished); state="$dir/state"; out="$dir/watch.out"
   mount="$dir/mount"
