@@ -826,6 +826,14 @@ EOF
       echo "error: cannot inspect project registry at $PROJ_ABS/data/projects.md; resolve its access permissions before an sbx spawn (a projects-bearing home must be refused)" >&2
       exit 1
     fi
+    if [ -L "$PROJ_ABS/projects" ]; then
+      echo "error: cannot inspect projects directory at $PROJ_ABS/projects because it is a symlink; resolve the symlink before an sbx spawn (a projects-bearing home must be refused fail-safe)" >&2
+      exit 1
+    fi
+    if [ -e "$PROJ_ABS/projects" ] && [ ! -d "$PROJ_ABS/projects" ]; then
+      echo "error: cannot inspect projects directory at $PROJ_ABS/projects because it is not a directory; resolve its path before an sbx spawn (a projects-bearing home must be refused fail-safe)" >&2
+      exit 1
+    fi
     if [ -d "$PROJ_ABS/projects" ] && ! find -P "$PROJ_ABS/projects" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1; then
       echo "error: cannot inspect projects directory at $PROJ_ABS/projects; resolve its access permissions before an sbx spawn (a projects-bearing home must be refused)" >&2
       exit 1
