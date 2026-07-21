@@ -1100,6 +1100,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
+        # shellcheck disable=SC2100  # a provenance label, not arithmetic: ShellCheck 0.11.0 reads the dashes as subtraction, and only in some multi-file invocations (surfaced when unrelated files changed; single-file lint stays clean)
         provenance=parent-event-fallback
         freshness=historical-event
       else
