@@ -346,7 +346,20 @@ test_refuses_projects_bearing_home() {
   assert_contains "$out" "beta" "the refusal should name the projects/ clones"
   assert_not_contains "$(cat "$w/sbx.log")" "create" \
     "the clone refusal must land before any sandbox is created"
-  pass "spawn: a projects-bearing home (registry or clones) is refused before sandbox creation"
+
+  # A symlinked projects/ path is uninspectable for the fail-safe guard.
+  w=$(new_world refuse-projects-symlink); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/sm/projects-target"
+  rmdir "$w/sm/projects"
+  ln -s "$w/sm/projects-target" "$w/sm/projects"
+  rc=0
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an sbx spawn over a symlinked projects path must be refused"
+  assert_contains "$out" "fail-safe" "the symlink refusal should name the fail-safe rule"
+  assert_contains "$out" "symlink" "the symlink refusal should name the path shape"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the symlink refusal must land before any sandbox is created"
+  pass "spawn: a projects-bearing home (registry, clones, or symlinked projects) is refused before sandbox creation"
 }
 
 test_refuses_missing_source_mount() {
