@@ -1,31 +1,34 @@
 # shellcheck shell=bash
 # Inheritance propagation: the PRIMARY firstmate pushes a declared, extensible
-# set of LOCAL (gitignored) config items down into each secondmate home's
+# set of LOCAL (gitignored) config items down into each secondmate host home's
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, and primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too). It also pushes the one primary-authoritative
 # shared captain-preference file, data/captain-shared.md, into each secondmate
-# home's data/ as a read-only copy.
+# host home's data/ as a read-only copy.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
 # Why this is separate from the tracked-files fast-forward (fm-ff-lib.sh): config/
 # is gitignored, so a tracked-files fast-forward never carries these items. This
-# is an explicit copy run at the convergence points the primary owns - a
+# is an explicit host-home copy run at the convergence points the primary owns - a
 # secondmate spawn (bin/fm-spawn.sh), the bootstrap secondmate sweep
 # (bin/fm-bootstrap.sh), and the focused mid-session config push
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
+# Sbx guest homes are the exception at the guest-disk layer: bin/backends/sbx.sh
+# creates read-through links from the guest clone to these host-home bytes.
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
-# convergence point inherits it - no other change needed. config/secondmate-harness
-# is deliberately NOT in the list: it is the primary's own setting for launching
-# secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream.
+# host-home convergence point inherits it - no other change needed; existing sbx
+# guest clones see the new path when their backend provisioning pass next
+# re-asserts the link set. config/secondmate-harness is deliberately NOT in the
+# list: it is the primary's own setting for launching secondmates, and a
+# secondmate never spawns secondmates, so it must not flow downstream.
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
