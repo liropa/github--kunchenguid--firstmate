@@ -73,20 +73,38 @@ Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon
    A pre-existing regular signal file is folded into the mount file first, so history survives a host-to-sbx migration.
    The symlink set is the id allowlist: a guest-invented foreign-id file has no symlink and is invisible to the scan.
 3. Seeds the brief into the guest at its own absolute path (clone mode drops gitignored files), rewriting the primary's status-file path to the mount file - the host symlink makes both names converge on the same file.
-4. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
+4. Provisions the rest of the guest home's private surface as a **read path** ("Guest-home provisioning" below): read-through symlinks for the inherited `config/` items and `data/captain-shared.md` onto the clone-mode RO source mount, plus the `.fm-secondmate-home` identity marker as a regular file.
+5. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
-5. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
-6. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend), including `sbx_template=` when `FM_SBX_TEMPLATE` was set.
-7. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
+6. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
+7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend), including `sbx_template=` when `FM_SBX_TEMPLATE` was set.
+8. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
 Supported harnesses: **claude and codex** (the intersection of the sweep's verified list, sbx's installable agents, and a verified turn-end + resume shape).
-Anything else is refused before any sandbox is created.
+Anything else is refused before any sandbox is created, as is a **projects-bearing home** (below).
 
 Latency budget: worst case ≈ `POLL` (15 s) + `SIGNAL_GRACE` (30 s) + sub-millisecond mount visibility.
 The grace share is deliberate (coalescing a status write with its turn-end saves whole first-mate turns).
 Measured live (2026-07-19, steady-state watcher): **34.5 s** turn-end → wake (≈4 s poll phase + 30 s grace), one coalesced wake for status + turn-end; a full steer of a stopped VM (resurrection + verified delivery) took 16.5 s and the guest's reply landed ~3 s later.
 Idle supervision costs **zero** sbx CLI calls (the scan is pure host stats; stopped VMs stay stopped) - versus an `sbx exec`-polling design's ~240 exec round-trips/hour/secondmate at 302 ms p50 (Gate 0) that would also auto-start every stopped VM on each probe.
 The design doc's v2 latency trigger is **not met**: the wake path is grace-dominated by design, and v2's event layer could only shave the ≤15 s poll share.
+
+## Guest-home provisioning (read-through inheritance)
+
+Design: agent-dotfiles `docs/firstmate-sbx-guest-home-provisioning.md` (Gate P1 verified live 2026-07-21).
+Clone mode carries committed files only, so the home's private (gitignored) surface would otherwise be ABSENT in-guest and the secondmate would bootstrap without captain preferences or inherited crew settings.
+Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idempotent exec after the brief seed (`fm_backend_sbx_provision_guest_home`, shared with resurrection):
+
+- Each declared `FM_INHERITABLE_CONFIG` item (`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`) and `data/captain-shared.md` become symlinks onto clone mode's RO live bind mount of the host home (`FM_SBX_SOURCE_MOUNT`, default `/run/sandbox/source`).
+  The host home is the destination every convergence point (spawn, the bootstrap secondmate sweep, `fm-config-push.sh`) already writes, so every push is guest-visible immediately - stopped VMs included - at **zero** sbx CLI calls, and a primary-cleared item reads ABSENT through its dangling link (`[ -f ]` fails): the inherit lib's absence mirroring, byte for byte.
+  The RO mount is stronger than the host-side mode-444 posture: the guest cannot write through it at all, and a guest deleting its own links only blinds itself until the next re-assert.
+- `.fm-secondmate-home` is seeded as a **regular file** (content = the id): `fm_root_is_secondmate_home` hard-refuses symlinks, and with the marker present hometag and the is-secondmate predicates read the guest as what it is.
+- Right after `sbx create`, spawn probes `test -r $FM_SBX_SOURCE_MOUNT/AGENTS.md` in-guest and refuses loudly when the mount is not readable there: the mount path is an sbx implementation detail, not a documented contract, so upstream drift must fail the spawn instead of leaving inheritance dangling forever (a half-provisioned secondmate is worse than none).
+- **Projects-bearing homes are refused before `sbx create`** (`data/projects.md` registry entries or `projects/` clones, the same two signals `fm-home-seed.sh --no-projects` guards): sub-project clones are independent gitignored repos clone mode structurally cannot carry, and a secondmate whose charter references projects that silently don't exist in-guest would burn turns discovering it. Seed sbx homes with `--no-projects`; in-guest re-cloning is a designable v2.
+- Resurrection re-runs the same pass before relaunching the agent, healing guest-side link/marker damage and picking up `FM_INHERITABLE_CONFIG` items declared since spawn - a list addition reaches existing guests at their next resurrect or respawn, not at the next push (`docs/configuration.md`).
+- Teardown is unaffected: links and marker live under gitignored paths, so the landed-work probe's `git status --porcelain` stays clean.
+
+Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
 
 ## Steering and resurrection (`fm_backend_sbx_send_*`)
 
@@ -95,7 +113,7 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent/unreadable sandbox.
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures - the watcher's own stability idiom - then let the caller deliver.
 
@@ -155,8 +173,7 @@ Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (ab
 
 - **Keep-alive covers only host-initiated turns** - the pin is armed at delivery (launch and steers). A turn the guest agent starts on its own (its own crew supervision, a scheduled follow-up) has no pin and dies with the ~45-100 s post-disconnect stop if it outlasts it; the auto-stop grace is Docker's heuristic and may change under us. Revisit if sbx grows a keep-alive/idle knob. (Confirmed still open after step 4.)
 - **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
-- **Guest-side home provisioning** - only the brief is seeded in v1; the rest of the private surface (`data/captain-shared.md`, `config/*` inheritance) stays absent in the guest, so the secondmate bootstraps with ABSENT markers.
-  The full provisioning story is the companion backend design's scope.
+- **Guest-home provisioning v2 scope** - the read-through design above closes the v1 gap; what remains is deliberately deferred: projects-bearing homes stay refused at spawn until an in-guest re-clone story exists, and the guest clone's *tracked* files stay frozen at spawn HEAD while the host home fast-forwards (a resurrect-time ff-only fast-forward mirroring `ff_target`'s guards is designable - measure whether it bites first).
 - **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). The beacon's stranding alarm (above) now names the pattern for the captain; the recovery itself is still manual.
 
 ## Security posture

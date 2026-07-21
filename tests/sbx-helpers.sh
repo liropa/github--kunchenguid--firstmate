@@ -41,6 +41,12 @@
 #                            (empty = every commit already on a remote)
 #   FM_FAKE_SBX_GIT_RC       non-zero makes the guest `git` calls fail (the
 #                            unverifiable-guest case)
+#   FM_FAKE_SBX_SOURCE_RC    exit code for the spawn-time source-mount probe
+#                            (`exec ... test -r <mount>/AGENTS.md`; default 0 =
+#                            the clone-mode RO mount is where sbx puts it)
+#   FM_FAKE_SBX_PROVISION_RC non-zero fails the guest-home provisioning exec
+#                            (the `sh -c` pass carrying `ln -sfn`) instead of
+#                            executing it
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -128,6 +134,22 @@ case "$cmd" in
           esac
         fi
         exit 0
+        ;;
+      "test -r "*)
+        # fm_backend_sbx_create_task's source-mount probe.
+        exit "${FM_FAKE_SBX_SOURCE_RC:-0}"
+        ;;
+      "sh -c "*"ln -sfn "*)
+        # The guest-home provisioning pass (fm_backend_sbx_provision_guest_home).
+        # Clone mode places the guest home at the SAME absolute path as the
+        # host home, so executing the script for real against the world's home
+        # dir models the guest write exactly - suites assert the resulting
+        # symlink/marker shapes instead of grepping script text.
+        [ "${FM_FAKE_SBX_PROVISION_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_PROVISION_RC}"
+        script=$3
+        shift 3
+        sh -c "$script" "$@"
+        exit $?
         ;;
       "sh -c mkdir -p"*"cat >> "*)
         # fm-spawn's codex project-trust seed appends to the guest's

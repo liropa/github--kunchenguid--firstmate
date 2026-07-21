@@ -193,12 +193,16 @@ test_capture_gated_on_running() {
 # --- steering: resurrection sequence (design §8.3) --------------------------
 
 test_send_resurrects_dead_guest_stack() {
-  local w fb log
+  local w fb home log
   w=$(new_sbx_world resurrect); fb=$(make_fake_sbx "$w")
+  # A real fixture home: the fake executes the provisioning re-assert for
+  # real (clone mode guarantees the guest home exists - sbx create made it).
+  home="$w/sm"
+  mkdir -p "$home"
   fm_write_meta "$w/state/x.meta" \
-    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
     "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
 
   # Post-auto-stop shape: the sandbox reads running once exec'd, but the guest
   # tmux server is gone (has-session fails).
@@ -208,7 +212,7 @@ test_send_resurrects_dead_guest_stack() {
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
     || fail "a steer of a resurrectable sandbox should succeed"
   log=$(cat "$w/sbx.log")
-  assert_contains "$log" "tmux new-session -d -s fm -n fm-x -c /sm/home" \
+  assert_contains "$log" "tmux new-session -d -s fm -n fm-x -c $home" \
     "resurrection must rebuild the guest tmux session at the recorded home"
   assert_contains "$log" "codex resume --last --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" \
     "resurrection must relaunch the agent in RESUME mode with codex's hook-trust TUI gate bypassed"
@@ -240,12 +244,14 @@ test_resume_template_quoting() {
 }
 
 test_resurrection_waits_for_stable_pane() {
-  local w fb log resume_line ready_line steer_line
+  local w fb home log resume_line ready_line steer_line
   w=$(new_sbx_world resurrect-ready); fb=$(make_fake_sbx "$w")
+  home="$w/sm"
+  mkdir -p "$home"
   fm_write_meta "$w/state/x.meta" \
-    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
     "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
   sbx_ls_json fm-x running > "$w/ls.json"
   printf 'restored transcript\n' > "$w/pane.txt"
   : > "$w/sbx.log"
@@ -268,12 +274,14 @@ test_resurrection_waits_for_stable_pane() {
 }
 
 test_resurrection_refuses_dead_pane_delivery() {
-  local w fb
+  local w fb home
   w=$(new_sbx_world resurrect-dead); fb=$(make_fake_sbx "$w")
+  home="$w/sm"
+  mkdir -p "$home"
   fm_write_meta "$w/state/x.meta" \
-    "window=sbx:fm-x" "worktree=/sm/home" "project=/sm/home" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
     "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "backend=sbx" "home=/sm/home" "sbx_signals_dir=$w/signals/x"
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
   sbx_ls_json fm-x running > "$w/ls.json"
   : > "$w/sbx.log"
   # The resume died back to the guest shell (FG=bash). Delivering there would
@@ -286,6 +294,46 @@ test_resurrection_refuses_dead_pane_delivery() {
   assert_not_contains "$(cat "$w/sbx.log")" "steer text" \
     "the steer text must never be typed into a dead (shell) pane"
   pass "send path: a failed resume (pane still a shell) is refused loudly, nothing delivered"
+}
+
+test_resurrection_reasserts_guest_home() {
+  local w fb home log provision_line resume_line
+  w=$(new_sbx_world reassert); fb=$(make_fake_sbx "$w")
+  home="$w/sm"
+  mkdir -p "$home/config" "$home/data"
+  # Guest self-harm shapes the re-assert must heal (guest-home provisioning
+  # design §4.3/§7): an inherited item replaced by a guest-local regular file
+  # (its own crew would drift from the primary), and the identity marker
+  # replaced by a symlink (fm_root_is_secondmate_home hard-refuses [ -L ]).
+  printf 'local-drift\n' > "$home/config/crew-harness"
+  ln -sfn /nonexistent "$home/.fm-secondmate-home"
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  [ -L "$home/config/crew-harness" ] \
+    || fail "the re-assert must restore the read-through symlink over guest-local drift"
+  [ "$(readlink "$home/config/crew-harness")" = /run/sandbox/source/config/crew-harness ] \
+    || fail "the restored link must point at the RO source mount"
+  [ ! -L "$home/.fm-secondmate-home" ] \
+    || fail "the re-assert must replace a symlinked marker with a regular file"
+  [ -f "$home/.fm-secondmate-home" ] \
+    || fail "the re-assert must seed the identity marker"
+  [ "$(cat "$home/.fm-secondmate-home")" = x ] \
+    || fail "the marker content should be the task id, got '$(cat "$home/.fm-secondmate-home")'"
+  log=$(cat "$w/sbx.log")
+  assert_contains "$log" "ln -sfn" \
+    "resurrection must run the provisioning re-assert through a guest exec"
+  provision_line=$(grep -n 'ln -sfn' "$w/sbx.log" | head -1 | cut -d: -f1)
+  resume_line=$(grep -n 'codex resume' "$w/sbx.log" | head -1 | cut -d: -f1)
+  [ "$provision_line" -lt "$resume_line" ] \
+    || fail "the re-assert must run before the agent relaunch"
+  pass "send path: resurrection re-asserts the guest home's read path (links + marker) before relaunch"
 }
 
 # --- send_text_submit: verify-and-retry (resume-time notices eat keys) ------
@@ -439,6 +487,8 @@ test_send_skips_resurrection_when_stack_alive() {
     || fail "a steer of a live stack should succeed"
   assert_not_contains "$(cat "$w/sbx.log")" "new-session" \
     "a live guest stack must never be rebuilt (that would clobber the running agent)"
+  assert_not_contains "$(cat "$w/sbx.log")" "ln -sfn" \
+    "the provisioning re-assert is resurrect-only; routine delivery must not spend the exec"
   pass "send path: a live guest stack is delivered to directly, never rebuilt"
 }
 
@@ -828,6 +878,7 @@ test_send_resurrects_dead_guest_stack
 test_resume_template_quoting
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
+test_resurrection_reasserts_guest_home
 test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed

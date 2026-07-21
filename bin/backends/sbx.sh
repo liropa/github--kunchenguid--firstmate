@@ -63,6 +63,23 @@ FM_SBX_KEEPALIVE_MAX=${FM_SBX_KEEPALIVE_MAX:-7200}
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
 
+# Clone mode's read-only live bind mount of the host home inside the guest.
+# The path is an sbx implementation detail, not a documented upstream contract
+# (verified live, Gate P1 2026-07-21; agent-dotfiles
+# docs/firstmate-sbx-guest-home-provisioning.md §3/§8) - so spawn probes it
+# right after create and refuses loudly on drift, and an upstream rename is
+# this one-line config fix rather than a code change.
+FM_SBX_SOURCE_MOUNT=${FM_SBX_SOURCE_MOUNT:-/run/sandbox/source}
+
+# The guest-home provisioning pass links each declared FM_INHERITABLE_CONFIG
+# item plus the shared captain file; fm-config-inherit-lib.sh owns both
+# declarations (the single declared list), and this adapter is sourced
+# standalone by fm-send/fm-crew-state where that lib is otherwise absent.
+if [ -z "${FM_INHERITABLE_CONFIG:-}" ] || [ -z "${FM_SHARED_CAPTAIN_REL:-}" ]; then
+  # shellcheck source=bin/fm-config-inherit-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/../fm-config-inherit-lib.sh"
+fi
+
 fm_backend_sbx_state_dir() {
   printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 }
@@ -451,6 +468,15 @@ fm_backend_sbx_ensure_stack() {  # <target>
     echo "error: cannot resurrect $name: no resume template for harness '$harness'" >&2
     return 1
   }
+  # Re-assert the guest home's provisioned read path before relaunching the
+  # agent (guest-home provisioning design §4.3): idempotent, heals guest-side
+  # symlink/marker damage, and picks up FM_INHERITABLE_CONFIG items declared
+  # since spawn. Resurrect-only cost - routine supervision and live-stack
+  # delivery never spend this exec.
+  fm_backend_sbx_provision_guest_home "$name" "$home" "$id" || {
+    echo "error: cannot resurrect $name: guest-home provisioning re-assert failed" >&2
+    return 1
+  }
   sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$resume" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter || return 1
@@ -643,6 +669,16 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   else
     sbx create --clone --name "$name" "$agent" "$home_abs" "$signals_dir" >&2 || return 1
   fi
+  # Right after create, prove the clone-mode RO source mount is where the
+  # guest-home provisioning pass expects it: the path is an sbx
+  # implementation detail, so version drift must be a loud refusal here, not
+  # a secondmate whose read-through inheritance silently dangles forever
+  # (half-provisioned is worse than no sandbox). AGENTS.md is the one file
+  # every firstmate home commits, so its readability proves the mount.
+  if ! sbx exec "$name" -- test -r "$FM_SBX_SOURCE_MOUNT/AGENTS.md"; then
+    echo "error: sandbox $name has no readable clone-mode source mount at $FM_SBX_SOURCE_MOUNT; guest-home provisioning depends on it (if sbx moved the mount, set FM_SBX_SOURCE_MOUNT; agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md)" >&2
+    return 1
+  fi
   if ! sbx exec "$name" -- sh -c 'command -v tmux >/dev/null 2>&1'; then
     echo "error: sandbox $name's template has no tmux; the sbx backend needs an in-guest tmux (pin FM_SBX_TEMPLATE to a template that ships it)" >&2
     return 1
@@ -659,4 +695,37 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
   local name=$1 path=$2
   # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
   sbx exec -i "$name" -- sh -c 'mkdir -p "$(dirname "$1")" && cat > "$1"' _ "$path"
+}
+
+# fm_backend_sbx_provision_guest_home: the guest-home provisioning pass
+# (agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md §4). Clone
+# mode carries committed files only, so the home's private (gitignored)
+# surface is rebuilt in-guest as a READ PATH, not a copy pipeline: each
+# declared FM_INHERITABLE_CONFIG item and the shared captain file become
+# symlinks onto the clone-mode RO source mount - the live host home the
+# convergence points (spawn, bootstrap sweep, fm-config-push) already write -
+# so every host-side push is guest-visible immediately, stopped VMs included,
+# at zero sbx CLI calls, and a primary-cleared item reads ABSENT through its
+# dangling link ([ -f ] fails), byte-for-byte the inherit lib's absence
+# mirroring. The .fm-secondmate-home identity marker is the one residue seeded
+# as a REGULAR file (fm_root_is_secondmate_home hard-refuses [ -L ]), content
+# = the task id. One idempotent exec; spawn runs it after the brief seed, and
+# resurrection re-runs it before relaunching the agent - healing guest-side
+# link/marker damage (self-blinding only, the mount stays RO) and picking up
+# FM_INHERITABLE_CONFIG items declared since spawn.
+fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id>
+  local name=$1 home_abs=$2 id=$3
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$4 and the loop expand in the guest sh, not here
+  # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
+  sbx exec "$name" -- sh -c '
+    home=$1 src=$2 id=$3 captain=$4; shift 4
+    cd "$home" || exit 1
+    mkdir -p config data || exit 1
+    for item; do
+      ln -sfn "$src/config/$item" "config/$item" || exit 1
+    done
+    ln -sfn "$src/$captain" "$captain" || exit 1
+    rm -f .fm-secondmate-home || exit 1
+    printf "%s\n" "$id" > .fm-secondmate-home
+  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" $FM_INHERITABLE_CONFIG
 }
