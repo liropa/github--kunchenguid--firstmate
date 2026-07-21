@@ -773,6 +773,32 @@ test_teardown_allows_clean_guest() {
   pass "teardown: sbx secondmate with a clean, pushed guest is torn down (VM removed, home retired)"
 }
 
+test_teardown_clears_beacon_markers() {
+  # The watcher's beat-beacon (scan_sbx_beacon) tracks per-id marker files in
+  # the parent's state dir. Teardown must remove them with the id's other
+  # state files: a leftover .sbx-stranded-alarmed marker would SUPPRESS the
+  # stranding alarm for a re-provisioned same-id secondmate that is stranded
+  # from birth (its status never progresses, so nothing ever clears it).
+  local w fb out rc m
+  w=$(new_teardown_world teardown-beacon); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
+           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain; do
+    : > "$w/home/state/$m"
+  done
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "clean-guest teardown should succeed: $out"
+  for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
+           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain; do
+    [ ! -e "$w/home/state/$m" ] || fail "teardown should remove the beacon marker $m"
+  done
+  pass "teardown: the id's beat-beacon markers are removed with its state files"
+}
+
 test_teardown_force_skips_guest_probe() {
   local w fb out rc
   w=$(new_teardown_world teardown-force); fb=$(make_fake_sbx "$w")
@@ -826,6 +852,7 @@ test_unlanded_work_stopped_guest_is_inspected
 test_unlanded_work_dispatcher_routes
 test_teardown_refuses_unlanded_guest
 test_teardown_allows_clean_guest
+test_teardown_clears_beacon_markers
 test_teardown_force_skips_guest_probe
 
 echo "# all fm-backend-sbx tests passed"

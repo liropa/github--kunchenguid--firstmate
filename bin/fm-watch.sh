@@ -155,6 +155,10 @@ TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
+# Consecutive turn-ends with zero status progress before an sbx secondmate is
+# alarmed as stranded (scan_sbx_beacon). 0 disables the stranding alarm; the
+# mount-health alarm is unconditional.
+FM_SBX_NOPROGRESS_TURNS=${FM_SBX_NOPROGRESS_TURNS:-3}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
 # "<backend>:<session>"; re-probed only when that key changes.
@@ -416,6 +420,74 @@ scan_signals() {
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+    fi
+  done
+  return 0
+}
+
+# Beat-beacon bridge health for sbx secondmates (agent-dotfiles design doc
+# open question 6: the watcher's poll loop is the beat consumer). Only
+# bridge-backed secondmates have SYMLINKED signal files (fm-spawn.sh's sbx
+# branch), so [ -L ] scopes the sweep and every host-pane home skips it
+# untouched. Pure host stats - zero sbx CLI calls, preserving the
+# idle-supervision cost property (docs/sbx-backend.md).
+# Mount health: a signal symlink whose target DIRECTORY is gone means the
+# mount vanished - scan_signals' [ -e ] skip is silently blind to that
+# secondmate, so raise a captain-facing check wake. A dangling link whose
+# directory exists is a freshly provisioned secondmate that has not signaled
+# yet - quiescent by contract (tests/fm-watch-sbx-signals.test.sh).
+# Stranding: a guest TUI that can no longer work (observed live: an auth-dead
+# claude after a host OAuth rotation) keeps firing its turn-end hook on every
+# steer while the status file never progresses. Each bare turn-end already
+# surfaces as a generic signal wake; after FM_SBX_NOPROGRESS_TURNS consecutive
+# turn-ends with zero status progress the beacon NAMES the pattern with one
+# check wake. All tracking is marker files, so the counter survives the
+# actionable exit each turn-end causes.
+scan_sbx_beacon() {
+  local te id key tgt mdir marker reason te_sig sf_sig n
+  for te in "$STATE"/*.turn-ended; do
+    [ -L "$te" ] || continue
+    id=$(basename "$te" .turn-ended)
+    key=$(printf '%s' "$id" | tr '.' '_')
+    tgt=$(readlink "$te") || continue
+    mdir=$(dirname "$tgt")
+    # One alarm per outage, durable across watcher restarts: the .sbx-mount-
+    # alarmed marker suppresses repeats while the mount stays gone and is
+    # cleared when it returns, re-arming the alarm for the next outage.
+    marker="$STATE/.sbx-mount-alarmed-$key"
+    if [ ! -d "$mdir" ]; then
+      if [ ! -e "$marker" ]; then
+        reason="check: sbx signal mount missing for $id: $mdir is gone - the watcher cannot see this secondmate's signals until the mount returns"
+        fm_wake_append check "sbx-mount:$id" "$reason" || exit 1
+        : > "$marker"
+        wake "$reason"
+      fi
+      continue
+    fi
+    rm -f "$marker"
+
+    [ "$FM_SBX_NOPROGRESS_TURNS" -gt 0 ] 2>/dev/null || continue
+    # No real turn-end yet (fresh spawn, dangling link): nothing to track.
+    # NOTE: macOS stat -L on a dangling link signs the LINK itself (rc 0),
+    # so the [ -e ] gate, not stat_sig failure, keeps fresh spawns out.
+    [ -e "$te" ] || continue
+    te_sig=$(stat_sig "$te") || continue
+    # Status progress - through the symlink or an absent target's constant
+    # link signature - resets the counter and re-arms the alarm.
+    sf_sig=$(stat_sig "$STATE/$id.status" 2>/dev/null || echo absent)
+    if [ "$sf_sig" != "$(cat "$STATE/.sbx-beat-status-$key" 2>/dev/null)" ]; then
+      printf '%s' "$sf_sig" > "$STATE/.sbx-beat-status-$key"
+      rm -f "$STATE/.sbx-noprogress-$key" "$STATE/.sbx-stranded-alarmed-$key"
+    fi
+    [ "$te_sig" != "$(cat "$STATE/.sbx-beat-te-$key" 2>/dev/null)" ] || continue
+    printf '%s' "$te_sig" > "$STATE/.sbx-beat-te-$key"
+    n=$(( $(cat "$STATE/.sbx-noprogress-$key" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > "$STATE/.sbx-noprogress-$key"
+    if [ "$n" -ge "$FM_SBX_NOPROGRESS_TURNS" ] && [ ! -e "$STATE/.sbx-stranded-alarmed-$key" ]; then
+      reason="check: sbx secondmate $id looks stranded: $n consecutive turn-ends with no status progress - the guest agent may be unable to work (e.g. an auth-dead claude TUI after a host OAuth rotation; recover with 'sbx stop fm-$id' + a steer, refreshing the custom secret first if the host token rotated)"
+      fm_wake_append check "sbx-stranded:$id" "$reason" || exit 1
+      : > "$STATE/.sbx-stranded-alarmed-$key"
+      wake "$reason"
     fi
   done
   return 0
@@ -780,6 +852,11 @@ while :; do
     fi
     touch "$STATE/.last-check"
   fi
+
+  # sbx bridge health: rare, pure-stat alarms, so every cycle - and before the
+  # signal scan for the same starvation reason as the checks above (wake()
+  # exits the cycle, so a chatty sibling's signals would otherwise starve it).
+  scan_sbx_beacon
 
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
