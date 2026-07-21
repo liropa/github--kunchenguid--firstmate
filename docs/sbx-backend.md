@@ -62,7 +62,7 @@ Without this, a dead sbx secondmate on a `HERDR_ENV=1` host was respawned into a
 The harness is deliberately *not* pinned from meta - respawns re-resolve it through `config/secondmate-harness -> config/crew-harness -> own` (the durable-mode contract), and an sbx-unverified resolution is refused loudly before any sandbox is created.
 `bin/fm-spawn.sh` records `sbx_template=` in meta so the respawn can reproduce the sandbox from durable state alone (a session-start sweep has no `FM_SBX_TEMPLATE` in its env).
 
-Mid-session death detection is still session-start-only upstream; the beat file is the intended periodic beacon but nothing consumes it between session starts yet (design doc open question 6).
+Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon for bridge-health alarms; full mid-session *death* detection (stale beat checked against `sbx` state) remains session-start-only (design doc open question 6, partially closed).
 
 ## Signal bridge wiring (spawn)
 
@@ -130,6 +130,15 @@ Verified end to end on real sandboxes (design doc §10 "Then (v1)" items 2, 3, 4
 
 All six original codex-rig gaps and the containment-downgrade bug are fixed in this tree: the bash-3.2 brief-rewrite scramble, the printf-format quote-eating in the codex resume template, delivery into a dead pane after a failed resume, codex's trust-dialog launch park, resume-time keystroke swallowing (now a verified submit), the BSD-stat-signs-symlinks watcher freeze, and the sweep's ambient-backend containment downgrade.
 
+## Beat-beacon alarms (`scan_sbx_beacon`, `bin/fm-watch.sh`)
+
+Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-backed secondmates have them, so host-pane homes skip untouched) with pure host stats - zero sbx CLI calls, preserving the idle-supervision cost property. Two captain-facing alarms, both durable `check` wakes:
+
+- **Mount health** (`sbx-mount:<id>`): the symlink's target *directory* gone means the mount vanished and the scan's `[ -e ]` skip has silently blinded the watcher to this secondmate. One alarm per outage (a `.sbx-mount-alarmed-<id>` marker suppresses repeats across watcher restarts); the mount returning clears the marker and re-arms. A dangling link whose directory *exists* is a fresh spawn that has not signaled - quiescent, no alarm.
+- **Stranding** (`sbx-stranded:<id>`): `FM_SBX_NOPROGRESS_TURNS` (default 3; 0 disables) consecutive turn-ends with zero status-file progress. The observed cause is an auth-dead claude TUI after a host OAuth rotation (below): every steer still fires the Stop hook, so each turn-end surfaces as a generic signal wake, but nothing named the pattern. Any status progress resets the counter and re-arms; one alarm per episode. The wake's reason carries the recovery (`sbx stop fm-<id>` + steer, secret refresh first).
+
+Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm).
+
 ## Teardown (`fm_backend_sbx_unlanded_work`)
 
 Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (above), so `fm-teardown.sh` verifies the guest's work landed **before** the kill - the in-VM half of teardown's host worktree safety check, which cannot see inside the microVM. The secondmate teardown path (non-`--force`) probes the guest through the generic `fm_backend_unlanded_work` dispatcher (only sbx implements it; host-worktree backends answer "nothing hidden"):
@@ -143,10 +152,10 @@ Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (ab
 ## Remaining gaps
 
 - **Keep-alive covers only host-initiated turns** - the pin is armed at delivery (launch and steers). A turn the guest agent starts on its own (its own crew supervision, a scheduled follow-up) has no pin and dies with the ~45-100 s post-disconnect stop if it outlasts it; the auto-stop grace is Docker's heuristic and may change under us. Revisit if sbx grows a keep-alive/idle knob. (Confirmed still open after step 4.)
-- **No mid-session mount-health alarm** - if a running secondmate's host signal mount vanishes mid-session, the watcher silently stops seeing its signals (the safe `[ -e ]` skip above) with no captain-facing alarm until the mount returns. Acceptable given the host signal dir is a plain local directory that does not spontaneously vanish, and consistent with mid-session death detection being out of scope (the beat beacon is the intended future home for both).
+- **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
 - **Guest-side home provisioning** - only the brief is seeded in v1; the rest of the private surface (`data/captain-shared.md`, `config/*` inheritance) stays absent in the guest, so the secondmate bootstraps with ABSENT markers.
   The full provisioning story is the companion backend design's scope.
-- **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). No code hook exists to detect the stranding; the beat beacon is the natural future home for a "turn ended but no status progress" alarm.
+- **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). The beacon's stranding alarm (above) now names the pattern for the captain; the recovery itself is still manual.
 
 ## Security posture
 
