@@ -290,10 +290,9 @@ fi
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
-# below. The read-only path never touches the queue (another session
-# may be actively draining it) but still runs fm-guard.sh directly with
-# non-mutating advisory text, so the same alarms surface without repair
-# commands.
+# below. The read-only path never touches the queue because this session does
+# not hold the lock, but still runs fm-guard.sh directly with non-mutating
+# advisory text, so the same alarms surface without repair commands.
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
