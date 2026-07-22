@@ -61,6 +61,10 @@ test_repair_lines() {
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
   assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
 
+  out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --lock-rc 2 --repair-line)
+  assert_contains "$out" "single-session safety could not be verified" "identification-failure read-only repair line missing"
+  assert_not_contains "$out" "session holding the fleet lock" "identification-failure repair line used contention wording"
+
   out=$(FM_HOME="$home" "$RENDER" --harness pi --repair-line)
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"
   assert_not_contains "$out" "extension command /fm-watch-arm-pi" "pi repair line still directs the model to the human slash command"
