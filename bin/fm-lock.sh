@@ -29,8 +29,9 @@ ps_runs() {  # false when this environment cannot exec ps (sandboxed session)
 }
 
 pid_exists() {  # kill -0: EPERM still proves existence; only ESRCH proves death
-  local err
-  err=$(kill -0 "$1" 2>&1) && return 0
+  local pid=${1:-} err
+  case $pid in ''|*[!0-9]*) return 1 ;; esac
+  err=$(kill -0 "$pid" 2>&1) && return 0
   case $err in
     *[Nn]o\ such\ process*) return 1 ;;
   esac
