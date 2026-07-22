@@ -483,6 +483,26 @@ EOF
   pass "fm-lock.sh never steals an existing live holder's lock when ps cannot run"
 }
 
+test_lock_malformed_holder_reclaimed_when_ps_unavailable() {
+  local rec root home fakebin out
+  rec=$(new_world lock-malformed-holder)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  printf '%s\n' garbage > "$home/state/.lock"
+
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID="$$" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh") \
+    || fail "fm-lock.sh refused to reclaim a malformed lock when ps cannot run"
+
+  assert_contains "$out" "lock acquired: harness pid $$" "lock did not acquire after reclaiming a malformed holder"
+  [ "$(cat "$home/state/.lock")" = "$$" ] || fail "malformed lock was not replaced by the launcher-provided pid"
+
+  pass "fm-lock.sh reclaims a malformed holder when ps cannot run"
+}
+
 test_lock_identify_failure_banner_names_no_competing_session() {
   local rec root home fakebin out status
   rec=$(new_world lock-identify-banner)
@@ -1023,6 +1043,7 @@ test_lock_refusal_read_only_path
 test_lock_env_pid_fallback_when_ps_unavailable
 test_lock_identify_failure_is_distinct_from_contention
 test_lock_holder_not_stolen_when_ps_unavailable
+test_lock_malformed_holder_reclaimed_when_ps_unavailable
 test_lock_identify_failure_banner_names_no_competing_session
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
