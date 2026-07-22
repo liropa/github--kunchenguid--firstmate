@@ -550,6 +550,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_broken "$fakebin"
+  fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
+  append_wake "$home/state" signal sm-x "done: kept queued during identification failure" || fail "seed wake failed"
+  git -C "$root" checkout -q -B fm/identify-failure-tangle
 
   status=0
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
@@ -560,6 +563,14 @@ EOF
   assert_contains "$out" "could not verify" "banner did not explain unverified single-session safety"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "identification failure was misreported as a competing session"
   assert_contains "$out" "Skipping every mutating step" "read-only skip list missing on the identification-failure path"
+  assert_contains "$out" "remain queued; single-session safety could not be verified" "wake queue skip misattributed ownership on the identification-failure path"
+  assert_contains "$out" "left untouched because single-session safety could not be verified" "read-only guard misattributed queued wakes on the identification-failure path"
+  assert_contains "$out" "repairs are deferred because single-session safety could not be verified" "watcher repair wording misattributed ownership on the identification-failure path"
+  assert_contains "$out" "restore work because single-session safety could not be verified" "tangle restore wording misattributed ownership on the identification-failure path"
+  assert_contains "$out" "Watcher repair deferred because single-session safety could not be verified" "repair line misattributed ownership on the identification-failure path"
+  assert_contains "$out" "Queued wakes stay" "next step did not keep queued wakes untouched on the identification-failure path"
+  assert_not_contains "$out" "session holding the lock" "identification-failure output used contention lock-holder wording"
+  assert_not_contains "$out" "session holding the fleet lock" "identification-failure output used contention fleet-lock-holder wording"
   assert_contains "$out" "NEXT STEP" "digest did not complete on the identification-failure path"
 
   pass "an identification failure banner stays read-only without claiming a competing session"

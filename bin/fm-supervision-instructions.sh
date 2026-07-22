@@ -12,6 +12,7 @@ DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
 READ_ONLY=0
+LOCK_RC=0
 AFK=0
 X_MODE=0
 REPAIR_LINE=0
@@ -19,7 +20,7 @@ QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--lock-rc <code>] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -43,6 +44,11 @@ while [ "$#" -gt 0 ]; do
     --read-only)
       [ "$#" -gt 1 ] || { echo "error: --read-only requires 0 or 1" >&2; exit 2; }
       READ_ONLY=$(bool_value "$2")
+      shift 2
+      ;;
+    --lock-rc)
+      [ "$#" -gt 1 ] || { echo "error: --lock-rc requires a value" >&2; exit 2; }
+      LOCK_RC=$2
       shift 2
       ;;
     --afk)
@@ -116,6 +122,10 @@ render_snippet() {
 
 repair_line() {
   if [ "$READ_ONLY" -eq 1 ]; then
+    if [ "$LOCK_RC" = 2 ]; then
+      printf '%s\n' 'Watcher repair deferred because single-session safety could not be verified; do not drain, arm, or repair from this read-only session.'
+      return 0
+    fi
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
     return 0
   fi

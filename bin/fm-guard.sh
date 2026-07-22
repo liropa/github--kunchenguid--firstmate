@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Watcher liveness and worktree-tangle guard, called by supervision scripts, by
 # fm-wake-drain.sh after it empties queued wakes, and by fm-session-start.sh in
-# read-only advisory mode when another session holds the fleet lock.
+# read-only advisory mode when this session did not acquire the fleet lock.
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
@@ -28,6 +28,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
+LOCK_RC=${FM_GUARD_LOCK_RC:-}
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
 
 # Volatile, home-scoped episode marker: one line = the current stale-episode key.
@@ -130,7 +131,11 @@ if [ -n "$tangle_branch" ]; then
     printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
     printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
     if [ "$READ_ONLY" -eq 1 ]; then
-      printf '●  This read-only session must leave restore work to the session holding the fleet lock.\n'
+      if [ "$LOCK_RC" = 2 ]; then
+        printf '●  This read-only session must defer restore work because single-session safety could not be verified.\n'
+      else
+        printf '●  This read-only session must leave restore work to the session holding the fleet lock.\n'
+      fi
     else
       printf "●  Restore the primary to '%s':\n" "$tangle_default"
       printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
@@ -179,6 +184,7 @@ if [ "$watcher_fresh" = false ]; then
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
+      --lock-rc "${LOCK_RC:-0}" \
       --afk "$afk" \
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
@@ -189,7 +195,11 @@ if [ "$watcher_fresh" = false ]; then
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
       printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
       if [ "$READ_ONLY" -eq 1 ]; then
-        printf '●  This read-only session should report the lapse, not repair it.\n'
+        if [ "$LOCK_RC" = 2 ]; then
+          printf '●  This read-only session should report the lapse; repairs are deferred because single-session safety could not be verified.\n'
+        else
+          printf '●  This read-only session should report the lapse, not repair it.\n'
+        fi
       else
         printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
       fi
@@ -212,7 +222,11 @@ fi
 # Dedup of the watcher-down banner never suppresses this warning.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
-    echo "WARNING: queued wakes pending - left untouched for the session holding the fleet lock." >&2
+    if [ "$LOCK_RC" = 2 ]; then
+      echo "WARNING: queued wakes pending - left untouched because single-session safety could not be verified." >&2
+    else
+      echo "WARNING: queued wakes pending - left untouched for the session holding the fleet lock." >&2
+    fi
   else
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi

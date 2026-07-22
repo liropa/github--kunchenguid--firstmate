@@ -246,8 +246,14 @@ LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0
+LOCK_REFUSAL_REASON=
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
+  if [ "$LOCK_RC" -eq 2 ]; then
+    LOCK_REFUSAL_REASON=identify-failure
+  else
+    LOCK_REFUSAL_REASON=contention
+  fi
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
@@ -276,7 +282,7 @@ fi
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCK_RC=$LOCK_RC "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$("$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 fi
@@ -297,8 +303,12 @@ subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
-  GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
+  if [ "$LOCK_REFUSAL_REASON" = identify-failure ]; then
+    printf 'skipped (read-only session) - %s record(s) remain queued; single-session safety could not be verified.\n' "$QLEN"
+  else
+    printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
+  fi
+  GUARD_OUT=$(FM_GUARD_READ_ONLY=1 FM_GUARD_LOCK_RC=$LOCK_RC "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
@@ -331,6 +341,7 @@ fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
+  --lock-rc "$LOCK_RC" \
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
@@ -399,12 +410,21 @@ fi
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  cat <<'EOF'
+  if [ "$LOCK_REFUSAL_REASON" = identify-failure ]; then
+    cat <<'EOF'
+This session could not verify single-session safety. Stay read-only: do not arm,
+drain, spawn, steer, merge, or repair fleet state from here. Queued wakes stay
+untouched and repairs are deferred until a session can acquire the fleet lock.
+
+EOF
+  else
+    cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. The session
 holding the lock owns mutable follow-up.
 
 EOF
+  fi
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:
