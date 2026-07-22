@@ -458,6 +458,25 @@ EOF
   pass "fm-lock.sh exits 2 on identification failure and rejects a dead launcher-provided pid"
 }
 
+test_lock_identify_failure_rejects_zero_pid() {
+  local rec root home fakebin out status
+  rec=$(new_world lock-zero-env-pid)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  status=0
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID=0 \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+
+  expect_code 2 "$status" "zero launcher-provided pid must not identify the session"
+  assert_contains "$out" "cannot identify this session's harness process" "zero pid failure did not name the real problem"
+  [ ! -f "$home/state/.lock" ] || fail "a zero launcher-provided pid must not write the lock file"
+
+  pass "fm-lock.sh rejects zero as a launcher-provided pid"
+}
+
 test_lock_holder_not_stolen_when_ps_unavailable() {
   local rec root home fakebin holder_pid out status
   rec=$(new_world lock-no-steal)
@@ -481,6 +500,26 @@ EOF
   [ "$(cat "$home/state/.lock")" = "$holder_pid" ] || fail "the existing holder's lock was overwritten"
 
   pass "fm-lock.sh never steals an existing live holder's lock when ps cannot run"
+}
+
+test_lock_zero_holder_reclaimed_when_ps_unavailable() {
+  local rec root home fakebin out
+  rec=$(new_world lock-zero-holder)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  printf '%s\n' 0 > "$home/state/.lock"
+
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID="$$" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh") \
+    || fail "fm-lock.sh refused to reclaim a zero lock when ps cannot run"
+
+  assert_contains "$out" "lock acquired: harness pid $$" "lock did not acquire after reclaiming a zero holder"
+  [ "$(cat "$home/state/.lock")" = "$$" ] || fail "zero lock was not replaced by the launcher-provided pid"
+
+  pass "fm-lock.sh reclaims a zero holder when ps cannot run"
 }
 
 test_lock_malformed_holder_reclaimed_when_ps_unavailable() {
@@ -1042,7 +1081,9 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_env_pid_fallback_when_ps_unavailable
 test_lock_identify_failure_is_distinct_from_contention
+test_lock_identify_failure_rejects_zero_pid
 test_lock_holder_not_stolen_when_ps_unavailable
+test_lock_zero_holder_reclaimed_when_ps_unavailable
 test_lock_malformed_holder_reclaimed_when_ps_unavailable
 test_lock_identify_failure_banner_names_no_competing_session
 test_output_ordering_diagnostics_lead
