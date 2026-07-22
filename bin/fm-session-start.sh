@@ -251,8 +251,19 @@ if [ "$LOCK_RC" -ne 0 ]; then
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
-    printf '●  %s\n' "$LOCK_OUT"
+    if [ "$LOCK_RC" -eq 2 ]; then
+      # fm-lock.sh exit 2: it could not identify this session's own harness
+      # process. That is NOT evidence of a competing session, so this banner
+      # must not claim one; read-only stays the safe default because
+      # single-session safety could not be verified either way.
+      printf '●  READ-ONLY SESSION - COULD NOT IDENTIFY THIS SESSION'"'"'S OWN HARNESS\n'
+      printf '●  %s\n' "$LOCK_OUT"
+      printf '●  No competing session was detected; the lock step could not verify\n'
+      printf '●  single-session safety, so this session stays read-only.\n'
+    else
+      printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+      printf '●  %s\n' "$LOCK_OUT"
+    fi
     printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'

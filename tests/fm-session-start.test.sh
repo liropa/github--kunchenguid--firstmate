@@ -156,6 +156,18 @@ SH
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
+# make_fake_ps_broken <fakebin>: a ps whose every invocation fails without
+# output, mimicking a sandboxed session where exec of setuid /bin/ps is denied
+# (see bin/fm-lock.sh's header), so the ancestry walk cannot take a single hop.
+make_fake_ps_broken() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod +x "$fakebin/ps"
+}
+
 make_fake_ps_pi_holder() {
   local fakebin=$1 holder_pid=$2
   cat > "$fakebin/ps" <<SH
@@ -242,9 +254,14 @@ SH
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
+  # Extra KEY=VAL args after the first three re-enter the environment AFTER the
+  # -u strips, so a test can deterministically plant e.g. CLAUDE_PID while the
+  # host session's own value never leaks in (fm-lock.sh reads it as a fallback
+  # harness identity).
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+  shift 3
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CLAUDE_PID -u FM_HARNESS_PID \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$@" \
     "$SESSION_START"
 }
 
@@ -389,6 +406,104 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+# --- sandboxed lock identification (ps unavailable) ---------------------------
+
+# A sandboxed session may be unable to exec ps at all (stock macOS /bin/ps is
+# setuid root; sandboxes refuse setuid images), so fm-lock.sh's ancestry walk
+# cannot identify the harness. These cases pin the launcher-provided-PID
+# fallback, the distinct honest identification failure, and the no-steal
+# holder-liveness rule for that environment.
+
+test_lock_env_pid_fallback_when_ps_unavailable() {
+  local rec root home fakebin out
+  rec=$(new_world lock-env-fallback)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID="$$" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh") \
+    || fail "fm-lock.sh refused to acquire with a live CLAUDE_PID and no ps"
+  assert_contains "$out" "lock acquired: harness pid $$" "lock did not record the launcher-provided harness pid"
+  [ "$(cat "$home/state/.lock")" = "$$" ] || fail "lock file does not contain the launcher-provided pid"
+
+  pass "fm-lock.sh falls back to a live launcher-provided pid when ps cannot run"
+}
+
+test_lock_identify_failure_is_distinct_from_contention() {
+  local rec root home fakebin dead_pid out status
+  rec=$(new_world lock-identify-fail)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  # A provably dead pid: an already-exited, already-reaped child.
+  sleep 0 &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+
+  status=0
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID="$dead_pid" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+
+  expect_code 2 "$status" "identification failure must exit 2, distinct from contention's exit 1"
+  assert_contains "$out" "cannot identify this session's harness process" "identification failure did not name the real problem"
+  assert_not_contains "$out" "another live firstmate session holds the lock" "identification failure was misreported as contention"
+  [ ! -f "$home/state/.lock" ] || fail "an unidentified session must not write the lock file"
+
+  pass "fm-lock.sh exits 2 on identification failure and rejects a dead launcher-provided pid"
+}
+
+test_lock_holder_not_stolen_when_ps_unavailable() {
+  local rec root home fakebin holder_pid out status
+  rec=$(new_world lock-no-steal)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  status=0
+  out=$(env -u FM_HARNESS_PID CLAUDE_PID="$$" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 1 "$status" "a live holder must still refuse acquisition when ps cannot run"
+  assert_contains "$out" "another live firstmate session holds the lock" "contention error text changed"
+  [ "$(cat "$home/state/.lock")" = "$holder_pid" ] || fail "the existing holder's lock was overwritten"
+
+  pass "fm-lock.sh never steals an existing live holder's lock when ps cannot run"
+}
+
+test_lock_identify_failure_banner_names_no_competing_session() {
+  local rec root home fakebin out status
+  rec=$(new_world lock-identify-banner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_broken "$fakebin"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 on an identification failure"
+  assert_contains "$out" "COULD NOT IDENTIFY THIS SESSION'S OWN HARNESS" "identification-failure banner missing"
+  assert_contains "$out" "cannot identify this session's harness process" "banner did not surface fm-lock.sh's own error text"
+  assert_contains "$out" "could not verify" "banner did not explain unverified single-session safety"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "identification failure was misreported as a competing session"
+  assert_contains "$out" "Skipping every mutating step" "read-only skip list missing on the identification-failure path"
+  assert_contains "$out" "NEXT STEP" "digest did not complete on the identification-failure path"
+
+  pass "an identification failure banner stays read-only without claiming a competing session"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -905,6 +1020,10 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_lock_env_pid_fallback_when_ps_unavailable
+test_lock_identify_failure_is_distinct_from_contention
+test_lock_holder_not_stolen_when_ps_unavailable
+test_lock_identify_failure_banner_names_no_competing_session
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
