@@ -493,7 +493,7 @@ test_lock_absent_after_ln_failure_reports_cannot_create() {
 
 # Same runaway, second shape: a stale lock already exists but its parent is no
 # longer writable. The stale holder cannot be stolen (no artifacts can be
-# created), so the acquire must report plain contention - quickly, quietly, and
+# created), so the acquire must report cannot-create - quickly, quietly, and
 # without recursing on companion suffixes.
 test_lock_stale_lock_in_unwritable_parent_fails_bounded() {
   local dir state ro lockdir dead
@@ -515,8 +515,8 @@ test_lock_stale_lock_in_unwritable_parent_fails_bounded() {
   ' "$lockdir"
   chmod 755 "$ro"
 
-  grep -qF "try_rc=1" "$dir/probe.out" \
-    || fail "unstealable stale lock should report contention: $(cat "$dir/probe.out")"
+  grep -qF "try_rc=2" "$dir/probe.out" \
+    || fail "unstealable stale lock should report cannot-create: $(cat "$dir/probe.out")"
   [ ! -s "$dir/probe.err" ] \
     || fail "unstealable stale lock spammed stderr: $(head -c 300 "$dir/probe.err")"
   [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "stale lock was mutated despite unwritable parent"

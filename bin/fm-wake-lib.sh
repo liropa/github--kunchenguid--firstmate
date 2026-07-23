@@ -419,7 +419,7 @@ fm_lock_recheck_stale_owner() {
 # fm_lock_try_acquire <lockdir> [<steal_depth>]
 # Returns 0 acquired, 1 held by a contender (FM_LOCK_HELD_PID set when
 # readable), 2 lock artifacts cannot be created at all (missing or unwritable
-# parent) - a clean "locking unavailable here" failure, never a hang or steal.
+# parent) - a clean "locking unavailable here" failure, never a hang.
 # steal_depth is internal recursion bookkeeping; callers omit it. A steal of
 # <lockdir> serializes through the <lockdir>.steal companion, and a stale
 # companion (its holder died mid-steal) may itself be stolen through
@@ -459,9 +459,12 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal" $((steal_depth + 1)); then
+  fm_lock_try_acquire "$steal" $((steal_depth + 1))
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -eq 2 ] && return 2
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -499,10 +502,8 @@ fm_lock_try_acquire() {
   fi
 
   fm_lock_remove_path "$lockdir" || true
-  rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
-    rc=0
-  fi
+  fm_lock_try_create "$lockdir" "$steal_owner"
+  rc=$?
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
