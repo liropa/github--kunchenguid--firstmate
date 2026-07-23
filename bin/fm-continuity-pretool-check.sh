@@ -4,13 +4,13 @@
 # This hook is deliberately narrow. It denies only an executed bin/fm-*.sh fleet
 # command other than bin/fm-wake-drain.sh, bin/fm-watch-arm.sh, or the
 # independently fail-closed bin/fm-teardown.sh, and only when the active primary
-# home has task metadata in flight but no identity-matched live watcher holds the
-# home lock. Ordinary shell commands, recovery commands, healthy supervision,
+# home has task metadata in flight but the home watcher lock is not verified
+# healthy. Ordinary shell commands, recovery commands, healthy supervision,
 # fleet-idle homes, and child worktrees are always allowed.
 #
-# The existing turn-end guard remains the unchanged final backstop. This gate
-# closes the long-turn gap before another fleet mutation, but does not replace or
-# weaken the Stop hook.
+# The existing turn-end guard remains the final backstop. This gate closes the
+# long-turn gap before another fleet mutation, but does not replace or weaken the
+# Stop hook.
 #
 # Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
 # Malformed transport, missing jq/Node, a missing classifier, or classifier
