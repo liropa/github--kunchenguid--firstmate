@@ -343,7 +343,15 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 2
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if ! ln -s "$ownerdir" "$lockdir" 2>/dev/null; then
+    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    fm_lock_discard_owner "$ownerdir"
+    if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+      return 1
+    fi
+    return 2
+  fi
+  if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -351,8 +359,6 @@ fm_lock_try_create() {
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
-  else
-    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
@@ -545,7 +551,7 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status rc
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -558,6 +564,10 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

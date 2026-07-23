@@ -47,6 +47,32 @@ test_concurrent_append_and_drain() {
   pass "concurrent append plus drain preserves queue records"
 }
 
+test_append_stops_when_queue_lock_cannot_be_acquired() {
+  local dir state out
+  dir=$(make_case append-lock-unavailable)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    FM_WAKE_QUEUE_LOCK="$STATE/missing/.wake-queue.lock"
+    fm_wake_append signal task.status "signal: task"
+    rc=$?
+    if [ -e "$STATE/.wake-queue.seq" ]; then seq=1; else seq=0; fi
+    if [ -e "$STATE/.wake-queue" ]; then queue=1; else queue=0; fi
+    printf "rc=%s seq=%s queue=%s\n" "$rc" "$seq" "$queue"
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+
+  case "$out" in
+    *"rc=2"*) ;;
+    *) fail "append should propagate unavailable lock rc 2: $out" ;;
+  esac
+  case "$out" in
+    *"seq=0"*"queue=0"*) ;;
+    *) fail "append touched queue files without holding the lock: $out" ;;
+  esac
+  pass "append stops before queue writes when lock cannot be acquired"
+}
+
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out status_file
   dir=$(make_case signal)
@@ -430,6 +456,7 @@ test_interruption_before_and_after_raw_commit() {
 }
 
 test_concurrent_append_and_drain
+test_append_stops_when_queue_lock_cannot_be_acquired
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
