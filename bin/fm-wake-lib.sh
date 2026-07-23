@@ -324,17 +324,24 @@ fm_lock_claim() {
   return 0
 }
 
+# Returns 0 acquired, 1 lost to a real contender (the lock exists or appeared
+# mid-create), 2 lock artifacts cannot be created at all (missing or unwritable
+# parent directory). 2 means there is no holder to wait for or steal: retrying
+# or stealing would fail identically, so callers must fail cleanly instead.
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    return 1
+  fi
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 2
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return 2
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -364,12 +371,21 @@ fm_lock_remove_path() {
 }
 
 fm_lock_mid_acquire_is_fresh() {
-  local lockdir=$1 pid=$2 mid_acquire_stale
+  local lockdir=$1 pid=$2 mid_acquire_stale age
   case "$pid" in
     ''|*[!0-9]*)
       mid_acquire_stale=$FM_LOCK_STALE_AFTER
+      case "$mid_acquire_stale" in
+        ''|*[!0-9]*) mid_acquire_stale=2 ;;
+      esac
       [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
-      [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]
+      # A non-numeric age means the probed path vanished or cannot be
+      # inspected; treat it as not-fresh instead of feeding [ garbage.
+      age=$(fm_path_age "$lockdir" 2>/dev/null || true)
+      case "${age#-}" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      [ "$age" -lt "$mid_acquire_stale" ]
       return
       ;;
   esac
@@ -394,13 +410,31 @@ fm_lock_recheck_stale_owner() {
   return 0
 }
 
+# fm_lock_try_acquire <lockdir> [<steal_depth>]
+# Returns 0 acquired, 1 held by a contender (FM_LOCK_HELD_PID set when
+# readable), 2 lock artifacts cannot be created at all (missing or unwritable
+# parent) - a clean "locking unavailable here" failure, never a hang or steal.
+# steal_depth is internal recursion bookkeeping; callers omit it. A steal of
+# <lockdir> serializes through the <lockdir>.steal companion, and a stale
+# companion (its holder died mid-steal) may itself be stolen through
+# <lockdir>.steal.steal - one companion level, same serialization as the
+# primary. Depth 2 never steals, so the suffix is structurally bounded at
+# .steal.steal no matter why any acquisition fails.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 steal_depth=${2:-0} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir"; then
+  fm_lock_try_create "$lockdir"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
     return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    # No lock artifacts can exist here, so there is no holder to report or
+    # steal; a steal attempt would fail the same way one suffix deeper,
+    # forever (the 2026-07-22 .steal.steal... runaway). Fail cleanly.
+    return 2
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -413,8 +447,13 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if [ "$steal_depth" -ge 2 ]; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" $((steal_depth + 1)); then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -467,9 +506,17 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Waits out real contention only. Returns 0 once acquired, or 2 immediately
+# when lock artifacts cannot be created at all (fm_lock_try_acquire rc 2):
+# waiting cannot help when there is no holder to outlast, and looping there
+# is how the unwritable-parent runaway kept respawning. Callers must handle
+# the failure and skip the guarded work.
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    fm_lock_try_acquire "$lockdir"
+    rc=$?
+    [ "$rc" -eq 1 ] || return "$rc"
     sleep 0.1
   done
 }
