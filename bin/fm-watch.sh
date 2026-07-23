@@ -608,10 +608,12 @@ run_check_capture() {
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  # Close the inherited identity-flock fd (fd 9) in the check child: a check
-  # that outlived a dead watcher would otherwise keep the flock held and make
-  # the identity probe report a live publisher that no longer exists.
-  ( exec 9>&- 2>/dev/null; FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  # Close the inherited identity-flock fd (fd 217, deliberately outside the 0-9
+  # range reused by fm-check-lib.sh trust reads and Herdr event wait) in the
+  # check child: a check that outlived a dead watcher would otherwise keep the
+  # flock held and make the identity probe report a live publisher that no
+  # longer exists.
+  ( exec 217>&- 2>/dev/null; FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -835,8 +837,9 @@ WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # Publish identity: the inspectable string when ps//proc works, plus a held
-# identity flock (fd 9, kept for this process's life) so a session that cannot
-# exec ps can still verify this lock; see fm-wake-lib.sh for the contract.
+# identity flock (fd 217, kept for this process's life and deliberately outside
+# the 0-9 range reused by other firstmate helpers) so a session that cannot exec
+# ps can still verify this lock; see fm-wake-lib.sh for the contract.
 fm_watcher_identity_publish "$WATCH_LOCK" "$WATCHER_PID" \
   || echo "watcher: identity publication degraded (no process inspection and no identity flock); arm confirmation may be unable to trust this lock" >&2
 

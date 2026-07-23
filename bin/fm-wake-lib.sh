@@ -90,20 +90,21 @@ fm_pid_identity_available() {
 }
 
 # Hold the watcher-identity flock for the caller's remaining lifetime. The lock
-# rides the open file description behind fd 9 (bash 3.2 has no dynamic fd
-# allocation), so the kernel releases it when the holder's last inherited
+# rides the open file description behind fd 217, deliberately outside the 0-9
+# range reused by other firstmate helpers (fm-check-lib.sh trust reads, Herdr
+# event wait), so the kernel releases it when the holder's last inherited
 # descriptor closes; a recycled pid never inherits it. The flock file is created
 # only when the lock is genuinely held, so its presence is a promise that a
 # probe finding it unlocked has found a dead publisher, not a degraded one.
 fm_watcher_identity_flock_hold() {  # <lockdir>
   local lockdir=$1
-  exec 9>>"$lockdir/identity-flock" 2>/dev/null || return 1
+  exec 217>>"$lockdir/identity-flock" 2>/dev/null || return 1
   if ! perl -e '
     use Fcntl qw(:flock);
-    open(my $fh, ">>&=", 9) or exit 1;
+    open(my $fh, ">>&=", 217) or exit 1;
     flock($fh, LOCK_EX | LOCK_NB) or exit 1;
   ' 2>/dev/null; then
-    exec 9>&- 2>/dev/null
+    exec 217>&- 2>/dev/null
     rm -f "$lockdir/identity-flock" 2>/dev/null || true
     return 1
   fi
