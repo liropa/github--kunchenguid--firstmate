@@ -460,6 +460,37 @@ test_lock_unwritable_parent_fails_cleanly_without_steal_spiral() {
   pass "unwritable lock parent fails cleanly with rc 2 and no steal spiral"
 }
 
+test_lock_absent_after_ln_failure_reports_cannot_create() {
+  local dir state lockdir out
+  dir=$(make_case lock-ln-denied)
+  state="$dir/state"
+  lockdir="$state/x.lock"
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    ln() { return 1; }
+    fm_lock_try_create "$2"
+    rc=$?
+    if [ -e "$2" ] || [ -L "$2" ]; then exists=1; else exists=0; fi
+    owners=$(find "$3" -maxdepth 1 -name "x.lock.owner.*" -print 2>/dev/null | wc -l | tr -d " ")
+    printf "rc=%s exists=%s owners=%s\n" "$rc" "$exists" "$owners"
+  ' _ "$LIB" "$lockdir" "$state")
+
+  case "$out" in
+    *"rc=2"*) ;;
+    *) fail "plain ln failure with absent lock should report rc 2: $out" ;;
+  esac
+  case "$out" in
+    *"exists=0"*) ;;
+    *) fail "failed ln path should leave no lock path: $out" ;;
+  esac
+  case "$out" in
+    *"owners=0"*) ;;
+    *) fail "failed ln path did not clean owner dir: $out" ;;
+  esac
+  pass "plain ln failure with absent lock reports cannot-create"
+}
+
 # Same runaway, second shape: a stale lock already exists but its parent is no
 # longer writable. The stale holder cannot be stolen (no artifacts can be
 # created), so the acquire must report plain contention - quickly, quietly, and
@@ -1339,6 +1370,7 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_unwritable_parent_fails_cleanly_without_steal_spiral
+test_lock_absent_after_ln_failure_reports_cannot_create
 test_lock_stale_lock_in_unwritable_parent_fails_bounded
 test_lock_stale_steal_companion_self_heals
 test_lock_steal_depth_is_bounded_at_one_companion_level
