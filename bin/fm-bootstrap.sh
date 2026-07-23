@@ -31,7 +31,9 @@
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
 #          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          inheritance failures for live secondmate homes, plus quarantine
+#          inheritance failures for live secondmate homes (including a home
+#          whose state/ is not writable from this session, e.g. an OS-sandbox
+#          deny - one skip line, no lock attempt spiral), plus quarantine
 #          diagnostics for divergent shared captain-preference copies;
 #          no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
@@ -362,10 +364,21 @@ secondmate_sync() {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
       continue
     }
-    fm_lock_acquire_wait "$home_lock" || {
-      echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
-      continue
-    }
+    fm_lock_acquire_wait "$home_lock"
+    case $? in
+      0) ;;
+      2)
+        # rc 2: lock artifacts cannot be created in this home at all (its
+        # state/ is not writable from here, e.g. an OS-sandbox deny). One
+        # honest skip line instead of the 2026-07-22 stderr runaway.
+        echo "SECONDMATE_SYNC: secondmate $id: skipped: home is not writable from this session"
+        continue
+        ;;
+      *)
+        echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
+        continue
+        ;;
+    esac
     reread_skip_pending=0
     case " $SECONDMATE_RESPAWNED_IDS " in
       *" $id "*) reread_skip_pending=1 ;;

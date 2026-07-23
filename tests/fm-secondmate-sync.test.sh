@@ -689,6 +689,55 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
 }
 
+# --- T9b: bootstrap skips an unwritable live secondmate home in one line ------
+# Reproduces the 2026-07-22 session-start runaway: the inheritance push takes
+# state/.fm-inherited-config.lock inside the destination home, and when that
+# home's state/ is not writable (an OS-sandbox deny), the lock acquire used to
+# misread "cannot create lock artifacts" as a stale holder and recurse on
+# .steal suffixes forever - megabytes of growing "basename: File name too long"
+# stderr plus an "integer expression expected" age comparison. The sweep must
+# instead print one honest SECONDMATE_SYNC skip line and finish.
+test_bootstrap_sweep_skips_unwritable_home_in_one_line() {
+  local w c1 fakebin out_file err_file runner i skip_count
+  w=$(new_world boot-unwritable)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-ro "$c1"
+  mkdir -p "$w/sm-ro/state"
+  chmod 555 "$w/sm-ro/state"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out_file="$w/bootstrap.out"
+  err_file="$w/bootstrap.err"
+  # Bounded background run: the regressed sweep never returns, so a plain
+  # synchronous call would hang the suite instead of failing it.
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" > "$out_file" 2> "$err_file" &
+  runner=$!
+  i=0
+  while [ "$i" -lt 600 ] && kill -0 "$runner" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$runner" 2>/dev/null; then
+    kill -9 "$runner" 2>/dev/null || true
+    wait "$runner" 2>/dev/null || true
+    chmod 755 "$w/sm-ro/state"
+    fail "bootstrap did not finish within 60s against an unwritable home (steal spiral?): $(tail -c 300 "$err_file" 2>/dev/null)"
+  fi
+  wait "$runner" || fail "bootstrap exited non-zero against an unwritable home: $(cat "$out_file" "$err_file")"
+  chmod 755 "$w/sm-ro/state"
+
+  skip_count=$(grep -cF "SECONDMATE_SYNC: secondmate sm-ro: skipped: home is not writable from this session" "$out_file" || true)
+  [ "$skip_count" = 1 ] || fail "expected exactly one unwritable-home skip line, got $skip_count (out: $(cat "$out_file"))"
+  ! grep -qF "File name too long" "$err_file" \
+    || fail "unwritable home still spirals steal suffixes: $(head -c 300 "$err_file")"
+  ! grep -qF "integer expression expected" "$err_file" \
+    || fail "unwritable home still feeds garbage to an age comparison: $(head -c 300 "$err_file")"
+  ! grep -qF "CONFIG_REREAD: secondmate sm-ro" "$out_file" \
+    || fail "unwritable home should skip before any reread send: $(cat "$out_file")"
+  pass "T9b bootstrap skips an unwritable live secondmate home with one honest line"
+}
+
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
@@ -856,6 +905,7 @@ test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_sweep_skips_unwritable_home_in_one_line
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored

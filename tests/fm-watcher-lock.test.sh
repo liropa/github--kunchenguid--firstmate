@@ -398,6 +398,164 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# run_lock_probe <case-dir> <ro-parent> <script> <arg>...: run a lock snippet in
+# a background shell with a hard 10s bound, so a reintroduced steal spiral
+# (the 2026-07-22 unwritable-parent runaway recursed on "$lock.steal" forever)
+# fails the test instead of hanging the suite. Restores write permission on the
+# ro parent before failing so cleanup can remove the case dir. Leaves stdout in
+# <case-dir>/probe.out and stderr in <case-dir>/probe.err.
+run_lock_probe() {
+  local dir=$1 ro_parent=$2 script=$3 runner i
+  shift 3
+  FM_STATE_OVERRIDE="$dir/state" bash -c "$script" _ "$LIB" "$@" \
+    > "$dir/probe.out" 2> "$dir/probe.err" &
+  runner=$!
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$runner" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$runner" 2>/dev/null; then
+    kill -9 "$runner" 2>/dev/null || true
+    wait "$runner" 2>/dev/null || true
+    [ -z "$ro_parent" ] || chmod 755 "$ro_parent" 2>/dev/null || true
+    fail "lock probe did not return within 10s (steal spiral?): $(tail -c 300 "$dir/probe.err" 2>/dev/null)"
+  fi
+  wait "$runner" 2>/dev/null || true
+}
+
+# Regression for the 2026-07-22 runaway: an unwritable lock parent used to be
+# misread as "a lock exists", judged stale (no pid), and stolen via a recursive
+# acquire on "$lock.steal" that failed identically one suffix deeper, forever -
+# megabytes of growing "basename: File name too long" stderr plus an
+# "integer expression expected" age comparison. The acquire must instead fail
+# cleanly (rc 2), print nothing, create nothing, and acquire-wait must not loop.
+test_lock_unwritable_parent_fails_cleanly_without_steal_spiral() {
+  local dir state ro lockdir
+  dir=$(make_case lock-unwritable-parent)
+  state="$dir/state"
+  ro="$dir/ro"
+  lockdir="$ro/x.lock"
+  mkdir -p "$ro"
+  chmod 555 "$ro"
+
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  run_lock_probe "$dir" "$ro" '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "try_rc=%s held=%s\n" "$?" "${FM_LOCK_HELD_PID:-}"
+    fm_lock_acquire_wait "$2"
+    printf "wait_rc=%s\n" "$?"
+  ' "$lockdir"
+  chmod 755 "$ro"
+
+  grep -qF "try_rc=2" "$dir/probe.out" \
+    || fail "unwritable-parent acquire should fail with rc 2: $(cat "$dir/probe.out")"
+  grep -qF "held=" "$dir/probe.out" || fail "probe output incomplete: $(cat "$dir/probe.out")"
+  grep -qF "wait_rc=2" "$dir/probe.out" \
+    || fail "acquire-wait should return 2 instead of looping: $(cat "$dir/probe.out")"
+  [ ! -s "$dir/probe.err" ] \
+    || fail "unwritable-parent acquire spammed stderr: $(head -c 300 "$dir/probe.err")"
+  [ -z "$(ls -A "$ro")" ] || fail "unwritable-parent acquire left artifacts: $(ls -A "$ro")"
+  pass "unwritable lock parent fails cleanly with rc 2 and no steal spiral"
+}
+
+# Same runaway, second shape: a stale lock already exists but its parent is no
+# longer writable. The stale holder cannot be stolen (no artifacts can be
+# created), so the acquire must report plain contention - quickly, quietly, and
+# without recursing on companion suffixes.
+test_lock_stale_lock_in_unwritable_parent_fails_bounded() {
+  local dir state ro lockdir dead
+  dir=$(make_case lock-stale-unwritable)
+  state="$dir/state"
+  ro="$dir/ro"
+  lockdir="$ro/x.lock"
+  dead=$(dead_pid)
+  mkdir -p "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  touch -t 200001010000 "$lockdir"
+  chmod 555 "$ro"
+
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  run_lock_probe "$dir" "$ro" '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "try_rc=%s\n" "$?"
+  ' "$lockdir"
+  chmod 755 "$ro"
+
+  grep -qF "try_rc=1" "$dir/probe.out" \
+    || fail "unstealable stale lock should report contention: $(cat "$dir/probe.out")"
+  [ ! -s "$dir/probe.err" ] \
+    || fail "unstealable stale lock spammed stderr: $(head -c 300 "$dir/probe.err")"
+  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "stale lock was mutated despite unwritable parent"
+  [ ! -e "$lockdir.steal" ] || fail "companion artifact created in unwritable parent"
+  pass "stale lock in unwritable parent fails bounded without companion artifacts"
+}
+
+# A companion left behind by a stealer that died mid-steal (dead pid, aged)
+# must still self-heal: the primary steal serializes through .steal.steal, the
+# same one-companion-level mechanism the primary itself uses.
+test_lock_stale_steal_companion_self_heals() {
+  local dir state lockdir dead
+  dir=$(make_case lock-stale-companion)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir -p "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  touch -t 200001010000 "$lockdir" "$lockdir.steal"
+
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  run_lock_probe "$dir" "" '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "try_rc=%s pid=%s\n" "$?" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' "$lockdir"
+
+  grep -qF "try_rc=0" "$dir/probe.out" \
+    || fail "stale companion blocked a legitimate steal: $(cat "$dir/probe.out")"
+  grep -qF "pid=$dead" "$dir/probe.out" \
+    && fail "steal did not replace the dead holder: $(cat "$dir/probe.out")"
+  [ ! -e "$lockdir.steal" ] || fail "companion residue left after self-heal"
+  [ ! -e "$lockdir.steal.steal" ] || fail "second-level companion residue left after self-heal"
+  pass "stale steal companion self-heals through one bounded companion level"
+}
+
+# The structural bound itself: at two companion levels the acquire refuses to
+# steal, no matter what state the chain is in. A fully stale
+# lock + .steal + .steal.steal chain therefore reports contention and leaves
+# every artifact untouched - no .steal.steal.steal is ever attempted.
+test_lock_steal_depth_is_bounded_at_one_companion_level() {
+  local dir state lockdir dead
+  dir=$(make_case lock-depth-bound)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir -p "$lockdir" "$lockdir.steal" "$lockdir.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal.steal/pid"
+  touch -t 200001010000 "$lockdir" "$lockdir.steal" "$lockdir.steal.steal"
+
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  run_lock_probe "$dir" "" '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "try_rc=%s\n" "$?"
+  ' "$lockdir"
+
+  grep -qF "try_rc=1" "$dir/probe.out" \
+    || fail "depth-2 companion chain should refuse to steal: $(cat "$dir/probe.out")"
+  [ ! -s "$dir/probe.err" ] \
+    || fail "bounded refusal spammed stderr: $(head -c 300 "$dir/probe.err")"
+  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "primary lock mutated past the depth bound"
+  [ "$(cat "$lockdir.steal.steal/pid")" = "$dead" ] || fail "deepest companion mutated past the depth bound"
+  [ ! -e "$lockdir.steal.steal.steal" ] || fail "a third companion level was created"
+  pass "steal depth is structurally bounded at one companion level"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i lock_pid
   dir=$(make_case restart-reused-pid)
@@ -1180,6 +1338,10 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_unwritable_parent_fails_cleanly_without_steal_spiral
+test_lock_stale_lock_in_unwritable_parent_fails_bounded
+test_lock_stale_steal_companion_self_heals
+test_lock_steal_depth_is_bounded_at_one_companion_level
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
