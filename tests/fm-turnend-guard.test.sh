@@ -229,6 +229,34 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
 }
 
+test_hook_reports_unverifiable_identity_distinctly() {
+  # A pre-flock lock (inspectable-format identity, no identity-flock file) with
+  # a live pid, checked where process inspection is unavailable (a sandboxed
+  # session cannot exec setuid ps), must still block, but the banner must say
+  # the identity is unverifiable instead of claiming no live watcher exists.
+  local dir holder fakebin out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-unverifiable")
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 127\n' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  sleep 300 &
+  holder=$!
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$holder" 'Tue Jul 22 10:00:00 2026 bash fm-watch.sh'
+  touch "$dir/state/.last-watcher-beat"
+  out=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" run_hook "$dir" false); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 2 "$status" "hook must still block when the watcher identity is unverifiable"
+  assert_contains "$out" "cannot be verified from this session" "block banner must state the identity is unverifiable"
+  case "$out" in
+    *'no live watcher holds this home lock'*) fail "hook claimed absence for an unverifiable live lock" ;;
+  esac
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must keep the exact required instruction"
+  pass "fm-turnend-guard: unverifiable identity is reported distinctly from absence"
+}
+
 test_hook_silent_with_live_lock_and_fresh_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-fresh")
@@ -909,6 +937,7 @@ test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_reports_unverifiable_identity_distinctly
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary

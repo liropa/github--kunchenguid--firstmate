@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# Watcher identity contract (single owner of the format and its verification):
+# a watcher lock's pid-identity file carries one of three formats.
+#   linux-starttime=... cmdline-hex=...   /proc-derived; verified by recomputing.
+#   flock-identity pid=... nonce=...      self-declared at publication when
+#                                         process inspection was unavailable;
+#                                         verified by probing the publisher's
+#                                         still-held identity flock, never by ps.
+#   <ps lstart + command text>            portable ps fallback; verified by
+#                                         recomputing when ps runs, else by the
+#                                         identity flock when one was published.
+# Publication also holds an flock (LOCK_EX) on <lockdir>/identity-flock for the
+# watcher's whole life. The kernel releases that lock when the holder's last
+# inherited descriptor closes, so a recycled pid can never re-hold it: the probe
+# stays pid-reuse-safe in environments where ps cannot run at all (a sandboxed
+# session cannot exec setuid /bin/ps on macOS). A lock that predates the flock
+# file and cannot be inspected is reported as unverifiable (rc 2), a distinct
+# honest outcome that callers must treat as unknown, never as stale or absent.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -16,11 +34,19 @@ fm_current_pid() {
 }
 
 fm_pid_alive() {
-  local pid=$1
+  local pid=$1 err
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  [ "$pid" -gt 0 ] || return 1
+  err=$(kill -0 "$pid" 2>&1) && return 0
+  # EPERM still proves existence: a sandboxed session cannot signal processes
+  # outside its sandbox, so only ESRCH may be read as death. Anything else must
+  # stay "alive" or a sandboxed caller would treat a live holder as stealable.
+  case "$err" in
+    *[Nn]o\ such\ process*) return 1 ;;
+  esac
+  return 0
 }
 
 fm_pid_identity() {
@@ -56,6 +82,65 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+# True when this environment can compute fm_pid_identity at all, probed against
+# the caller's own live pid. False means inspection tooling is unavailable here
+# (no readable /proc and ps cannot exec), NOT that any particular pid is dead.
+fm_pid_identity_available() {
+  fm_pid_identity "${BASHPID:-$$}" >/dev/null 2>&1
+}
+
+# Hold the watcher-identity flock for the caller's remaining lifetime. The lock
+# rides the open file description behind fd 9 (bash 3.2 has no dynamic fd
+# allocation), so the kernel releases it when the holder's last inherited
+# descriptor closes; a recycled pid never inherits it. The flock file is created
+# only when the lock is genuinely held, so its presence is a promise that a
+# probe finding it unlocked has found a dead publisher, not a degraded one.
+fm_watcher_identity_flock_hold() {  # <lockdir>
+  local lockdir=$1
+  exec 9>>"$lockdir/identity-flock" 2>/dev/null || return 1
+  if ! perl -e '
+    use Fcntl qw(:flock);
+    open(my $fh, ">>&=", 9) or exit 1;
+    flock($fh, LOCK_EX | LOCK_NB) or exit 1;
+  ' 2>/dev/null; then
+    exec 9>&- 2>/dev/null
+    rm -f "$lockdir/identity-flock" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# True when some live process still holds the published identity flock. The
+# probe takes LOCK_SH so concurrent probes never report each other as the
+# holder; only the publisher's LOCK_EX blocks it.
+fm_watcher_identity_flock_held() {  # <lockdir>
+  local lockdir=$1
+  [ -f "$lockdir/identity-flock" ] || return 1
+  perl -e '
+    use Fcntl qw(:flock);
+    open(my $fh, "<", $ARGV[0]) or exit 1;
+    exit(flock($fh, LOCK_SH | LOCK_NB) ? 1 : 0);
+  ' "$lockdir/identity-flock" 2>/dev/null
+}
+
+# Publish the watcher's identity into its held lockdir: hold the identity flock
+# for life, then record the inspectable identity string when one is computable,
+# or a self-declared flock-identity marker when it is not. Returns non-zero only
+# when neither a computable identity nor a held flock could be published, which
+# leaves the lock unverifiable for arm confirmation.
+fm_watcher_identity_publish() {  # <lockdir> <pid>
+  local lockdir=$1 pid=$2 identity nonce flock_held=0
+  fm_watcher_identity_flock_hold "$lockdir" && flock_held=1
+  if identity=$(fm_pid_identity "$pid" 2>/dev/null); then
+    printf '%s\n' "$identity" > "$lockdir/pid-identity"
+    return 0
+  fi
+  [ "$flock_held" -eq 1 ] || return 1
+  nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
+  [ -n "$nonce" ] || nonce="$pid.$(date +%s)"
+  printf 'flock-identity pid=%s nonce=%s\n' "$pid" "$nonce" > "$lockdir/pid-identity"
+}
+
 fm_path_mtime() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
@@ -70,8 +155,14 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Verify that the recorded watcher lock provably names the live process <pid>.
+# Returns 0 on a proven match, 1 on a definitive mismatch (wrong home or path,
+# empty identity, a dead holder, or a recycled pid), and 2 when identity truly
+# cannot be established either way: process inspection is unavailable AND the
+# lock predates the identity flock. Callers that act destructively on
+# "mismatch" must treat 2 as unknown, never as stale, absent, or contended.
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity declared_pid
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
@@ -79,19 +170,52 @@ fm_watcher_lock_matches_pid() {
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  case "$lock_identity" in
+    flock-identity\ pid=*)
+      # Self-declared identity: the string is a marker, the held flock is the
+      # proof. The declared pid must still be the pid under test.
+      declared_pid=${lock_identity#flock-identity pid=}
+      declared_pid=${declared_pid%% *}
+      [ "$declared_pid" = "$pid" ] || return 1
+      fm_watcher_identity_flock_held "$lockdir"
+      return
+      ;;
+  esac
+  if current_identity=$(fm_pid_identity "$pid"); then
+    [ "$current_identity" = "$lock_identity" ]
+    return
+  fi
+  if fm_pid_identity_available; then
+    # Inspection works here, so the failure is about <pid> itself: it is gone.
+    return 1
+  fi
+  # An inspectable-format identity, but this session cannot inspect processes
+  # (a sandboxed session cannot exec setuid ps). Fall back to the identity
+  # flock when the publisher held one; otherwise the identity is unknowable.
+  if [ -f "$lockdir/identity-flock" ]; then
+    fm_watcher_identity_flock_held "$lockdir"
+    return
+  fi
+  return 2
 }
 
 FM_WATCHER_HEALTHY_PID=
+FM_WATCHER_HEALTH_UNVERIFIED=0
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age rc
   FM_WATCHER_HEALTHY_PID=
+  FM_WATCHER_HEALTH_UNVERIFIED=0
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+    [ "$rc" -eq 2 ] && FM_WATCHER_HEALTH_UNVERIFIED=1
+    return 1
+  fi
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
@@ -105,6 +229,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/identity-flock" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
 }

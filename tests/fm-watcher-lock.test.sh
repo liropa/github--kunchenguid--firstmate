@@ -955,9 +955,211 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "Linux process identity detects pid reuse"
 }
 
+# Shadow ps with a stub that fails like a sandboxed session's denied setuid
+# exec, and point the /proc seam at a non-existent root so Linux hosts take the
+# same no-inspection path macOS takes in-sandbox.
+write_failing_ps_stub() {
+  local fakebin=$1
+  printf '#!/usr/bin/env bash\nexit 127\n' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+}
+
+test_pid_alive_eperm_and_zero() {
+  # A sandboxed session gets EPERM, not ESRCH, from kill -0 on a live process
+  # outside its sandbox; pid 1 reproduces that for any unprivileged caller.
+  # Reading EPERM as death would let a sandboxed caller steal a live holder's
+  # lock. pid 0 signals the caller's own process group and must be rejected.
+  local dir state out
+  dir=$(make_case pid-alive-eperm)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_alive 1 && printf "one-alive " || printf "one-dead "
+    fm_pid_alive 0 && printf "zero-alive" || printf "zero-dead"
+  ' _ "$LIB")
+  case "$out" in
+    'one-alive zero-dead') ;;
+    *) fail "fm_pid_alive EPERM/zero handling wrong (got '$out', want 'one-alive zero-dead')" ;;
+  esac
+  pass "fm_pid_alive treats EPERM as existence and rejects pid 0"
+}
+
+test_arm_confirms_fresh_watcher_without_process_inspection() {
+  # Acceptance: with ps unavailable (sandboxed session), the arm still confirms
+  # a genuinely live watcher via the published identity flock, and a separate
+  # uninspecting process can re-verify the same lock.
+  local dir state fakebin out probe i lock_pid armpid
+  dir=$(make_case no-inspection-arm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  write_failing_ps_stub "$fakebin"
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_HOME="$dir" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$out" 2>"$dir/arm.err" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$out" \
+    || fail "arm did not confirm a live watcher without process inspection: $(cat "$out" "$dir/arm.err" 2>/dev/null)"
+  grep -qF '(beacon fresh)' "$out" || fail "arm confirmation did not include the fresh-beacon proof"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF 'flock-identity pid=' "$state/.watch.lock/pid-identity" \
+    || fail "uninspectable publication did not self-declare a flock identity (got '$(cat "$state/.watch.lock/pid-identity" 2>/dev/null)')"
+  [ -f "$state/.watch.lock/identity-flock" ] || fail "publication did not leave a held identity flock file"
+  probe=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_healthy "$2" "$3" 300 "$4"; then printf "healthy %s" "$FM_WATCHER_HEALTHY_PID"; else printf "unhealthy"; fi
+  ' _ "$LIB" "$state" "$WATCH" "$dir")
+  [ "$probe" = "healthy $lock_pid" ] \
+    || fail "a separate uninspecting process could not verify the flock identity (got '$probe', want 'healthy $lock_pid')"
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm confirms and re-verifies a live watcher with no process inspection"
+}
+
+test_flock_identity_rejects_recycled_pid() {
+  # A flock-format lock whose publisher died must stay dead even when the
+  # recorded pid is alive again (recycled) and the beacon is still fresh: the
+  # recycled pid cannot re-hold the released flock. The format is authoritative,
+  # so the verdict must be identical with and without working ps.
+  local dir state fakebin decoy verdict verdict_ps out i lock_pid armpid
+  dir=$(make_case flock-recycled-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  mark_pr_check_migration_complete "$state"
+  write_failing_ps_stub "$fakebin"
+  sleep 300 &
+  decoy=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$decoy" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf 'flock-identity pid=%s nonce=deadbeef\n' "$decoy" > "$state/.watch.lock/pid-identity"
+  touch "$state/.watch.lock/identity-flock"
+  touch "$state/.last-watcher-beat"
+  verdict=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; fm_watcher_healthy "$2" "$3" 300 "$4" && echo healthy || echo unhealthy
+  ' _ "$LIB" "$state" "$WATCH" "$dir")
+  verdict_ps=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; fm_watcher_healthy "$2" "$3" 300 "$4" && echo healthy || echo unhealthy
+  ' _ "$LIB" "$state" "$WATCH" "$dir")
+  [ "$verdict" = unhealthy ] || fail "released flock with a live recycled pid was confirmed healthy without ps"
+  [ "$verdict_ps" = unhealthy ] || fail "released flock with a live recycled pid was confirmed healthy with ps available"
+  # --restart must replace the dead lock without signalling the recycled pid.
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_HOME="$dir" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" --restart > "$out" 2>/dev/null &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$out" || fail "restart did not replace the dead flock-identity lock: $(cat "$out")"
+  is_live_non_zombie "$decoy" || fail "restart signalled a recycled pid it could not have verified"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" != "$decoy" ] || fail "restart left the recycled pid in the lock"
+  kill "$armpid" "$lock_pid" "$decoy" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$decoy" 2>/dev/null || true
+  pass "a released identity flock rejects a recycled pid with and without ps"
+}
+
+test_arm_reports_unverifiable_identity_distinctly() {
+  # A pre-flock lock (inspectable-format identity, no identity-flock file) with
+  # a live pid and fresh beacon, checked where inspection is impossible, is
+  # UNKNOWN: the arm must fail with the honest cannot-verify wording, never
+  # claiming absence ("no live watcher") or a generic unexplained cycle.
+  local dir state fakebin holder out err status armpid
+  dir=$(make_case unverifiable-arm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  err="$dir/arm.err"
+  mark_pr_check_migration_complete "$state"
+  write_failing_ps_stub "$fakebin"
+  sleep 300 &
+  holder=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'Tue Jul 22 10:00:00 2026 bash fm-watch.sh' > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_HOME="$dir" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$out" 2>"$err" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail on an unverifiable lock (status $status)"
+  grep -qF "watcher: FAILED - cannot verify the recorded watcher's identity" "$out" \
+    || fail "arm did not use the honest cannot-verify wording: $(cat "$out" "$err" 2>/dev/null)"
+  ! grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$out" \
+    || fail "arm claimed absence for an unverifiable live lock"
+  ! grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" \
+    || fail "arm hid the unverifiable identity behind a generic cycle failure"
+  is_live_non_zombie "$holder" || fail "arm signalled the unverifiable holder"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "arm reports an unverifiable identity distinctly from absence"
+}
+
+test_restart_leaves_unverifiable_lock_untouched() {
+  # --restart on the same unverifiable pre-flock lock must neither signal the
+  # recorded pid nor clear the lock: unknown is not stale.
+  local dir state fakebin holder out err status armpid
+  dir=$(make_case unverifiable-restart)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  err="$dir/restart.err"
+  mark_pr_check_migration_complete "$state"
+  write_failing_ps_stub "$fakebin"
+  sleep 300 &
+  holder=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'Tue Jul 22 10:00:00 2026 bash fm-watch.sh' > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_HOME="$dir" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" 2>"$err" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart did not fail on an unverifiable lock (status $status)"
+  grep -qF 'leaving pid' "$err" || fail "restart did not explain it was leaving the unverifiable holder untouched: $(cat "$err")"
+  is_live_non_zombie "$holder" || fail "restart signalled a holder it could not verify"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" = "$holder" ] \
+    || fail "restart cleared an unverifiable lock it must treat as unknown"
+  grep -qF "watcher: FAILED - cannot verify the recorded watcher's identity" "$out" \
+    || fail "restart did not use the honest cannot-verify wording: $(cat "$out" "$err" 2>/dev/null)"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "restart leaves an unverifiable lock untouched and says so"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_pid_alive_eperm_and_zero
+test_arm_confirms_fresh_watcher_without_process_inspection
+test_flock_identity_rejects_recycled_pid
+test_arm_reports_unverifiable_identity_distinctly
+test_restart_leaves_unverifiable_lock_untouched
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

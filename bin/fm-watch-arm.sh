@@ -26,6 +26,14 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - cannot verify the recorded watcher's identity from this
+#   session (...)                                        - a lock is present and its pid is live,
+#                                                          but identity is unknowable here: process
+#                                                          inspection is unavailable (sandboxed
+#                                                          session) and the lock predates the
+#                                                          identity flock; never reported as
+#                                                          absence or contention, and --restart
+#                                                          leaves such a lock untouched
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
@@ -248,7 +256,13 @@ wait_for_healthy_successor() {
 }
 
 fail_unexplained_cycle() {
-  echo "watcher: FAILED - cycle ended without an actionable reason"
+  # Honest failure separation: when the last health check found a lock whose
+  # identity is unknowable here, say that instead of a generic cycle failure.
+  if [ "${FM_WATCHER_HEALTH_UNVERIFIED:-0}" -eq 1 ]; then
+    echo "watcher: FAILED - cannot verify the recorded watcher's identity from this session (process inspection unavailable and the lock predates the identity flock)"
+  else
+    echo "watcher: FAILED - cycle ended without an actionable reason"
+  fi
   return 1
 }
 
@@ -326,19 +340,28 @@ if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
-    if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
-    else
-      clear_stale_recorded_watcher_lock
-    fi
+    fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"
+    case $? in
+      0)
+        kill -TERM "$lock_pid" 2>/dev/null || true
+        # Wait for it to actually exit before relaunching, so the fresh watcher
+        # either takes a released lock or reclaims a now-dead-pid stale lock instead
+        # of seeing the dying one as a live holder and no-opping.
+        i=0
+        while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+          sleep 0.1
+          i=$((i + 1))
+        done
+        ;;
+      2)
+        # Unverifiable is unknown, not stale: never kill or clear what may be a
+        # live watcher this session simply cannot inspect.
+        echo "watcher: cannot verify the recorded watcher's identity from this session (process inspection unavailable and the lock predates the identity flock); leaving pid $lock_pid untouched" >&2
+        ;;
+      *)
+        clear_stale_recorded_watcher_lock
+        ;;
+    esac
   fi
 fi
 
@@ -485,5 +508,11 @@ cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
-echo "watcher: FAILED - no live watcher with a fresh beacon"
+if [ "${FM_WATCHER_HEALTH_UNVERIFIED:-0}" -eq 1 ]; then
+  # Honest failure separation: a live-looking lock whose identity this session
+  # cannot establish is not absence and not contention; say exactly that.
+  echo "watcher: FAILED - cannot verify the recorded watcher's identity from this session (process inspection unavailable and the lock predates the identity flock)"
+else
+  echo "watcher: FAILED - no live watcher with a fresh beacon"
+fi
 exit 1
