@@ -587,6 +587,18 @@ fm_active_check_stop() {
   FM_ACTIVE_CHECK_PGID=
 }
 
+# Resolve a child's process group: ps when it runs, perl's getpgrp when it
+# cannot (a sandboxed session cannot exec setuid ps). Empty output keeps the
+# caller's existing skip-verification behavior for an unresolvable pid.
+active_check_pgid() {  # <pid>
+  local pid=$1 out
+  out=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || out=
+  if [ -z "$out" ]; then
+    out=$(perl -e 'my $g = getpgrp($ARGV[0]); exit 1 unless $g > 0; print "$g\n"' "$pid" 2>/dev/null) || out=
+  fi
+  printf '%s' "$out"
+}
+
 run_check_capture() {
   local pgid
   fm_check_output_cleanup
@@ -596,11 +608,14 @@ run_check_capture() {
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  # Close the inherited identity-flock fd (fd 9) in the check child: a check
+  # that outlived a dead watcher would otherwise keep the flock held and make
+  # the identity probe report a live publisher that no longer exists.
+  ( exec 9>&- 2>/dev/null; FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
-  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  pgid=$(active_check_pgid "$FM_ACTIVE_CHECK_PID")
   trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -819,7 +834,11 @@ trap 'exit 1' HUP INT TERM
 WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Publish identity: the inspectable string when ps//proc works, plus a held
+# identity flock (fd 9, kept for this process's life) so a session that cannot
+# exec ps can still verify this lock; see fm-wake-lib.sh for the contract.
+fm_watcher_identity_publish "$WATCH_LOCK" "$WATCHER_PID" \
+  || echo "watcher: identity publication degraded (no process inspection and no identity flock); arm confirmation may be unable to trust this lock" >&2
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

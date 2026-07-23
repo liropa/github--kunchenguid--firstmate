@@ -95,7 +95,12 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
 {
   printf '●%s\n' "$rule"
   printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  if [ "${FM_WATCHER_HEALTH_UNVERIFIED:-0}" -eq 1 ]; then
+    # Honest failure separation: an unverifiable lock is unknown, not absent.
+    printf '●  %s task(s) in flight; a watcher lock is recorded but its identity cannot be verified from this session (process inspection unavailable; last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  else
+    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  fi
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2

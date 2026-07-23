@@ -82,8 +82,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "${FM_GUARD_GRACE:-300}"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 LOCK_PID=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
-if fm_pid_alive "$LOCK_PID" && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$LOCK_PID" "$FM_HOME"; then
-  exit 0
+CLAIM='no live watcher holds this home lock'
+if fm_pid_alive "$LOCK_PID"; then
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$LOCK_PID" "$FM_HOME"
+  case $? in
+    0) exit 0 ;;
+    # Honest failure separation: an unverifiable lock is unknown, not absent.
+    2) CLAIM="the recorded watcher's identity cannot be verified from this session (process inspection unavailable)" ;;
+  esac
 fi
 
 command -v node >/dev/null 2>&1 || exit 0
@@ -102,10 +108,10 @@ REASON_CODE=${REST#*"$TAB"}
 [ "$REASON_CODE" != "$REST" ] || REASON_CODE=""
 case "$REASON_CODE" in
   unsafe-teardown)
-    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
+    REASON="[watcher-continuity] tasks are in flight and $CLAIM; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
     ;;
   *)
-    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
+    REASON="[watcher-continuity] tasks are in flight and $CLAIM; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
     ;;
 esac
 ESCAPED=$(printf '%s' "$REASON" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')

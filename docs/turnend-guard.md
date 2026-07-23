@@ -29,8 +29,10 @@ For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
+Identity is verified by recomputing the recorded string when process inspection is available, or by probing the publisher's held identity flock when it is not; `bin/fm-wake-lib.sh` owns that contract, including sandboxed sessions that cannot exec setuid ps.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+A lock whose identity truly cannot be established (no inspection and no identity flock) still blocks, but the banner says the identity is unverifiable instead of claiming no live watcher exists.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
