@@ -443,8 +443,17 @@ test_watch_restart_attaches_to_healthy_peer() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # Wait for the peer to confirm its SIGTERM handler is installed: on a loaded
+  # host node's cold start can lose the race against the restart's TERM, which
+  # kills the "TERM-resistant" peer and flakes this test into a fresh start.
+  node -e 'process.on("SIGTERM", () => {}); console.log("armed"); setTimeout(() => {}, 300000)' > "$dir/peer.ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -q armed "$dir/peer.ready" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q armed "$dir/peer.ready" 2>/dev/null || fail "peer never armed its SIGTERM handler"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
