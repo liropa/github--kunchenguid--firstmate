@@ -48,6 +48,13 @@ report_batch() {  # <label> <file>
 }
 
 if [ -n "$BATCH_ID" ]; then
+  CASE_BATCH_ID=${BATCH_ID%.md}
+  case "$CASE_BATCH_ID" in
+    ""|*/*|*..*|*[!A-Za-z0-9_.-]*)
+      echo "error: invalid batch id $BATCH_ID; expected a basename like <batch-id> or <batch-id>.md containing only A-Z, a-z, 0-9, '_', '.', and '-'; nothing to report" >&2
+      exit 1
+      ;;
+  esac
   case "$BATCH_ID" in
     *.md) ;;
     *) BATCH_ID="$BATCH_ID.md" ;;
