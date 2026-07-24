@@ -20,17 +20,18 @@ FM_BACKLOG_HANDOFF_SBX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/
 . "$FM_BACKLOG_HANDOFF_SBX_LIB_DIR/fm-backend.sh"
 
 # fm_backlog_handoff_sbx_signals_dir <state-dir> <secondmate-id>: prints the
-# recorded signal-bridge directory ONLY when <state-dir>/<id>.meta records
-# backend=sbx and a non-empty sbx_signals_dir=; empty output and rc 1
-# otherwise (no meta, a different backend, or a malformed sbx record - all
-# treated the same by callers: fall back to the unchanged non-sbx path).
+# recorded signal-bridge directory when <state-dir>/<id>.meta records
+# backend=sbx and a non-empty sbx_signals_dir=. Returns rc 1 only when the
+# destination is not recorded as sbx-backed at all (no meta or a different
+# backend). A malformed sbx record (backend=sbx with missing/empty
+# sbx_signals_dir=) returns rc 0 with empty output so callers can refuse
+# loudly instead of falling through to the non-sbx path.
 fm_backlog_handoff_sbx_signals_dir() {  # <state-dir> <secondmate-id>
   local state=$1 id=$2 meta dir
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 1
   [ "$(fm_backend_of_meta "$meta")" = sbx ] || return 1
   dir=$(fm_meta_get "$meta" sbx_signals_dir)
-  [ -n "$dir" ] || return 1
   printf '%s' "$dir"
 }
 

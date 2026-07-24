@@ -247,9 +247,16 @@ validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
 # Detect an sbx-backed destination from the MAIN home's own recorded task
 # metadata (never by probing the secondmate's clone or its source mount -
 # both can be stale or absent). Empty when this destination is not sbx-backed
-# (no meta, a different backend, or a malformed sbx record): the rest of this
-# script then runs byte-for-byte as it did before this backend existed.
-SBX_SIGNALS_DIR=$(fm_backlog_handoff_sbx_signals_dir "$STATE" "$ID" 2>/dev/null || true)
+# (no meta or a different backend): the rest of this script then runs
+# byte-for-byte as it did before this backend existed.
+if SBX_SIGNALS_DIR=$(fm_backlog_handoff_sbx_signals_dir "$STATE" "$ID" 2>/dev/null); then
+  if [ -z "$SBX_SIGNALS_DIR" ]; then
+    echo "error: sbx secondmate $ID has no recorded signal-bridge directory (backend=sbx but sbx_signals_dir= is missing/empty in $STATE/$ID.meta); refusing rather than writing into its unreachable host clone" >&2
+    exit 1
+  fi
+else
+  SBX_SIGNALS_DIR=
+fi
 
 # Classify every key before changing anything: move-from-main, already-in-sub, or
 # missing. Abort with no changes if any key matches neither backlog.

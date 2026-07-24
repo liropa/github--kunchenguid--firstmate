@@ -41,6 +41,13 @@ MAIN_BACKLOG="$DATA/backlog.md"
 [ $# -eq 2 ] || { echo "usage: fm-backlog-handoff-rollback.sh <secondmate-id> <batch-id>" >&2; exit 1; }
 ID=$1
 BATCH_ID=$2
+CASE_BATCH_ID=${BATCH_ID%.md}
+case "$CASE_BATCH_ID" in
+  ""|*/*|*..*|*[!A-Za-z0-9_.-]*)
+    echo "error: invalid batch id $BATCH_ID; expected a basename like <batch-id> or <batch-id>.md containing only A-Z, a-z, 0-9, '_', '.', and '-'; nothing to roll back" >&2
+    exit 1
+    ;;
+esac
 case "$BATCH_ID" in
   *.md) ;;
   *) BATCH_ID="$BATCH_ID.md" ;;
