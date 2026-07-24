@@ -138,7 +138,7 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 ```
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
-The helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
+The helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), moving each named item - and a whole connected set, blocker plus dependents - atomically out of the main `data/backlog.md`; non-sbx destinations receive it directly in their own `data/backlog.md`, while sbx destinations use the signal-bridge path below.
 This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
 It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
 It refuses a selected item with a single-space or tab-indented continuation rather than risk leaving content orphaned in the main backlog.
