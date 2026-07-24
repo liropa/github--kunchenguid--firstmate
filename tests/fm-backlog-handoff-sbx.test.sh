@@ -168,6 +168,38 @@ EOF
   pass "sbx destination: a recorded-but-missing signal-bridge dir refuses loudly with no mutation"
 }
 
+test_sbx_meta_without_signals_dir_refuses_without_mutation() {
+  local w id out rc=0 main_before
+  w="$TMP_ROOT/missing-meta-sig"; id=missing-meta-sig-sm
+  new_sbx_handoff_world "$w" "$id"
+  fm_write_meta "$w/main/state/$id.meta" \
+    "window=sbx:fm-$id" "worktree=$w/sub" "project=$w/sub" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$w/sub" "projects=alpha"
+  cat > "$w/main/data/backlog.md" <<'EOF'
+## Queued
+- [ ] malformed-meta-item - should stay put (repo: alpha)
+
+## Done
+EOF
+  main_before=$(cat "$w/main/data/backlog.md")
+
+  out=$(PATH="$NO_SBX_PATH" FM_HOME="$w/main" "$ROOT/bin/fm-backlog-handoff.sh" "$id" malformed-meta-item 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "backend=sbx without sbx_signals_dir must refuse loudly"
+  assert_contains "$out" "backend=sbx but sbx_signals_dir= is missing/empty" \
+    "the refusal should explain the malformed sbx metadata"
+  assert_contains "$out" "$w/main/state/$id.meta" \
+    "the refusal should name the malformed meta file"
+  [ "$main_before" = "$(cat "$w/main/data/backlog.md")" ] \
+    || fail "malformed sbx metadata must leave the main backlog byte-identical"
+  [ ! -f "$w/sub/data/backlog.md" ] \
+    || fail "malformed sbx metadata must not fall through to the host-clone backlog"
+  [ ! -d "$w/signals/$id/backlog-handoff" ] \
+    || fail "malformed sbx metadata must not create a signal-bridge batch"
+
+  pass "sbx destination: backend=sbx without sbx_signals_dir refuses before moving"
+}
+
 test_sbx_stranded_dependency_leaves_nothing_moved() {
   local w id sig out rc=0 main_before pending
   w="$TMP_ROOT/stranded"; id=stranded-sm
@@ -263,6 +295,7 @@ test_sbx_destination_queues_batch_never_touches_host_clone
 test_sbx_multi_key_connected_set_lands_in_one_batch
 test_sbx_rehandoff_of_pending_key_is_idempotent
 test_sbx_missing_signals_dir_refuses_without_mutation
+test_sbx_meta_without_signals_dir_refuses_without_mutation
 test_sbx_stranded_dependency_leaves_nothing_moved
 test_non_sbx_meta_leaves_old_path_unchanged
 test_sbx_nudge_success_reports_delivery_not_ingestion

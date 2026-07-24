@@ -14,6 +14,15 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (requi
 
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff-rollback)
 
+count_files() {  # <glob-dir>
+  local dir=$1 n=0 f
+  [ -d "$dir" ] || { echo 0; return 0; }
+  for f in "$dir"/*; do
+    [ -f "$f" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
 test_rollback_reclaims_pending_batch_into_main_backlog() {
   local w id sig pending rolled_back out
   w="$TMP_ROOT/basic"; id=basic-sm
@@ -107,10 +116,40 @@ test_rollback_refuses_drained_pending_batch() {
   pass "rollback: refuses a drained pending batch rather than claiming an ambiguous success"
 }
 
+test_rollback_refuses_invalid_batch_id_without_mutation() {
+  local w id sig pending out rc=0 main_before
+  w="$TMP_ROOT/invalid-id"; id=invalid-id-sm
+  new_sbx_handoff_world "$w" "$id"
+  sig="$w/signals/$id"
+  pending="$sig/backlog-handoff/pending"
+  mkdir -p "$pending" "$sig/backlog-handoff/rolled-back"
+  : > "$w/main/data/backlog.md"
+  printf '## In flight\n\n## Queued\n- [ ] stuck-item - never ingested (repo: alpha)\n\n## Done\n' \
+    > "$pending/stuck-batch.md"
+  main_before=$(cat "$w/main/data/backlog.md")
+
+  out=$(FM_HOME="$w/main" "$ROOT/bin/fm-backlog-handoff-rollback.sh" "$id" ../stuck-batch 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "rollback must refuse a batch id containing '..' and '/'"
+  assert_contains "$out" "invalid batch id" "the refusal should name invalid batch-id syntax"
+  [ "$main_before" = "$(cat "$w/main/data/backlog.md")" ] \
+    || fail "an invalid batch id must not mutate the main backlog"
+  [ -f "$pending/stuck-batch.md" ] || fail "an invalid batch id must not move pending batches"
+  [ "$(count_files "$sig/backlog-handoff/rolled-back")" -eq 0 ] \
+    || fail "an invalid batch id must not archive anything"
+
+  rc=0
+  out=$(FM_HOME="$w/main" "$ROOT/bin/fm-backlog-handoff-rollback.sh" "$id" "bad id" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "rollback must refuse a batch id containing disallowed characters"
+  assert_contains "$out" "invalid batch id" "the refusal should happen before path construction"
+
+  pass "rollback: refuses path-like or malformed batch ids without mutation"
+}
+
 test_rollback_reclaims_pending_batch_into_main_backlog
 test_rollback_refuses_already_ingested_batch
 test_rollback_refuses_already_rolled_back_batch
 test_rollback_refuses_unknown_batch
 test_rollback_refuses_drained_pending_batch
+test_rollback_refuses_invalid_batch_id_without_mutation
 
 echo "ALL TESTS PASSED"
