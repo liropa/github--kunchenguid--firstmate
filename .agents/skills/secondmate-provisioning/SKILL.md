@@ -147,6 +147,7 @@ Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items.
+For an sbx-backed secondmate, the item never lands in that host clone's `data/backlog.md` at all - it is queued as a durable signal-bridge batch and the secondmate is nudged to merge it itself; see `docs/sbx-backend.md`'s "Backlog handoff" section for the full design and its verification/recovery tooling.
 
 ## Recovery
 

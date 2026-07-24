@@ -257,10 +257,11 @@ test_untemplated_spawn_records_no_template_key() {
 # --- guest-home provisioning (design doc firstmate-sbx-guest-home-provisioning.md §4)
 
 test_spawn_provisions_guest_home() {
-  local w fb out home item
+  local w fb out home item sig
   w=$(new_world provision); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes"
   home="$w/sm"
+  sig="$w/signals/smx"
 
   out=$(run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
     || fail "claude sbx secondmate spawn failed: $out"
@@ -268,8 +269,8 @@ test_spawn_provisions_guest_home() {
   # The pass must ride ONE guest exec (the fake executes it against the world
   # home - clone mode puts the guest home at the same absolute path).
   assert_contains "$(cat "$w/sbx.log")" \
-    "_ $home /run/sandbox/source smx data/captain-shared.md crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
-    "the provisioning exec should carry home, mount root, id, captain file, and the declared inheritable list"
+    "_ $home /run/sandbox/source smx data/captain-shared.md $sig crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
+    "the provisioning exec should carry home, mount root, id, captain file, signals dir, and the declared inheritable list"
 
   for item in crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces; do
     [ -L "$home/config/$item" ] || fail "config/$item should be a symlink after provisioning"
@@ -289,7 +290,16 @@ test_spawn_provisions_guest_home() {
   ( . "$ROOT/bin/fm-primary-scope-lib.sh" && fm_root_is_secondmate_home "$home" ) \
     || fail "fm_root_is_secondmate_home should accept the provisioned marker"
 
-  pass "spawn: guest home gets read-through symlinks onto the source mount and a regular-file marker"
+  # The signal-bridge marker is the same kind of residue: a regular file (never
+  # a symlink) so the guest - which cannot reconstruct FM_SBX_SIGNALS_ROOT/<id>
+  # from its own $HOME (the guest user is `agent`, not the host user) - can find
+  # its own bind mount for bin/fm-backlog-ingest.sh and future signal-bridge use.
+  [ ! -L "$home/.fm-sbx-signals-dir" ] || fail "the signals-dir marker must never be a symlink"
+  [ -f "$home/.fm-sbx-signals-dir" ] || fail "the signals-dir marker should exist as a regular file"
+  [ "$(cat "$home/.fm-sbx-signals-dir")" = "$sig" ] \
+    || fail "the signals-dir marker content should be the signal-bridge path, got '$(cat "$home/.fm-sbx-signals-dir")'"
+
+  pass "spawn: guest home gets read-through symlinks onto the source mount, a regular-file identity marker, and a regular-file signals-dir marker"
 }
 
 test_spawn_read_through_and_absence_semantics() {
