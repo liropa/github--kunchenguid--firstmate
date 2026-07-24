@@ -441,7 +441,7 @@ fm_backend_sbx_guest_tmux_ready() {  # <name>
 # back on VM start; the resumed agent restarts them on demand - its brief owns
 # that knowledge, not this transport.
 fm_backend_sbx_ensure_stack() {  # <target>
-  local target=$1 name id meta harness home turnend beat resume fg
+  local target=$1 name id meta harness home turnend beat resume fg signals_dir
   local ready_prev ready_now ready_i
   name=$(fm_backend_sbx_name_of_target "$target")
   case "$(fm_backend_sbx_state "$name")" in
@@ -462,8 +462,9 @@ fm_backend_sbx_ensure_stack() {  # <target>
     echo "error: cannot resurrect $name: meta $meta lacks harness=/home=" >&2
     return 1
   fi
-  turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
-  beat="$FM_SBX_SIGNALS_ROOT/$id/$id.beat"
+  signals_dir="$FM_SBX_SIGNALS_ROOT/$id"
+  turnend="$signals_dir/$id.turn-ended"
+  beat="$signals_dir/$id.beat"
   resume=$(fm_backend_sbx_resume_template "$harness" "$turnend" "$beat") || {
     echo "error: cannot resurrect $name: no resume template for harness '$harness'" >&2
     return 1
@@ -473,7 +474,7 @@ fm_backend_sbx_ensure_stack() {  # <target>
   # symlink/marker damage, and picks up FM_INHERITABLE_CONFIG items declared
   # since spawn. Resurrect-only cost - routine supervision and live-stack
   # delivery never spend this exec.
-  fm_backend_sbx_provision_guest_home "$name" "$home" "$id" || {
+  fm_backend_sbx_provision_guest_home "$name" "$home" "$id" "$signals_dir" || {
     echo "error: cannot resurrect $name: guest-home provisioning re-assert failed" >&2
     return 1
   }
@@ -709,16 +710,21 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # dangling link ([ -f ] fails), byte-for-byte the inherit lib's absence
 # mirroring. The .fm-secondmate-home identity marker is the one residue seeded
 # as a REGULAR file (fm_root_is_secondmate_home hard-refuses [ -L ]), content
-# = the task id. One idempotent exec; spawn runs it after the brief seed, and
+# = the task id. .fm-sbx-signals-dir is a second regular-file marker, content
+# = the signal-bridge dir's absolute path: the guest user is `agent`, not the
+# host user, so the guest cannot reconstruct FM_SBX_SIGNALS_ROOT/<id> from its
+# own $HOME - this marker is how bin/fm-backlog-ingest.sh (and any future
+# guest-side signal-bridge consumer) finds its own bind mount without
+# guessing. One idempotent exec; spawn runs it after the brief seed, and
 # resurrection re-runs it before relaunching the agent - healing guest-side
 # link/marker damage (self-blinding only, the mount stays RO) and picking up
 # FM_INHERITABLE_CONFIG items declared since spawn.
-fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id>
-  local name=$1 home_abs=$2 id=$3
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$4 and the loop expand in the guest sh, not here
+fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
+  local name=$1 home_abs=$2 id=$3 signals_dir=$4
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$5 and the loop expand in the guest sh, not here
   # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   sbx exec "$name" -- sh -c '
-    home=$1 src=$2 id=$3 captain=$4; shift 4
+    home=$1 src=$2 id=$3 captain=$4 signals=$5; shift 5
     cd "$home" || exit 1
     mkdir -p config data || exit 1
     for item; do
@@ -727,5 +733,7 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id>
     ln -sfn "$src/$captain" "$captain" || exit 1
     rm -f .fm-secondmate-home || exit 1
     printf "%s\n" "$id" > .fm-secondmate-home
-  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" $FM_INHERITABLE_CONFIG
+    rm -f .fm-sbx-signals-dir || exit 1
+    printf "%s\n" "$signals" > .fm-sbx-signals-dir
+  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" $FM_INHERITABLE_CONFIG
 }

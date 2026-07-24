@@ -1422,7 +1422,7 @@ if [ "$BACKEND" = sbx ]; then
   # through its dangling link - plus the .fm-secondmate-home identity marker
   # as a regular file. One idempotent exec, shared with resurrection's
   # re-assert (bin/backends/sbx.sh).
-  fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" || {
+  fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" "$SIG_DIR" || {
     echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
     exit 1
   }
