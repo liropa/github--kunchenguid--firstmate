@@ -80,9 +80,32 @@ test_status_unknown_batch_id_refuses() {
   pass "status: an unknown batch id refuses loudly"
 }
 
+test_status_refuses_invalid_batch_id_before_classifying() {
+  local w id sig out rc=0
+  w="$TMP_ROOT/invalid-id"; id=invalid-id-sm
+  new_sbx_handoff_world "$w" "$id"
+  sig="$w/signals/$id"
+  mkdir -p "$sig/backlog-handoff/pending" "$sig/backlog-handoff/ingested" "$sig/backlog-handoff/rolled-back"
+  printf '## Queued\n- [ ] external-item - must not be classified (repo: alpha)\n\n## Done\n' \
+    > "$sig/backlog-handoff/outside.md"
+
+  out=$(FM_HOME="$w/main" "$ROOT/bin/fm-backlog-handoff-status.sh" "$id" ../outside 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "status must refuse a batch id containing '..' and '/'"
+  assert_contains "$out" "invalid batch id" "the refusal should name invalid batch-id syntax"
+  assert_not_contains "$out" "external-item" "invalid batch ids must not read or classify path-traversed files"
+
+  rc=0
+  out=$(FM_HOME="$w/main" "$ROOT/bin/fm-backlog-handoff-status.sh" "$id" "bad id" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "status must refuse a batch id containing disallowed characters"
+  assert_contains "$out" "invalid batch id" "the refusal should happen before path construction"
+
+  pass "status: refuses path-like or malformed batch ids before classification"
+}
+
 test_status_refuses_non_sbx_secondmate
 test_status_lists_pending_and_ingested_and_rolled_back
 test_status_reports_a_named_batch_by_id
 test_status_unknown_batch_id_refuses
+test_status_refuses_invalid_batch_id_before_classifying
 
 echo "ALL TESTS PASSED"
