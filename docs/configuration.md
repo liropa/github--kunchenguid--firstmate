@@ -31,7 +31,7 @@ Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keep
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
-For an sbx-backed destination, `fm-backlog-handoff.sh` never delegates the move into the secondmate's own `data/backlog.md`: that host clone is a point-in-time snapshot the guest never re-reads, so delivery instead lands in a durable signal-bridge batch artifact and the secondmate is nudged to merge it with `bin/fm-backlog-ingest.sh` (see [`docs/sbx-backend.md`](sbx-backend.md#backlog-handoff-signal-bridge-batches) for the full design, verification, and recovery tooling).
+For an sbx-backed destination, `fm-backlog-handoff.sh` never delegates the move into the secondmate's host-clone `data/backlog.md`: that clone is unreachable from the running guest, so delivery instead lands in a durable signal-bridge batch artifact and the secondmate is nudged to merge it with `bin/fm-backlog-ingest.sh` (see [`docs/sbx-backend.md`](sbx-backend.md#backlog-handoff-signal-bridge-batches) for the full design, verification, and recovery tooling).
 Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer, `tasks-axi update --help` exposes `--archive-body`, and `tasks-axi mv --help` exposes `[<id>...]` for the atomic multi-ID move introduced in 0.2.2 and required by handoff delegation.
 That sentence is the single owner of the tasks-axi compatibility definition; every other document points here instead of restating the version gates.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
@@ -274,7 +274,7 @@ When an allowlisted config item changes for an already-running home, it sends th
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
-An sbx (VM) secondmate needs no in-guest push at all: its guest home reads the host home's inherited items live through read-through symlinks (`docs/sbx-backend.md` "Guest-home provisioning"), so the same host-side propagation converges it implicitly - including while its VM is stopped.
+An sbx (VM) secondmate needs no separate in-guest push command: its guest home reads inherited items through read-through symlinks, while [`docs/sbx-backend.md`](sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns the stale-mount caveat and why runtime handoff data uses the signal bridge instead.
 One nuance of that read path: the symlink set is created from the `FM_INHERITABLE_CONFIG` list at spawn, so an item *added to the declared list* later reaches existing sbx guests at their next resurrection or respawn, not at the next push.
 
 ## X mode (.env)
@@ -415,7 +415,7 @@ FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_SBX_NOPROGRESS_TURNS=3   # sbx-only: consecutive turn-ends with no status progress before the watcher raises an sbx-stranded check wake; 0 disables this stranding alarm
-FM_SBX_SOURCE_MOUNT=/run/sandbox/source   # sbx-only: guest path of clone mode's RO live mount of the host home; guest-home provisioning symlinks read inherited items through it, and spawn refuses right after create when it is not readable there (an sbx implementation detail - set this only if a future sbx moves the mount)
+FM_SBX_SOURCE_MOUNT=/run/sandbox/source   # sbx-only: guest path of clone mode's RO source mount of the host home; guest-home provisioning symlinks read inherited items through it, but runtime handoff data must use the signal bridge because the mount can lag host writes after VM lifecycle changes
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
