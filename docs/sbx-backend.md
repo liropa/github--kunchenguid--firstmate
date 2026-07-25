@@ -9,7 +9,7 @@ This guide records the fork-side adapter contract and the empirical CLI facts it
 
 Adapter: `bin/backends/sbx.sh`, dispatched through `bin/fm-backend.sh`.
 Spawn branch: `bin/fm-spawn.sh` (secondmate-only; ship/scout sbx spawns are refused).
-Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-watch-sbx-signals.test.sh`.
+Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-watch-sbx-signals.test.sh`, `tests/fm-sbx-tracked-sync.test.sh`.
 
 ## Empirical CLI facts (verified 2026-07-19, sbx CLI against a real shell-agent sandbox)
 
@@ -107,6 +107,30 @@ Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idem
 
 Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
 
+## Tracked-file sync (guest clone fast-forward)
+
+Clone mode snapshots the host home's committed files into the VM exactly once, at provisioning, so the guest clone's tracked surface (`AGENTS.md`, `bin/`, `.agents/skills/`) froze at spawn HEAD while every host-side sync path - `/updatefirstmate`, the bootstrap secondmate sweep, `fm-spawn`'s pre-launch fast-forward - advanced only the HOST clone and reported updated/current from the host's point of view (fork issue #20).
+Measured live 2026-07-24: `/updatefirstmate` fast-forwarded a host secondmate home `b6bdddf..698a68f` (instructions changed: AGENTS.md, bin, .agents/skills) while its guest VM, provisioned 2026-07-22, still ran the provisioning-era snapshot - a guest frozen pre-`bin/fm-backlog-ingest.sh` cannot merge a signal-bridge backlog handoff, and instruction or safety updates never reach live guests at all.
+
+`fm_backend_sbx_tracked_sync` (`bin/backends/sbx.sh`) closes the gap by fast-forwarding the guest clone itself:
+
+- **Source of truth is the host clone**, delivered as a self-contained git bundle (`<signals-dir>/tracked-sync/host-<tip>.bundle`, staged tmp+mv, ~7 MB at the current repo size) on the signal bridge - the only host<->guest surface proven live in both directions regardless of VM lifecycle.
+  The clone-mode RO source mount is never a sync source: it can lag host reality by hours after a stop/resurrect cycle ("Backlog handoff" above; issue #11).
+- **In-guest guards mirror `ff_target`'s** (`bin/fm-ff-lib.sh`), executed by one host-driven `sbx exec` running plain git: wrong-branch, dirty, current, diverged/unique-commit (is-ancestor), then `merge --ff-only`; detached HEAD is allowed, matching the secondmate-home ff contract, and a skip prints the honest reason with the guest's work untouched.
+  A tracked-files fast-forward never touches the gitignored operational dirs (`data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`).
+  The dirty check tolerates exactly the two untracked seeded markers (`.fm-secondmate-home`, `.fm-sbx-signals-dir`): a pre-fix guest's snapshot predates their `.gitignore` entries, and syncing past the ignore commit is precisely the upgrade the tolerance exists for - the `ignore_seed_marker` precedent.
+- **Chicken-and-egg safe**: the guest side needs only plain git (the same in-guest guarantee the teardown landed-work probe already relies on), so the first sync into a guest that predates this mechanism requires nothing to have been delivered first.
+- **Safe points only, never mid-turn**: resurrection runs the sync between the guest-home provisioning re-assert and the agent relaunch (nothing in-guest can be mid-turn there), and the sweep paths sync only a STOPPED VM - the agent process tree is dead, the sync exec auto-starts the VM, and it auto-stops again after.
+  A running VM is skipped with the honest reason and picks the update up at its next restart; an absent sandbox is left to the liveness sweep, whose respawn re-clones the current host home anyway.
+  Repeat runs are idempotent: an already-current guest is a no-op, and retries of the same tip reuse the published bundle.
+- **`sbx_guest_synced=` meta cache**: the guest clone's last verified HEAD, recorded only from the guest's own report (spawn's post-create `rev-parse` read, or a completed sync verdict) - never assumed from the host clone.
+  A cache hit short-circuits before any state probe or exec, so steady-state sweeps cost zero sbx CLI calls and zero VM churn; a missing cache (every pre-fix guest) verifies in-guest once, then caches.
+  Guest output is untrusted data: verdicts are strictly pattern-matched, shas validated before recording, and skip reasons sanitized - a hostile guest faking a verdict can only mis-record its own staleness, the same self-harm class as deleting its own provisioning links.
+- **Honest end-to-end reporting**: `bin/fm-update.sh` prints one `secondmate <id> guest: updated <a>..<b> / already current / skipped: <reason>` line per sbx-backed secondmate (detected from recorded task metadata, never by probing), and the bootstrap sweep prints a completed guest sync as `BOOTSTRAP_INFO:`, keeps an already-current guest silent, and surfaces every skip as an actionable `SECONDMATE_SYNC:` line - a host-clone line never implies the guest advanced.
+  A registry-only secondmate with no live task metadata has no recorded sandbox and gets no guest line.
+
+Verified against the fixtures in `tests/fm-sbx-tracked-sync.test.sh` (the fake `sbx` CLI executing the real guarded scripts against a guest-clone git fixture via the same-absolute-path remap, per this doc's testing convention) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
+
 ## Steering and resurrection (`fm_backend_sbx_send_*`)
 
 Delivery is `sbx exec <name> -- tmux send-keys` into the in-guest `fm:fm-<id>` pane.
@@ -114,7 +138,7 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent/unreadable sandbox.
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), then new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures - the watcher's own stability idiom - then let the caller deliver.
 
@@ -195,7 +219,7 @@ Verified only against the fixtures in `tests/fm-backlog-handoff-sbx.test.sh`, `t
 
 - **Keep-alive covers only host-initiated turns** - the pin is armed at delivery (launch and steers). A turn the guest agent starts on its own (its own crew supervision, a scheduled follow-up) has no pin and dies with the ~45-100 s post-disconnect stop if it outlasts it; the auto-stop grace is Docker's heuristic and may change under us. Revisit if sbx grows a keep-alive/idle knob. (Confirmed still open after step 4.)
 - **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
-- **Guest-home provisioning v2 scope** - the read-through design above closes the v1 gap; what remains is deliberately deferred: projects-bearing homes stay refused at spawn until an in-guest re-clone story exists, and the guest clone's *tracked* files stay frozen at spawn HEAD while the host home fast-forwards (a resurrect-time ff-only fast-forward mirroring `ff_target`'s guards is designable - measure whether it bites first).
+- **Projects-bearing homes stay refused at spawn** until an in-guest re-clone story exists (the remaining deferral from the guest-home provisioning v2 scope; the other half - tracked files frozen at spawn HEAD - is closed by "Tracked-file sync" above, after the 2026-07-24 staleness evidence showed it biting).
 - **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). The beacon's stranding alarm (above) now names the pattern for the captain; the recovery itself is still manual.
 
 ## Security posture

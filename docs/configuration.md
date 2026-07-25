@@ -66,6 +66,7 @@ A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zel
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 An sbx task additionally records `sbx_signals_dir=` and, when `FM_SBX_TEMPLATE` was set, `sbx_template=`, with `window=sbx:fm-<id>` naming the sandbox target.
+An sbx task also carries `sbx_guest_synced=`, the guest clone's last verified HEAD, recorded only from the guest's own report and maintained by the tracked-file sync (`docs/sbx-backend.md` "Tracked-file sync"); its absence means the next sync verifies in-guest instead of trusting a cache.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.

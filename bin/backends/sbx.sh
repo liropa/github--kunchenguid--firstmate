@@ -478,6 +478,13 @@ fm_backend_sbx_ensure_stack() {  # <target>
     echo "error: cannot resurrect $name: guest-home provisioning re-assert failed" >&2
     return 1
   }
+  # Tracked-file sync (fork issue #20): advance the guest clone's tracked
+  # files to the host clone's default-branch tip before the agent relaunches -
+  # the one point in the VM lifecycle where nothing in-guest can be mid-turn.
+  # A skip (dirty, diverged, bundle failure) never blocks resurrection: the
+  # steer is the priority, and the sweep paths (fm-update.sh, the bootstrap
+  # secondmate sweep) report guest staleness durably.
+  fm_backend_sbx_tracked_sync "sandbox $name guest" "$name" "$id" "$home" "$meta" resurrect >&2 || true
   sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$resume" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter || return 1
@@ -736,4 +743,270 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     rm -f .fm-sbx-signals-dir || exit 1
     printf "%s\n" "$signals" > .fm-sbx-signals-dir
   ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" $FM_INHERITABLE_CONFIG
+}
+
+# --- tracked-file sync (guest clone fast-forward) -----------------------------
+#
+# Clone mode snapshots the host home's COMMITTED files into the VM exactly once,
+# at provisioning, so the guest clone's tracked surface (AGENTS.md, bin/,
+# .agents/skills/) freezes at spawn HEAD while every host-side sync path
+# advances only the HOST clone (fork issue #20). fm_backend_sbx_tracked_sync
+# closes that gap by fast-forwarding the guest clone itself, mirroring
+# ff_target's guards (bin/fm-ff-lib.sh) inside the VM: ff-only, never
+# force/merge/stash, skip a dirty, diverged, or wrong-branch guest with a
+# printed reason, and never touch the gitignored operational dirs.
+#
+# Update content travels as a git BUNDLE on the signal-bridge mount - the only
+# host<->guest surface proven live in both directions regardless of VM
+# lifecycle - with the host clone as the source of truth. The clone-mode RO
+# source mount is NEVER a sync source: it can lag host reality by hours after
+# a stop/resurrect cycle (docs/sbx-backend.md "Backlog handoff", issue #11).
+# The guest side needs only plain git (the same guarantee the teardown
+# landed-work probe already relies on), so the first sync into a guest that
+# PREDATES this mechanism needs nothing new inside the VM.
+
+# fm_backend_sbx_default_branch: <dir>'s default branch. Duplicated from
+# fm-ff-lib.sh's default_branch (namespaced) because this adapter is sourced
+# standalone by fm-send/fm-crew-state, where sourcing the ff lib would clobber
+# a host script's own same-named helpers - the shell_quote precedent above.
+fm_backend_sbx_default_branch() {  # <dir>
+  local dir=$1 ref branch
+  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s' "${ref#origin/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# fm_backend_sbx_sha_valid: 0 when <s> is a full 40-hex commit sha. Everything
+# recorded into meta or compared against the host tip must pass this first:
+# guest output is untrusted data (a compromised guest owns its own sh/git),
+# and a newline-bearing "sha" would otherwise inject meta lines.
+fm_backend_sbx_sha_valid() {  # <s>
+  case "$1" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  [ "${#1}" -eq 40 ]
+}
+
+# fm_backend_sbx_record_guest_synced: atomically rewrite <meta> so its one
+# sbx_guest_synced= line holds <sha> - the guest clone's last VERIFIED HEAD,
+# only ever recorded from the guest's own report (spawn's post-create read, or
+# a completed sync below). This host-private cache is what lets steady-state
+# sweeps report "already current" with zero sbx CLI calls and zero VM churn.
+fm_backend_sbx_record_guest_synced() {  # <meta> <sha>
+  local meta=$1 sha=$2 dir tmp line
+  fm_backend_sbx_sha_valid "$sha" || return 1
+  [ -f "$meta" ] || return 1
+  dir=$(dirname "$meta")
+  tmp=$(mktemp "$dir/.fm-sbx-guest-synced.XXXXXX" 2>/dev/null) || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      sbx_guest_synced=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    esac
+  done < "$meta"
+  printf 'sbx_guest_synced=%s\n' "$sha" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta"
+}
+
+# fm_backend_sbx_tracked_sync: fast-forward <name>'s guest clone to the host
+# clone's default-branch tip, printing exactly one ff_target-vocabulary
+# outcome line ("<label>: updated a..b" / "<label>: already current" /
+# "<label>: skipped: <reason>") - callers classify on that line. Always
+# returns 0 - a skip is a reported outcome, never a caller failure.
+#
+# mode selects the safe-point policy (never sync mid-turn):
+#   resurrect - the caller (ensure_stack) already holds the VM at the
+#               pre-agent-relaunch point; no state gate.
+#   sweep     - fm-update.sh / the bootstrap secondmate sweep: a STOPPED VM is
+#               the safe point (the agent process tree is dead; the sync exec
+#               auto-starts the VM, which auto-stops again after). A running
+#               VM may be mid-turn and is skipped with the honest reason -
+#               its update lands at the next resurrection. Absent/unreadable
+#               skip too (the liveness sweep owns re-provisioning).
+#
+# The sbx_guest_synced= cache short-circuits BEFORE any state probe or exec,
+# so a current guest costs nothing anywhere. A hostile guest faking the
+# verdict line can only mis-record its own staleness - self-harm, the same
+# class as a guest deleting its own provisioning links.
+fm_backend_sbx_tracked_sync() {  # <label> <name> <id> <home> <meta> <resurrect|sweep>
+  local label=$1 name=$2 id=$3 home=$4 meta=$5 mode=$6
+  local signals default want synced state tracked tmp bundle_path raw out reason
+  local old new short_old short_new f
+
+  if [ ! -d "$home" ] || ! git -C "$home" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "$label: skipped: host clone is not a git repo"
+    return 0
+  fi
+  default=$(fm_backend_sbx_default_branch "$home") || {
+    echo "$label: skipped: cannot determine the host clone's default branch"
+    return 0
+  }
+  want=$(git -C "$home" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null) || want=
+  if ! fm_backend_sbx_sha_valid "$want"; then
+    echo "$label: skipped: cannot resolve the host clone's $default tip"
+    return 0
+  fi
+
+  synced=$(fm_meta_get "$meta" sbx_guest_synced)
+  if [ -n "$synced" ] && [ "$synced" = "$want" ]; then
+    echo "$label: already current"
+    return 0
+  fi
+
+  if [ "$mode" = sweep ]; then
+    state=$(fm_backend_sbx_state "$name")
+    case "$state" in
+      stopped) ;;
+      running)
+        echo "$label: skipped: guest VM is running (never synced mid-turn); the update lands at its next restart"
+        return 0
+        ;;
+      absent)
+        echo "$label: skipped: sandbox is absent"
+        return 0
+        ;;
+      *)
+        echo "$label: skipped: sandbox state is unreadable"
+        return 0
+        ;;
+    esac
+  fi
+
+  signals=$(fm_meta_get "$meta" sbx_signals_dir)
+  [ -n "$signals" ] || signals="$FM_SBX_SIGNALS_ROOT/$id"
+  if [ ! -d "$signals" ]; then
+    echo "$label: skipped: signal-bridge dir is missing at $signals"
+    return 0
+  fi
+  tracked="$signals/tracked-sync"
+  mkdir -p "$tracked" 2>/dev/null || {
+    echo "$label: skipped: cannot create $tracked"
+    return 0
+  }
+  # One self-contained bundle per host tip, staged tmp+mv so the guest can
+  # never read a torn file, world-readable because the guest user (`agent`)
+  # is not the host user. ~7 MB per actual update event today - created only
+  # on a cache miss, reused across retries of the same tip.
+  bundle_path="$tracked/host-$want.bundle"
+  if [ ! -f "$bundle_path" ]; then
+    tmp=$(mktemp "$tracked/.bundle.XXXXXX" 2>/dev/null) || {
+      echo "$label: skipped: cannot stage the update bundle"
+      return 0
+    }
+    if ! git -C "$home" bundle create "$tmp" "refs/heads/$default" >/dev/null 2>&1; then
+      rm -f "$tmp"
+      echo "$label: skipped: bundle creation failed on the host clone"
+      return 0
+    fi
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$bundle_path" || {
+      rm -f "$tmp"
+      echo "$label: skipped: cannot publish the update bundle"
+      return 0
+    }
+  fi
+
+  # The in-guest guarded fast-forward: plain git only, the bundle read at the
+  # SAME absolute path through the signal-bridge mount. Guards mirror
+  # ff_target's, in its order: wrong branch, dirty (tolerating ONLY the two
+  # untracked seeded markers, whose .gitignore entries a pre-fix guest's
+  # snapshot may predate - the ignore_seed_marker upgrade tolerance), current,
+  # diverged/unique commits (is-ancestor), then merge --ff-only. Detached HEAD
+  # is allowed, matching the secondmate-home ff contract. Every verdict rides
+  # one "fm-sync ..." line so sbx auto-start chatter can never fake a result.
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$4 expand in the guest sh, not here
+  raw=$(sbx exec "$name" -- sh -c '
+    home=$1 bundle=$2 default=$3 want=$4
+    if ! git -C "$home" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "fm-sync skipped: guest home is not a git repo"; exit 0
+    fi
+    cur=$(git -C "$home" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+    if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
+      echo "fm-sync skipped: guest clone is on $cur, expected $default"; exit 0
+    fi
+    dirty=$(git -C "$home" status --porcelain 2>/dev/null \
+      | grep -v -e "^?? .fm-secondmate-home$" -e "^?? .fm-sbx-signals-dir$" | head -1)
+    if [ -n "$dirty" ]; then
+      echo "fm-sync skipped: dirty guest working tree"; exit 0
+    fi
+    head=$(git -C "$home" rev-parse HEAD 2>/dev/null)
+    if [ -z "$head" ]; then echo "fm-sync skipped: cannot read guest HEAD"; exit 0; fi
+    if [ "$head" = "$want" ]; then echo "fm-sync current $head"; exit 0; fi
+    if [ ! -r "$bundle" ]; then
+      echo "fm-sync skipped: update bundle is not readable in the guest"; exit 0
+    fi
+    if ! git -C "$home" fetch --quiet "$bundle" "refs/heads/$default" 2>/dev/null; then
+      echo "fm-sync skipped: bundle fetch failed in the guest"; exit 0
+    fi
+    got=$(git -C "$home" rev-parse --verify --quiet FETCH_HEAD 2>/dev/null || echo "")
+    if [ "$got" != "$want" ]; then
+      echo "fm-sync skipped: bundle tip does not match the host clone"; exit 0
+    fi
+    if ! git -C "$home" merge-base --is-ancestor "$head" "$want" 2>/dev/null; then
+      echo "fm-sync skipped: guest clone diverged from the host clone"; exit 0
+    fi
+    if ! git -C "$home" merge --ff-only "$want" >/dev/null 2>&1; then
+      echo "fm-sync skipped: fast-forward failed in the guest"; exit 0
+    fi
+    new=$(git -C "$home" rev-parse HEAD 2>/dev/null)
+    if [ "$new" != "$want" ]; then
+      echo "fm-sync skipped: fast-forward did not land"; exit 0
+    fi
+    echo "fm-sync updated $head $new"
+  ' _ "$home" "$bundle_path" "$default" "$want" 2>/dev/null) || raw=
+  out=$(printf '%s\n' "$raw" | grep '^fm-sync ' | tail -1)
+
+  case "$out" in
+    'fm-sync updated '*)
+      # shellcheck disable=SC2086  # deliberate word split: the verdict is space-delimited
+      set -- $out
+      old=${3:-}
+      new=${4:-}
+      if ! fm_backend_sbx_sha_valid "$old" || [ "$new" != "$want" ]; then
+        echo "$label: skipped: unrecognized guest response"
+        return 0
+      fi
+      fm_backend_sbx_record_guest_synced "$meta" "$new" || true
+      for f in "$tracked"/host-*.bundle; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$bundle_path" ] || rm -f "$f"
+      done
+      short_old=$(git -C "$home" rev-parse --short "$old" 2>/dev/null) || short_old=$(printf '%s' "$old" | cut -c1-7)
+      short_new=$(git -C "$home" rev-parse --short "$new" 2>/dev/null) || short_new=$(printf '%s' "$new" | cut -c1-7)
+      echo "$label: updated $short_old..$short_new"
+      ;;
+    'fm-sync current '*)
+      # shellcheck disable=SC2086  # deliberate word split: the verdict is space-delimited
+      set -- $out
+      if [ "${3:-}" != "$want" ]; then
+        echo "$label: skipped: unrecognized guest response"
+        return 0
+      fi
+      fm_backend_sbx_record_guest_synced "$meta" "$want" || true
+      for f in "$tracked"/host-*.bundle; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$bundle_path" ] || rm -f "$f"
+      done
+      echo "$label: already current"
+      ;;
+    'fm-sync skipped: '*)
+      # Untrusted guest text: keep only a bounded printable subset before it
+      # reaches host logs or wake surfaces.
+      reason=$(printf '%s' "${out#fm-sync skipped: }" | tr -cd 'a-zA-Z0-9 .,:_/()-' | cut -c1-160)
+      echo "$label: skipped: ${reason:-unrecognized guest response}"
+      ;;
+    *)
+      echo "$label: skipped: no verdict from the guest (exec failed or produced no fm-sync line)"
+      ;;
+  esac
+  return 0
 }

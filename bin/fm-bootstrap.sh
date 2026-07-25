@@ -13,6 +13,8 @@
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
+#                 "SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>",
+#                 "BOOTSTRAP_INFO: secondmate <id> guest: updated <a>..<b>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
@@ -36,6 +38,13 @@
 #          deny - one skip line, no lock attempt spiral), plus quarantine
 #          diagnostics for divergent shared captain-preference copies;
 #          no-op/current and successful updates stay quiet.
+#          The "secondmate <id> guest" variant reports the same honesty for an
+#          sbx-backed secondmate's in-VM clone, which no host-home
+#          fast-forward reaches: a completed guest sync prints one
+#          BOOTSTRAP_INFO updated line, an already-current guest is silent,
+#          and every skip (dirty/diverged guest, running VM deferred to its
+#          next restart, absent sandbox) is an actionable SECONDMATE_SYNC
+#          line (docs/sbx-backend.md "Tracked-file sync").
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          deeper agent-liveness verdict (bin/fm-backend.sh's
 #          fm_backend_agent_alive, distinct from endpoint pane-presence):
@@ -417,6 +426,37 @@ secondmate_sync() {
     fi
     rm -f "$report"
     fm_lock_release "$home_lock" || true
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  # sbx guest clones (fork issue #20): the sweep above fast-forwarded only the
+  # HOST clone of an sbx-backed secondmate, but the guest runs a private in-VM
+  # clone that no host-side write reaches - so surface the GUEST outcome
+  # instead of stopping silently at the host clone. bin/backends/sbx.sh owns
+  # the mechanics and the mid-turn safety gate: the sbx_guest_synced= cache
+  # makes a current guest cost zero sbx CLI calls, a STOPPED VM (agent process
+  # tree dead) is synced now, and a running VM is skipped honestly - its
+  # update lands at the next resurrection. Classification: updated is a
+  # completed no-action fact, already-current is routine silence, every skip
+  # is an actionable SECONDMATE_SYNC line.
+  local guest_line sbx_ready=""
+  while IFS='|' read -r id home _window meta; do
+    [ "$(fm_backend_of_meta "$meta")" = sbx ] || continue
+    if [ -z "$sbx_ready" ]; then
+      if fm_backend_source sbx >/dev/null 2>&1; then sbx_ready=yes; else sbx_ready=no; fi
+    fi
+    if [ "$sbx_ready" != yes ]; then
+      echo "SECONDMATE_SYNC: secondmate $id guest: skipped: sbx adapter failed to load"
+      continue
+    fi
+    if ! validate_secondmate_home "$id" "$home"; then
+      echo "SECONDMATE_SYNC: secondmate $id guest: skipped: unsafe home: $VALIDATION_ERROR"
+      continue
+    fi
+    guest_line=$(fm_backend_sbx_tracked_sync "secondmate $id guest" "fm-$id" "$id" "$VALIDATED_HOME" "$meta" sweep)
+    case "$guest_line" in
+      *': updated '*) echo "BOOTSTRAP_INFO: $guest_line" ;;
+      *': already current') ;;
+      *) echo "SECONDMATE_SYNC: $guest_line" ;;
+    esac
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }

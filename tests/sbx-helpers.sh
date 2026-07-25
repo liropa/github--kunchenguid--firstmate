@@ -47,6 +47,18 @@
 #   FM_FAKE_SBX_PROVISION_RC non-zero fails the guest-home provisioning exec
 #                            (the `sh -c` pass carrying `ln -sfn`) instead of
 #                            executing it
+#   FM_FAKE_SBX_GUEST_HOME   when set, in-guest home paths are REMAPPED to this
+#                            directory before real execution: clone mode places
+#                            the guest clone at the SAME absolute path as the
+#                            host home but on the VM's own disk, and the remap
+#                            models exactly that "same path, different disk"
+#                            split (the tracked-sync and provisioning `sh -c`
+#                            passes remap their home argument; `git -C <home>`
+#                            runs real git against the remapped dir instead of
+#                            the env-driven canned output)
+#   FM_FAKE_SBX_SYNC_RC      non-zero fails the tracked-file sync exec (the
+#                            `sh -c` pass carrying `merge --ff-only`) instead
+#                            of executing it
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -144,10 +156,30 @@ case "$cmd" in
         # Clone mode places the guest home at the SAME absolute path as the
         # host home, so executing the script for real against the world's home
         # dir models the guest write exactly - suites assert the resulting
-        # symlink/marker shapes instead of grepping script text.
+        # symlink/marker shapes instead of grepping script text. When
+        # FM_FAKE_SBX_GUEST_HOME is set, the home argument is remapped so the
+        # write lands on the guest-clone fixture, not the host clone.
         [ "${FM_FAKE_SBX_PROVISION_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_PROVISION_RC}"
         script=$3
         shift 3
+        if [ -n "${FM_FAKE_SBX_GUEST_HOME:-}" ]; then
+          set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
+        fi
+        sh -c "$script" "$@"
+        exit $?
+        ;;
+      "sh -c "*"merge --ff-only"*)
+        # The guest tracked-file sync (fm_backend_sbx_tracked_sync): execute
+        # the guarded in-guest fast-forward for real, remapping the home
+        # argument onto the guest-clone fixture. The bundle argument stays
+        # unmapped - the signal-bridge mount IS the same directory on both
+        # sides.
+        [ "${FM_FAKE_SBX_SYNC_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_SYNC_RC}"
+        script=$3
+        shift 3
+        if [ -n "${FM_FAKE_SBX_GUEST_HOME:-}" ]; then
+          set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
+        fi
         sh -c "$script" "$@"
         exit $?
         ;;
@@ -173,6 +205,19 @@ case "$cmd" in
         exit 0
         ;;
       "git -C "*)
+        if [ -n "${FM_FAKE_SBX_GUEST_HOME:-}" ]; then
+          # Tracked-sync suites: run REAL git against the guest-clone fixture
+          # (fm-spawn's post-create HEAD read and any direct in-guest git).
+          shift
+          args=()
+          prev=
+          for a in "$@"; do
+            if [ "$prev" = "-C" ]; then args+=("$FM_FAKE_SBX_GUEST_HOME"); else args+=("$a"); fi
+            prev=$a
+          done
+          git "${args[@]}"
+          exit $?
+        fi
         # fm_backend_sbx_unlanded_work's in-guest landed-work probe. Output is
         # env-driven so a suite can pose a clean / dirty / unpushed / git-error
         # guest; FM_FAKE_SBX_GIT_RC fails BOTH git calls (unverifiable guest).
