@@ -82,6 +82,7 @@ new_sync_world() {
 
 host_tip() { git -C "$1/host" rev-parse HEAD; }
 guest_head() { git -C "$1/guest" rev-parse HEAD; }
+file_mode_octal() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
 # run_sync <world> <mode> [env k=v...]: drive fm_backend_sbx_tracked_sync in a
 # bash that sourced fm-backend.sh + the sbx adapter, fake sbx first in PATH,
@@ -138,8 +139,8 @@ test_stale_prefix_guest_updates() {
   # The verified guest HEAD is recorded, and the bundle rode the signal bridge.
   assert_grep "sbx_guest_synced=$tip" "$w/home/state/sm.meta" "meta records the guest's new HEAD"
   assert_present "$w/signals/sm/tracked-sync/host-$tip.bundle" "update bundle published on the signal bridge"
-  tracked_mode=$(stat -f '%Lp' "$w/signals/sm/tracked-sync" 2>/dev/null || stat -c '%a' "$w/signals/sm/tracked-sync")
-  bundle_mode=$(stat -f '%Lp' "$w/signals/sm/tracked-sync/host-$tip.bundle" 2>/dev/null || stat -c '%a' "$w/signals/sm/tracked-sync/host-$tip.bundle")
+  tracked_mode=$(file_mode_octal "$w/signals/sm/tracked-sync")
+  bundle_mode=$(file_mode_octal "$w/signals/sm/tracked-sync/host-$tip.bundle")
   [ "$tracked_mode" = 755 ] || fail "tracked-sync dir should be guest-traversable under restrictive umask, got $tracked_mode"
   [ "$bundle_mode" = 644 ] || fail "bundle should be guest-readable under restrictive umask, got $bundle_mode"
   pass "T1 stale pre-fix guest fast-forwards to the host tip with only host scripts + guest git"
