@@ -143,6 +143,7 @@ family_for_basename() {
       ;;
     fm-backlog-handoff.test.sh|fm-backlog-handoff-sbx.test.sh|fm-backlog-ingest.test.sh|\
     fm-backlog-handoff-status.test.sh|fm-backlog-handoff-rollback.test.sh|\
+    fm-sbx-tracked-sync.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)

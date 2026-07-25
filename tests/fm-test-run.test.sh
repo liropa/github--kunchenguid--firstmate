@@ -439,6 +439,10 @@ test_portable_shard_union_and_coverage_guard() {
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
+  printf '%s\n' "$serial" | grep -Fq 'tests/fm-sbx-tracked-sync.test.sh' \
+    || fail "portable serial must include sbx tracked sync"
+  "$RUNNER" --list --family secondmate | grep -Fq 'tests/fm-sbx-tracked-sync.test.sh' \
+    || fail "sbx tracked sync must be classified with secondmate tests"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
