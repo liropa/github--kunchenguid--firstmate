@@ -43,6 +43,7 @@
 #   recovery_turnend_signature= same snapshot taken when the recovery send is
 #                           confirmed, anchoring the recovery-turn completion read
 #   reconciled_epoch=       when the one-time stale reconciliation retired this record
+#   reconciled_reported_epoch= when the stale retirement summary was published
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
 #   recovery_sender_identity=
@@ -290,6 +291,7 @@ request_turn_completed_epoch=
 request_turnend_signature=
 recovery_turnend_signature=
 reconciled_epoch=
+reconciled_reported_epoch=
 recovery_attempted_epoch=
 recovery_sender_pid=
 recovery_sender_identity=
@@ -958,9 +960,9 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 # long-dead requests. One summary status line per affected task, deduplicated
 # against nothing (an interrupted pass reports its remainder on the next pass).
 fm_pending_reply_reconcile_stale() {  # <state-dir>
-  local state=$1 dir rec phase delivered task_id meta backend corr now
-  local i found status_path payload
-  local -a stale_tasks=() stale_counts=() stale_status_paths=()
+  local state=$1 dir rec phase delivered task_id meta backend corr now reported
+  local i found status_path payload reported_rec
+  local -a stale_tasks=() stale_counts=() stale_status_paths=() stale_records=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   now=$(fm_pending_reply_now)
@@ -969,28 +971,40 @@ fm_pending_reply_reconcile_stale() {  # <state-dir>
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
-    grep -q '^request_turnend_signature=' "$rec" 2>/dev/null && continue
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" = awaiting_report ] || continue
-    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-    [ -n "$delivered" ] || continue
     task_id=$(fm_pending_reply_get "$rec" task_id)
-    meta="$state/${task_id}.meta"
-    [ -f "$meta" ] || continue
-    backend=$(fm_backend_of_meta "$meta")
-    [ "$backend" = sbx ] || continue
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    # A late correlated report still wins over retirement.
-    if fm_pending_reply_try_resolve "$state" "$corr"; then
-      continue
-    fi
-    fm_pending_reply_set "$rec" phase reconciled_stale || continue
-    fm_pending_reply_set "$rec" reconciled_epoch "$now" || true
+    case "$phase" in
+      awaiting_report)
+        grep -q '^request_turnend_signature=' "$rec" 2>/dev/null && continue
+        delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+        [ -n "$delivered" ] || continue
+        meta="$state/${task_id}.meta"
+        [ -f "$meta" ] || continue
+        backend=$(fm_backend_of_meta "$meta")
+        [ "$backend" = sbx ] || continue
+        corr=$(fm_pending_reply_get "$rec" corr_id)
+        [ -n "$corr" ] || corr=$(basename "$rec")
+        # A late correlated report still wins over retirement.
+        if fm_pending_reply_try_resolve "$state" "$corr"; then
+          continue
+        fi
+        fm_pending_reply_set "$rec" phase reconciled_stale || continue
+        fm_pending_reply_set "$rec" reconciled_epoch "$now" || true
+        ;;
+      reconciled_stale)
+        reported=$(fm_pending_reply_get "$rec" reconciled_reported_epoch)
+        [ -z "$reported" ] || continue
+        [ -n "$task_id" ] || continue
+        ;;
+      *)
+        continue
+        ;;
+    esac
     found=0
     for ((i = 0; i < ${#stale_tasks[@]}; i++)); do
       [ "${stale_tasks[$i]}" = "$task_id" ] || continue
       stale_counts[i]=$((stale_counts[i] + 1))
+      stale_records[i]="${stale_records[$i]}"$'\n'"$rec"
       found=1
       break
     done
@@ -998,6 +1012,7 @@ fm_pending_reply_reconcile_stale() {  # <state-dir>
       stale_tasks+=("$task_id")
       stale_counts+=(1)
       stale_status_paths+=("$(fm_pending_reply_get "$rec" parent_status)")
+      stale_records+=("$rec")
     fi
   done
   for ((i = 0; i < ${#stale_tasks[@]}; i++)); do
@@ -1005,7 +1020,11 @@ fm_pending_reply_reconcile_stale() {  # <state-dir>
     [ -n "$status_path" ] || status_path="$state/${stale_tasks[$i]}.status"
     payload="pending-reply-stale-reconciled: task=${stale_tasks[$i]} retired=${stale_counts[$i]} pre-upgrade marked requests had no correlated report and were retired as stale (not answered) by the pending-reply guard upgrade"
     mkdir -p "$(dirname "$status_path")" 2>/dev/null || continue
-    printf 'blocked: %s\n' "$payload" >> "$status_path" 2>/dev/null || true
+    printf 'blocked: %s\n' "$payload" >> "$status_path" 2>/dev/null || continue
+    while IFS= read -r reported_rec || [ -n "$reported_rec" ]; do
+      [ -n "$reported_rec" ] || continue
+      fm_pending_reply_set "$reported_rec" reconciled_reported_epoch "$now" || true
+    done <<< "${stale_records[$i]}"
   done
   return 0
 }
