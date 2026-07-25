@@ -892,6 +892,7 @@ fm_backend_sbx_tracked_sync() {  # <label> <name> <id> <home> <meta> <resurrect|
     echo "$label: skipped: cannot create $tracked"
     return 0
   }
+  chmod 0755 "$tracked" 2>/dev/null || true
   # One self-contained bundle per host tip, staged tmp+mv so the guest can
   # never read a torn file, world-readable because the guest user (`agent`)
   # is not the host user. ~7 MB per actual update event today - created only

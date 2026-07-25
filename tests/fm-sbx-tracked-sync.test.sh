@@ -100,7 +100,7 @@ run_sync() {
 
 # --- T1: a stale PRE-FIX guest fast-forwards to the host tip -----------------
 test_stale_prefix_guest_updates() {
-  local w tip out before_status
+  local w tip out before_status tracked_mode bundle_mode old_umask
   w=$(new_sync_world stale-updates)
   git -C "$w/guest" reset -q --hard HEAD~1
   tip=$(host_tip "$w")
@@ -117,7 +117,10 @@ test_stale_prefix_guest_updates() {
   printf 'sig\n' > "$w/guest/state/probe"
   printf 'cfg\n' > "$w/guest/config/probe"
 
+  old_umask=$(umask)
+  umask 077
   out=$(run_sync "$w" sweep)
+  umask "$old_umask"
 
   assert_contains "$out" "secondmate sm guest: updated " "stale guest reports an advance"
   [ "$(guest_head "$w")" = "$tip" ] || fail "guest did not advance to the host tip"
@@ -135,6 +138,10 @@ test_stale_prefix_guest_updates() {
   # The verified guest HEAD is recorded, and the bundle rode the signal bridge.
   assert_grep "sbx_guest_synced=$tip" "$w/home/state/sm.meta" "meta records the guest's new HEAD"
   assert_present "$w/signals/sm/tracked-sync/host-$tip.bundle" "update bundle published on the signal bridge"
+  tracked_mode=$(stat -f '%Lp' "$w/signals/sm/tracked-sync" 2>/dev/null || stat -c '%a' "$w/signals/sm/tracked-sync")
+  bundle_mode=$(stat -f '%Lp' "$w/signals/sm/tracked-sync/host-$tip.bundle" 2>/dev/null || stat -c '%a' "$w/signals/sm/tracked-sync/host-$tip.bundle")
+  [ "$tracked_mode" = 755 ] || fail "tracked-sync dir should be guest-traversable under restrictive umask, got $tracked_mode"
+  [ "$bundle_mode" = 644 ] || fail "bundle should be guest-readable under restrictive umask, got $bundle_mode"
   pass "T1 stale pre-fix guest fast-forwards to the host tip with only host scripts + guest git"
 }
 
