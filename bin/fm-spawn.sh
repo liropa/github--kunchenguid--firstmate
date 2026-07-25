@@ -1427,10 +1427,12 @@ if [ "$BACKEND" = sbx ]; then
   # private surface becomes a READ PATH onto the clone-mode RO source mount -
   # each inherited config/ item and the shared captain file as symlinks, so
   # every later host-side convergence push (bootstrap sweep, fm-config-push)
-  # is guest-visible with zero sbx CLI calls and a cleared item reads ABSENT
-  # through its dangling link - plus the .fm-secondmate-home identity marker
-  # as a regular file. One idempotent exec, shared with resurrection's
-  # re-assert (bin/backends/sbx.sh).
+  # writes one host-side target. The RO source mount is only the inheritance
+  # read path; runtime data that must be proven live rides the signal bridge
+  # because the mount can lag after VM lifecycle changes (docs/sbx-backend.md).
+  # A cleared item reads ABSENT through its dangling link. The
+  # .fm-secondmate-home identity marker is seeded as a regular file. One
+  # idempotent exec, shared with resurrection's re-assert (bin/backends/sbx.sh).
   fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" "$SIG_DIR" || {
     echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
     exit 1
