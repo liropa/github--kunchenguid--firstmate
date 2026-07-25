@@ -28,6 +28,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
+   For an sbx-backed secondmate it also prints a separate `secondmate <id> guest:` outcome line for the in-VM clone, which the host-home line above never covers; `docs/sbx-backend.md`'s "Tracked-file sync" owns that mechanism, and a guest skipped as running picks the update up at its next restart on its own.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.

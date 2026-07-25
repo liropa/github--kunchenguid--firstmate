@@ -23,6 +23,9 @@
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
+#   - one "secondmate <id> guest:" line per sbx-backed secondmate (the in-VM
+#     clone's OWN outcome - a host-home line above never implies the guest
+#     advanced; bin/backends/sbx.sh owns the sync mechanics)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
@@ -36,6 +39,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -80,6 +85,33 @@ if [ -f "$SECONDMATES_MD" ]; then
     process_secondmate "$id" "$home" "" origin no
   done < "$SECONDMATES_MD"
 fi
+
+# --- sbx guest clones --------------------------------------------------------
+# An sbx secondmate's HOST clone (swept above) is only the sync SOURCE: the
+# guest runs a private in-VM clone that clone mode snapshotted at provisioning
+# and that no host-side fast-forward ever reaches (fork issue #20). Report the
+# GUEST outcome for every sbx-backed secondmate so the summary never implies a
+# host-home advance reached the VM. Detection is the recorded task metadata
+# (backend=sbx), never a probe - the backlog-handoff precedent - so a
+# registry-only secondmate with no live metadata has no recorded sandbox to
+# sync and prints no guest line.
+
+sbx_ready=""
+while IFS='|' read -r id home _window meta; do
+  [ "$(fm_backend_of_meta "$meta")" = sbx ] || continue
+  if [ -z "$sbx_ready" ]; then
+    if fm_backend_source sbx >/dev/null 2>&1; then sbx_ready=yes; else sbx_ready=no; fi
+  fi
+  if [ "$sbx_ready" != yes ]; then
+    echo "secondmate $id guest: skipped: sbx adapter failed to load"
+    continue
+  fi
+  if ! validate_secondmate_home "$id" "$home"; then
+    echo "secondmate $id guest: skipped: unsafe home: $VALIDATION_ERROR"
+    continue
+  fi
+  fm_backend_sbx_tracked_sync "secondmate $id guest" "fm-$id" "$id" "$VALIDATED_HOME" "$meta" sweep
+done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
 
 # --- caller action summary -------------------------------------------------
 

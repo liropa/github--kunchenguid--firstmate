@@ -1056,6 +1056,14 @@ EOF
     SIG_DIR="$FM_SBX_SIGNALS_ROOT/$ID"
     fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR" || exit 1
     T="sbx:$W"
+    # Seed the tracked-file sync's staleness cache from the guest's OWN
+    # rev-parse, never from the host clone's tip: what `sbx create --clone`
+    # checked out is sbx's business, and recording an assumed value would
+    # reproduce the exact silent-staleness failure the sync exists to close
+    # (docs/sbx-backend.md "Tracked-file sync"). An unreadable or malformed
+    # answer records nothing; the first sweep then verifies in-guest instead.
+    SBX_GUEST_HEAD=$(sbx exec "$W" -- git -C "$PROJ_ABS" rev-parse HEAD 2>/dev/null | tr -d '[:space:]') || SBX_GUEST_HEAD=
+    fm_backend_sbx_sha_valid "$SBX_GUEST_HEAD" || SBX_GUEST_HEAD=
     # The guest-side launch command lives in the adapter, next to its resume
     # variant, so resurrection can never drift from spawn (its codex template
     # carries the notify= turn-end hook that touches the mount's turn-ended
@@ -1369,6 +1377,7 @@ META_WINDOW=$T
     # liveness sweep's respawn must reproduce the sandbox from the meta
     # alone (a session-start sweep has no FM_SBX_TEMPLATE in its env).
     [ -z "${FM_SBX_TEMPLATE:-}" ] || echo "sbx_template=$FM_SBX_TEMPLATE"
+    [ -z "${SBX_GUEST_HEAD:-}" ] || echo "sbx_guest_synced=$SBX_GUEST_HEAD"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
