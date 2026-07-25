@@ -19,6 +19,11 @@
 #  10. fm-send secondmate path embeds corr and creates durable pending records
 #  11. Backend busy/idle observation works through the shared busy abstraction
 #      used by Pi/Claude secondmate backends (no conversation scrape)
+#  12. sbx turn-ended signature changes drive one recovery then one escalation
+#      with zero sbx CLI calls, and a correlated line resolves at any phase
+#  13. Absent or unreadable sbx turn-ended signal leaves completion unset
+#  14. Pre-upgrade stale sbx records retire once, visibly, without a nag burst
+#  15. fm-send --notice marks a secondmate message without an expectation
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -850,6 +855,245 @@ test_tick_end_to_end_missed_then_escalate() {
   pass "tick end-to-end: miss -> one recovery -> escalate -> durable"
 }
 
+test_sbx_turnend_completion_drives_recovery_then_escalation() {
+  (
+    local home state sig_dir sm_home hook_log corr rec anchor lines escalations
+    home=$(setup_parent sbx-turnend)
+    state="$home/state"
+    sig_dir="$home/signals"
+    sm_home="$home/sm"
+    mkdir -p "$sig_dir" "$sm_home/state"
+    hook_log="$home/sbx-hook.log"
+    : > "$hook_log"
+    # These fixture overrides are intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=11000
+    # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\n' "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    # Fake sbx-backed secondmate: meta records backend=sbx and the turn-ended
+    # signal is a symlink onto a fake signal-bridge dir, as fm-spawn wires it.
+    fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sbx:fm-hibit"
+    printf 'backend=sbx\n' >> "$state/hibit.meta"
+    printf 'pre-request\n' > "$sig_dir/hibit.turn-ended"
+    ln -s "$sig_dir/hibit.turn-ended" "$state/hibit.turn-ended"
+    # Zero sbx CLI calls: the sbx tick path must never source an adapter,
+    # probe busy state, or capture a pane.
+    fm_backend_source() { fail "sbx tick must not source a backend adapter"; }
+    fm_backend_busy_state() { fail "sbx tick must not probe backend busy state"; }
+    fm_backend_capture() { fail "sbx tick must not capture a pane"; }
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "sbx missed report")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    anchor=$(fm_pending_reply_get "$rec" request_turnend_signature)
+    [ -n "$anchor" ] && [ "$anchor" != missing ] \
+      || fail "delivery should anchor the current turn-ended signature, got '$anchor'"
+    # Unchanged signature: no proof of completion, no recovery.
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "unchanged turn-ended signature must not complete the turn"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "unchanged signature must leave completion unset"
+    # Guest turn ends (signature changes); status never gains the corr token.
+    printf 'x' >> "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=11010
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "signature change should drive recovery, got $(phase_of "$state" "$corr")"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "expected exactly one recovery send, got $lines"
+    grep -Fq "corr=$corr" "$hook_log" \
+      || fail "recovery message must reuse the original corr"
+    # Recovery turn also ends with no correlated report: escalate once.
+    printf 'x' >> "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=11020
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "recovery-turn signature change should escalate, got $(phase_of "$state" "$corr")"
+    escalations=$(grep -Fc "pending-reply-id=$corr" "$state/hibit.status")
+    [ "$escalations" = 1 ] || fail "expected one escalation line, got $escalations"
+    # Later turn-ends never re-nag or re-escalate.
+    printf 'x' >> "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=11030
+    fm_pending_reply_tick "$state"
+    lines=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$lines" = 1 ] || fail "later turn-ends must not resend recovery, got $lines"
+    escalations=$(grep -Fc "pending-reply-id=$corr" "$state/hibit.status")
+    [ "$escalations" = 1 ] || fail "later turn-ends must not re-escalate, got $escalations"
+    # A late correlated report still resolves after recovery and escalation.
+    printf 'done corr=%s: late but real answer\n' "$corr" >> "$state/hibit.status"
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "correlated report should resolve an escalated sbx record"
+  ) || fail "sbx turn-ended completion regression failed"
+  pass "sbx turn-ended signature drives one recovery then one escalation, zero CLI calls"
+}
+
+test_sbx_turnend_absent_or_unreadable_stays_unknown() {
+  (
+    local home state sig_dir sm_home hook_log corr rec anchor
+    home=$(setup_parent sbx-absent)
+    state="$home/state"
+    sig_dir="$home/signals"
+    sm_home="$home/sm"
+    mkdir -p "$sig_dir" "$sm_home/state"
+    hook_log="$home/sbx-absent-hook.log"
+    : > "$hook_log"
+    # These fixture overrides are intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=12000
+    # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\n' "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sbx:fm-hibit"
+    printf 'backend=sbx\n' >> "$state/hibit.meta"
+    # Dangling symlink: fresh spawn, no turn-end signal yet (the macOS stat -L
+    # trap - the link itself stats fine, but the signal is absent).
+    ln -s "$sig_dir/hibit.turn-ended" "$state/hibit.turn-ended"
+    fm_backend_source() { fail "sbx tick must not source a backend adapter"; }
+    fm_backend_busy_state() { fail "sbx tick must not probe backend busy state"; }
+    fm_backend_capture() { fail "sbx tick must not capture a pane"; }
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "no signal yet")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    anchor=$(fm_pending_reply_get "$rec" request_turnend_signature)
+    [ "$anchor" = missing ] || fail "absent signal should anchor as missing, got '$anchor'"
+    export FM_PENDING_REPLY_NOW=12010
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "absent turn-ended must not complete the turn"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "absent turn-ended must leave completion unset"
+    [ ! -s "$hook_log" ] || fail "absent turn-ended must not trigger recovery"
+    # First real turn-end appears: that IS a turn boundary after delivery.
+    printf 'first turn\n' > "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=12020
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "signal appearing after a missing anchor should count as completion"
+    # Signal vanishing again (mount outage) is no proof for the recovery leg.
+    rm -f "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=12030
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+      || fail "vanished turn-ended must not complete the recovery turn"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)" ] \
+      || fail "vanished turn-ended must leave recovery completion unset"
+  ) || fail "sbx absent-signal fail-safe regression failed"
+  pass "absent or unreadable sbx turn-ended signal leaves completion unset"
+}
+
+test_sbx_stale_records_reconcile_once_visibly() {
+  (
+    local home state sig_dir sm_home hook_log rec
+    local stale1 stale2 answered tmux_stale summaries
+    home=$(setup_parent sbx-stale)
+    state="$home/state"
+    sig_dir="$home/signals"
+    sm_home="$home/sm"
+    mkdir -p "$sig_dir" "$sm_home/state"
+    hook_log="$home/sbx-stale-hook.log"
+    : > "$hook_log"
+    # These fixture overrides are intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=13000
+    # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\n' "$2" >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+    fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sbx:fm-hibit"
+    printf 'backend=sbx\n' >> "$state/hibit.meta"
+    fm_write_secondmate_meta "$state/panehome.meta" "$home/panehome" "sess:fm-panehome"
+    printf 'seed\n' > "$sig_dir/hibit.turn-ended"
+    ln -s "$sig_dir/hibit.turn-ended" "$state/hibit.turn-ended"
+    # Simulate pre-upgrade records: create through the current schema, then
+    # strip the keys the upgrade introduced.
+    strip_new_keys() {  # <record-path>
+      grep -Ev '^(request_turnend_signature|recovery_turnend_signature|reconciled_epoch)=' \
+        "$1" > "$1.old" && mv "$1.old" "$1"
+    }
+    stale1=$(fm_pending_reply_create "$home" "$state" hibit "old question one")
+    fm_pending_reply_mark_delivered "$state" "$stale1"
+    stale2=$(fm_pending_reply_create "$home" "$state" hibit "old question two")
+    fm_pending_reply_mark_delivered "$state" "$stale2"
+    answered=$(fm_pending_reply_create "$home" "$state" hibit "old but answered")
+    fm_pending_reply_mark_delivered "$state" "$answered"
+    tmux_stale=$(fm_pending_reply_create "$home" "$state" panehome "pane-home question")
+    fm_pending_reply_mark_delivered "$state" "$tmux_stale"
+    for rec in "$stale1" "$stale2" "$answered" "$tmux_stale"; do
+      strip_new_keys "$(fm_pending_reply_path "$state" "$rec")"
+    done
+    printf 'done corr=%s: answered long ago\n' "$answered" >> "$state/hibit.status"
+    # The pane-home record still walks the observation path; keep it inert.
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_capture() { return 1; }
+    # New signal activity that would have burst-nagged all stale records.
+    printf 'x' >> "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=13010
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$stale1")" = reconciled_stale ] \
+      || fail "first stale sbx record should retire, got $(phase_of "$state" "$stale1")"
+    [ "$(phase_of "$state" "$stale2")" = reconciled_stale ] \
+      || fail "second stale sbx record should retire, got $(phase_of "$state" "$stale2")"
+    [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$stale1")" reconciled_epoch)" ] \
+      || fail "retired record should carry reconciled_epoch"
+    [ "$(phase_of "$state" "$answered")" = resolved ] \
+      || fail "a correlated report should still win over retirement"
+    [ "$(phase_of "$state" "$tmux_stale")" = awaiting_report ] \
+      || fail "a pre-upgrade pane-backed record must not be retired by the sbx sweep"
+    [ ! -s "$hook_log" ] || fail "stale reconciliation must not send recovery nags"
+    if grep -Fq "pending-reply-missed" "$state/hibit.status"; then
+      fail "stale reconciliation must not escalate retired records"
+    fi
+    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=2" "$state/hibit.status")
+    [ "$summaries" = 1 ] || fail "expected one visible retirement summary, got $summaries"
+    # Durably terminal: later ticks and signal activity never resurrect them.
+    printf 'x' >> "$sig_dir/hibit.turn-ended"
+    export FM_PENDING_REPLY_NOW=13020
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$stale1")" = reconciled_stale ] \
+      || fail "retired record must stay terminal"
+    [ ! -s "$hook_log" ] || fail "retired records must never regain recovery eligibility"
+    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=2" "$state/hibit.status")
+    [ "$summaries" = 1 ] || fail "retirement summary must not repeat, got $summaries"
+  ) || fail "sbx stale reconciliation regression failed"
+  pass "pre-upgrade stale sbx records retire once, visibly, without a nag burst"
+}
+
+test_fm_send_notice_marks_without_expectation() {
+  local dir fb log home rc got pending_count
+  dir="$TMP_ROOT/notice"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent notice)
+  fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
+  run_send "$fb" "$home" "$log" hibit --notice "re-read your AGENTS.md"; rc=$?
+  expect_code 0 "$rc" "notice send should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"*) : ;;
+    *) fail "notice must stay marked"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+  esac
+  case "$got" in
+    *corr=*) fail "notice must not carry a correlation token"$'\n'"$got" ;;
+  esac
+  case "$got" in
+    *"re-read your AGENTS.md") : ;;
+    *) fail "notice body must be delivered verbatim"$'\n'"$got" ;;
+  esac
+  pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$pending_count" = 0 ] \
+    || fail "notice must create no pending-reply records (got $pending_count)"
+  pass "fm-send --notice marks a secondmate message without an expectation"
+}
+
 test_failed_send_discards_undelivered_expectation() {
   local home state corr
   home=$(setup_parent discard)
@@ -893,6 +1137,10 @@ test_unknown_backend_state_uses_capture_fallback
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
+test_sbx_turnend_completion_drives_recovery_then_escalation
+test_sbx_turnend_absent_or_unreadable_stays_unknown
+test_sbx_stale_records_reconcile_once_visibly
+test_fm_send_notice_marks_without_expectation
 test_failed_send_discards_undelivered_expectation
 
 printf 'ok - all pending-reply tests passed\n'

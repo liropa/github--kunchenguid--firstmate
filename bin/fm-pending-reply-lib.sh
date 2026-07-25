@@ -32,9 +32,17 @@
 #                           (empty until delivery; delivery never resolves)
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
-#                           escalated | resolved
+#                           escalated | resolved | reconciled_stale
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
+#   request_turnend_signature=  size:mtime signature of state/<task_id>.turn-ended
+#                           snapshotted at delivery; the sbx completion source
+#                           below reads any later signature change as request-turn
+#                           completion. Key PRESENCE also marks a post-upgrade
+#                           record for the one-time stale reconciliation.
+#   recovery_turnend_signature= same snapshot taken when the recovery send is
+#                           confirmed, anchoring the recovery-turn completion read
+#   reconciled_epoch=       when the one-time stale reconciliation retired this record
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
 #   recovery_sender_identity=
@@ -49,6 +57,31 @@
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
+#
+# sbx completion source: an sbx-backed secondmate's state/<task_id>.turn-ended
+# is a host-side symlink onto the signal-bridge mount, guest-touched at every
+# turn end and host-stat-able even while the VM is stopped (bin/fm-spawn.sh's
+# sbx branch; docs/sbx-backend.md "Signal bridge wiring"). fm_backend_busy_state
+# has no sbx semantics and the capture fallback would need `sbx exec` into a
+# running VM, so for backend=sbx the tick derives turn completion from a
+# turn-ended signature change since the anchored snapshot instead of pane
+# observation (fm_pending_reply_sbx_busy_state) - pure host stats, zero sbx CLI
+# calls, preserving the idle-supervision cost property. Like pane busy/idle,
+# a signature change proves A turn boundary, not specifically the request's;
+# an absent or unreadable turn-ended file yields no proof and leaves completion
+# unset, the same fail-safe posture as an unknown pane observation.
+#
+# One-time stale reconciliation: records created before the sbx completion
+# source existed (no request_turnend_signature key in the file) could sit in
+# awaiting_report forever for sbx-backed tasks, because observation was
+# permanently unknown. fm_pending_reply_tick retires those pre-upgrade sbx
+# records into the terminal reconciled_stale phase - visibly, via one summary
+# `blocked: pending-reply-stale-reconciled:` status line per affected task -
+# instead of burst-sending recovery nags for long-dead requests. Retired
+# records are never marked resolved-as-answered, remain on disk, and a
+# correlated report seen during the sweep still resolves normally. If a sweep
+# pass is interrupted mid-way, the next pass retires the remainder with its own
+# summary line - bounded and loud, never silent.
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
@@ -254,6 +287,9 @@ delivered_epoch=
 phase=awaiting_report
 turn_seen_busy=0
 request_turn_completed_epoch=
+request_turnend_signature=
+recovery_turnend_signature=
+reconciled_epoch=
 recovery_attempted_epoch=
 recovery_sender_pid=
 recovery_sender_identity=
@@ -275,8 +311,12 @@ EOF
 }
 
 # Mark delivery success for an existing expectation. Never resolves.
+# Also anchors request_turnend_signature at first delivery so the sbx
+# completion source can read a later turn-ended change as request-turn
+# completion; a late reconciled delivery may anchor a post-completion
+# signature, which only delays completion (fail-safe), never fakes it.
 fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
-  local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now
+  local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now task_id
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -288,6 +328,9 @@ fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
   if [ -z "$delivered" ]; then
     now=${confirmed_epoch:-$(fm_pending_reply_now)}
     fm_pending_reply_set "$rec" delivered_epoch "$now" || return 1
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    fm_pending_reply_set "$rec" request_turnend_signature \
+      "$(fm_pending_reply_turnend_signature "$state" "$task_id")" || return 1
   fi
   if [ "$phase" = delivery_unknown ]; then
     fm_pending_reply_set "$rec" phase awaiting_report || return 1
@@ -425,6 +468,22 @@ fm_pending_reply_file_signature() {  # <path>
     LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
   else
     LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
+  fi
+}
+
+# size:mtime signature of a task's turn-ended signal, following symlinks (-L):
+# an sbx task's state/<id>.turn-ended is a symlink onto the signal-bridge
+# mount, and the TARGET's change is the signal - -L is load-bearing exactly as
+# in bin/fm-watch.sh's stat_sig. The [ -e ] gate (which follows symlinks)
+# reports a dangling link as missing, because macOS stat -L on a dangling link
+# signs the link itself with rc 0 (bin/fm-watch.sh scan_sbx_beacon).
+fm_pending_reply_turnend_signature() {  # <state-dir> <task_id>
+  local path="$1/$2.turn-ended"
+  [ -e "$path" ] || { printf 'missing'; return 0; }
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -L -f '%z:%Fm' "$path" 2>/dev/null || printf 'unreadable'
+  else
+    LC_ALL=C stat -L -c '%s:%Y' "$path" 2>/dev/null || printf 'unreadable'
   fi
 }
 
@@ -604,6 +663,36 @@ fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
   esac
 }
 
+# Turn-boundary observation for an sbx-backed task, from host stats only (the
+# header's "sbx completion source"). Compares the current turn-ended signature
+# against the anchor snapshotted for the phase's turn (delivery for
+# awaiting_report, confirmed recovery send for recovery_sent). Prints idle on a
+# positive signature change (a turn completed since the anchor), otherwise
+# unknown; never busy, and never a backend CLI call. No anchor, or a missing or
+# unreadable turn-ended file, is no independent proof - unknown, so completion
+# stays unset. Per-record, not per-task: two records for one task anchor
+# different turns, so the tick's per-task observation cache does not apply.
+fm_pending_reply_sbx_busy_state() {  # <state-dir> <record-path>
+  local state=$1 rec=$2 phase anchor task_id current
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report) anchor=$(fm_pending_reply_get "$rec" request_turnend_signature) ;;
+    recovery_sent) anchor=$(fm_pending_reply_get "$rec" recovery_turnend_signature) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  [ -n "$anchor" ] || { printf 'unknown'; return 0; }
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  current=$(fm_pending_reply_turnend_signature "$state" "$task_id")
+  case "$current" in
+    missing|unreadable) printf 'unknown'; return 0 ;;
+  esac
+  if [ "$current" != "$anchor" ]; then
+    printf 'idle'
+  else
+    printf 'unknown'
+  fi
+}
+
 # Explicit turn-completion proof (for tests and turn-end backends that surface
 # a completion event without a busy/idle pair).
 fm_pending_reply_mark_turn_completed() {  # <state-dir> <corr_id> [which: request|recovery]
@@ -712,7 +801,7 @@ fm_pending_reply_sender_alive() {  # <record-path>
 }
 
 fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
-  local state=$1 corr=$2 outcome=$3 rec phase now sent
+  local state=$1 corr=$2 outcome=$3 rec phase now sent task_id
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -726,6 +815,12 @@ fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
     fi
     fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || return 1
     fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
+    # Anchor the recovery-turn turn-ended signature for the sbx completion
+    # source: the request turn's own touch happened before this send, so it is
+    # baked into the anchor and cannot count as recovery-turn completion.
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    fm_pending_reply_set "$rec" recovery_turnend_signature \
+      "$(fm_pending_reply_turnend_signature "$state" "$task_id")" || return 1
     fm_pending_reply_set "$rec" phase recovery_sent || return 1
   else
     [ "$outcome" = failed ] || return 1
@@ -854,6 +949,67 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   return 0
 }
 
+# One-time visible retirement of pre-upgrade stale sbx records (the header's
+# "One-time stale reconciliation"). A record without the
+# request_turnend_signature KEY predates the sbx completion source; if it is
+# still awaiting_report with a confirmed delivery for a backend=sbx task, no
+# code path could ever have completed it, so retire it as reconciled_stale
+# rather than letting the new completion source burst-send recovery nags for
+# long-dead requests. One summary status line per affected task, deduplicated
+# against nothing (an interrupted pass reports its remainder on the next pass).
+fm_pending_reply_reconcile_stale() {  # <state-dir>
+  local state=$1 dir rec phase delivered task_id meta backend corr now
+  local i found status_path payload
+  local -a stale_tasks=() stale_counts=() stale_status_paths=()
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  now=$(fm_pending_reply_now)
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in
+      .*) continue ;;
+    esac
+    grep -q '^request_turnend_signature=' "$rec" 2>/dev/null && continue
+    phase=$(fm_pending_reply_get "$rec" phase)
+    [ "$phase" = awaiting_report ] || continue
+    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+    [ -n "$delivered" ] || continue
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    meta="$state/${task_id}.meta"
+    [ -f "$meta" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" = sbx ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] || corr=$(basename "$rec")
+    # A late correlated report still wins over retirement.
+    if fm_pending_reply_try_resolve "$state" "$corr"; then
+      continue
+    fi
+    fm_pending_reply_set "$rec" phase reconciled_stale || continue
+    fm_pending_reply_set "$rec" reconciled_epoch "$now" || true
+    found=0
+    for ((i = 0; i < ${#stale_tasks[@]}; i++)); do
+      [ "${stale_tasks[$i]}" = "$task_id" ] || continue
+      stale_counts[i]=$((stale_counts[i] + 1))
+      found=1
+      break
+    done
+    if [ "$found" = 0 ]; then
+      stale_tasks+=("$task_id")
+      stale_counts+=(1)
+      stale_status_paths+=("$(fm_pending_reply_get "$rec" parent_status)")
+    fi
+  done
+  for ((i = 0; i < ${#stale_tasks[@]}; i++)); do
+    status_path=${stale_status_paths[$i]}
+    [ -n "$status_path" ] || status_path="$state/${stale_tasks[$i]}.status"
+    payload="pending-reply-stale-reconciled: task=${stale_tasks[$i]} retired=${stale_counts[$i]} pre-upgrade marked requests had no correlated report and were retired as stale (not answered) by the pending-reply guard upgrade"
+    mkdir -p "$(dirname "$status_path")" 2>/dev/null || continue
+    printf 'blocked: %s\n' "$payload" >> "$status_path" 2>/dev/null || true
+  done
+  return 0
+}
+
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
 # busy_state is busy|idle|unknown for the secondmate endpoint.
 # secondmate_home may be empty when unknown.
@@ -862,6 +1018,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   local rec phase delivered
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" phase)" != reconciled_stale ] || return 0
   fm_pending_reply_reconcile_delivery "$state" "$corr" || true
   phase=$(fm_pending_reply_get "$rec" phase)
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -930,6 +1087,7 @@ fm_pending_reply_tick() {  # <state-dir>
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  fm_pending_reply_reconcile_stale "$state" || true
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
@@ -939,7 +1097,9 @@ fm_pending_reply_tick() {  # <state-dir>
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    case "$phase" in
+      resolved|reconciled_stale) continue ;;
+    esac
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -990,7 +1150,11 @@ fm_pending_reply_tick() {  # <state-dir>
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
-      if [ -n "$target" ]; then
+      if [ "$backend" = sbx ]; then
+        # Host-stat turn-boundary read; per-record anchors make the per-task
+        # observation cache inapplicable (fm_pending_reply_sbx_busy_state).
+        busy=$(fm_pending_reply_sbx_busy_state "$state" "$rec")
+      elif [ -n "$target" ]; then
         label="fm-$task_id"
         observation=
         found=0
@@ -1014,7 +1178,7 @@ fm_pending_reply_tick() {  # <state-dir>
   return 0
 }
 
-# True when any open (non-resolved) pending reply exists for a task.
+# True when any open (non-terminal) pending reply exists for a task.
 fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
   local state=$1 task_id=$2 dir rec phase tid
   dir=$(fm_pending_reply_dir "$state")
@@ -1024,7 +1188,9 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
     tid=$(fm_pending_reply_get "$rec" task_id)
     [ "$tid" = "$task_id" ] || continue
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    case "$phase" in
+      resolved|reconciled_stale) continue ;;
+    esac
     return 0
   done
   return 1

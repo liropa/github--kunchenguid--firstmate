@@ -184,6 +184,8 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
 
 Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm).
 
+The pending-reply missed-report guard is a second host-side consumer of the same `turn-ended` files: `bin/fm-pending-reply-lib.sh` anchors a size/mtime signature at request delivery and reads a later change as turn completion for its recovery and escalation legs, with the same follow-symlinks stat discipline and zero sbx CLI calls (contract in that library's header).
+
 ## Teardown (`fm_backend_sbx_unlanded_work`)
 
 Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (above), so `fm-teardown.sh` verifies the guest's work landed **before** the kill - the in-VM half of teardown's host worktree safety check, which cannot see inside the microVM. The secondmate teardown path (non-`--force`) probes the guest through the generic `fm_backend_unlanded_work` dispatcher (only sbx implements it; host-worktree backends answer "nothing hidden"):

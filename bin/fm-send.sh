@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh <target> [--notice] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -35,6 +35,13 @@
 # resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
+#
+# Fire-and-forget notice: fm-send.sh <target> --notice <text...> sends a
+# secondmate message that is still marked (so it is not mistaken for captain
+# input) but carries no correlation token and creates NO pending-reply
+# expectation - for notices that need no answer, such as "re-read your
+# AGENTS.md". The flag has no effect on unmarked targets or the --key path,
+# and it overrides FM_PENDING_REPLY_EXISTING_CORR.
 #
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
@@ -218,6 +225,12 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+SEND_NOTICE=0
+if [ "${1:-}" = "--notice" ]; then
+  SEND_NOTICE=1
+  shift
+fi
+
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
@@ -225,7 +238,10 @@ if [ "${1:-}" = "--key" ]; then
   fi
 else
   MESSAGE=$*
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$SEND_NOTICE" = 1 ]; then
+    # Marked fire-and-forget notice: no correlation token, no expectation.
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  elif [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
