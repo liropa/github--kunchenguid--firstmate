@@ -1221,7 +1221,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.
 _beacon_key=$(printf '%s' "$ID" | tr '.' '_')
 rm -f "$STATE/.sbx-beat-te-$_beacon_key" "$STATE/.sbx-beat-status-$_beacon_key" \
   "$STATE/.sbx-noprogress-$_beacon_key" "$STATE/.sbx-stranded-alarmed-$_beacon_key" \
-  "$STATE/.sbx-mount-alarmed-$_beacon_key"
+  "$STATE/.sbx-mount-alarmed-$_beacon_key" "$STATE/.sbx-midtask-stop-$_beacon_key"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

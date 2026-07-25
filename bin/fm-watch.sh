@@ -166,6 +166,11 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # alarmed as stranded (scan_sbx_beacon). 0 disables the stranding alarm; the
 # mount-health alarm is unconditional.
 FM_SBX_NOPROGRESS_TURNS=${FM_SBX_NOPROGRESS_TURNS:-3}
+# Horizon (seconds) within which the sbx keep-alive's <id>.guest-active
+# breadcrumb (bin/backends/sbx.sh) still proves live in-guest work; a fresh
+# breadcrumb keeps a status-sparse supervision turn-end out of the stranding
+# count (scan_sbx_beacon). Same default as the adapter's own copy of the knob.
+FM_SBX_GUEST_ACTIVE_WINDOW=${FM_SBX_GUEST_ACTIVE_WINDOW:-120}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
 # "<backend>:<session>"; re-probed only when that key changes.
@@ -482,10 +487,19 @@ scan_signals() {
 # steer while the status file never progresses. Each bare turn-end already
 # surfaces as a generic signal wake; after FM_SBX_NOPROGRESS_TURNS consecutive
 # turn-ends with zero status progress the beacon NAMES the pattern with one
-# check wake. All tracking is marker files, so the counter survives the
-# actionable exit each turn-end causes.
+# check wake. A turn-end that lands while the mount's <id>.guest-active
+# breadcrumb is fresh is recorded but NOT counted: verifiably live in-guest
+# work (a busy child pane, advancing child signals) makes status-sparse
+# supervision turns healthy, not stranding evidence.
+# Mid-task stop: the keep-alive wrapper (bin/backends/sbx.sh) records a
+# .sbx-midtask-stop marker for a VM that stopped while in-guest work was
+# active - a stopped VM fires no turn-ends, so the stranding counter is
+# structurally blind to the most damaging sbx failure mode. The beacon
+# surfaces the marker as one named check wake and consumes it.
+# All tracking is marker files, so state survives the actionable exit each
+# turn-end causes.
 scan_sbx_beacon() {
-  local te id key tgt mdir marker reason te_sig sf_sig n
+  local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m
   for te in "$STATE"/*.turn-ended; do
     [ -L "$te" ] || continue
     id=$(basename "$te" .turn-ended)
@@ -507,6 +521,15 @@ scan_sbx_beacon() {
     fi
     rm -f "$marker"
 
+    stopmark="$STATE/.sbx-midtask-stop-$key"
+    if [ -f "$stopmark" ]; then
+      why=$(head -1 "$stopmark" 2>/dev/null)
+      reason="check: sbx secondmate $id VM stopped mid-task: ${why:-in-guest work was active when the VM stopped} - in-guest workers and daemons died with the VM (disk state survives); steer the secondmate to resume and restart its in-guest work"
+      fm_wake_append check "sbx-midtask-stop:$id" "$reason" || exit 1
+      rm -f "$stopmark"
+      wake "$reason"
+    fi
+
     [ "$FM_SBX_NOPROGRESS_TURNS" -gt 0 ] 2>/dev/null || continue
     # No real turn-end yet (fresh spawn, dangling link): nothing to track.
     # NOTE: macOS stat -L on a dangling link signs the LINK itself (rc 0),
@@ -522,6 +545,13 @@ scan_sbx_beacon() {
     fi
     [ "$te_sig" != "$(cat "$STATE/.sbx-beat-te-$key" 2>/dev/null)" ] || continue
     printf '%s' "$te_sig" > "$STATE/.sbx-beat-te-$key"
+    # A fresh guest-active breadcrumb proves live in-guest work, so this
+    # turn-end is a healthy supervision beat: recorded above, never counted
+    # (issue #13's false positive - long in-guest pipelines are status-sparse).
+    act_m=$(stat_mtime "$mdir/$id.guest-active") || act_m=
+    if [ -n "$act_m" ] && [ $(($(date +%s) - act_m)) -le "$FM_SBX_GUEST_ACTIVE_WINDOW" ]; then
+      continue
+    fi
     n=$(( $(cat "$STATE/.sbx-noprogress-$key" 2>/dev/null || echo 0) + 1 ))
     printf '%s' "$n" > "$STATE/.sbx-noprogress-$key"
     if [ "$n" -ge "$FM_SBX_NOPROGRESS_TURNS" ] && [ ! -e "$STATE/.sbx-stranded-alarmed-$key" ]; then

@@ -59,6 +59,12 @@
 #   FM_FAKE_SBX_SYNC_RC      non-zero fails the tracked-file sync exec (the
 #                            `sh -c` pass carrying `merge --ff-only`) instead
 #                            of executing it
+#   FM_FAKE_SBX_KEEPALIVE_OUT
+#                            what the keep-alive exec (the `sh -c` pass
+#                            carrying `fm-keepalive`) prints as the guest
+#                            loop's verdict; unset = no output (the exec-died
+#                            case the wrapper must classify)
+#   FM_FAKE_SBX_KEEPALIVE_RC exit code for the keep-alive exec (default 0)
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -150,6 +156,16 @@ case "$cmd" in
       "test -r "*)
         # fm_backend_sbx_create_task's source-mount probe.
         exit "${FM_FAKE_SBX_SOURCE_RC:-0}"
+        ;;
+      "sh -c "*"fm-keepalive"*)
+        # The keep-alive's guest activity loop (fm_backend_sbx_keepalive):
+        # canned output drives the host-side wrapper's verdict handling; the
+        # loop logic itself is unit-tested by running
+        # fm_backend_sbx_keepalive_script directly (tests/fm-backend-sbx.test.sh).
+        if [ -n "${FM_FAKE_SBX_KEEPALIVE_OUT+x}" ]; then
+          printf '%s\n' "$FM_FAKE_SBX_KEEPALIVE_OUT"
+        fi
+        exit "${FM_FAKE_SBX_KEEPALIVE_RC:-0}"
         ;;
       "sh -c "*"ln -sfn "*)
         # The guest-home provisioning pass (fm_backend_sbx_provision_guest_home).
