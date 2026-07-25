@@ -992,7 +992,7 @@ test_sbx_turnend_absent_or_unreadable_stays_unknown() {
 test_sbx_stale_records_reconcile_once_visibly() {
   (
     local home state sig_dir sm_home hook_log rec
-    local stale1 stale2 answered tmux_stale summaries
+    local stale1 stale2 answered crash_window tmux_stale summaries
     home=$(setup_parent sbx-stale)
     state="$home/state"
     sig_dir="$home/signals"
@@ -1017,7 +1017,7 @@ test_sbx_stale_records_reconcile_once_visibly() {
     # Simulate pre-upgrade records: create through the current schema, then
     # strip the keys the upgrade introduced.
     strip_new_keys() {  # <record-path>
-      grep -Ev '^(request_turnend_signature|recovery_turnend_signature|reconciled_epoch)=' \
+      grep -Ev '^(request_turnend_signature|recovery_turnend_signature|reconciled_epoch|reconciled_reported_epoch)=' \
         "$1" > "$1.old" && mv "$1.old" "$1"
     }
     stale1=$(fm_pending_reply_create "$home" "$state" hibit "old question one")
@@ -1026,11 +1026,15 @@ test_sbx_stale_records_reconcile_once_visibly() {
     fm_pending_reply_mark_delivered "$state" "$stale2"
     answered=$(fm_pending_reply_create "$home" "$state" hibit "old but answered")
     fm_pending_reply_mark_delivered "$state" "$answered"
+    crash_window=$(fm_pending_reply_create "$home" "$state" hibit "old retired before summary")
+    fm_pending_reply_mark_delivered "$state" "$crash_window"
     tmux_stale=$(fm_pending_reply_create "$home" "$state" panehome "pane-home question")
     fm_pending_reply_mark_delivered "$state" "$tmux_stale"
-    for rec in "$stale1" "$stale2" "$answered" "$tmux_stale"; do
+    for rec in "$stale1" "$stale2" "$answered" "$crash_window" "$tmux_stale"; do
       strip_new_keys "$(fm_pending_reply_path "$state" "$rec")"
     done
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$crash_window")" phase reconciled_stale
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$crash_window")" reconciled_epoch 13005
     printf 'done corr=%s: answered long ago\n' "$answered" >> "$state/hibit.status"
     # The pane-home record still walks the observation path; keep it inert.
     fm_backend_busy_state() { printf 'unknown'; }
@@ -1047,13 +1051,17 @@ test_sbx_stale_records_reconcile_once_visibly() {
       || fail "retired record should carry reconciled_epoch"
     [ "$(phase_of "$state" "$answered")" = resolved ] \
       || fail "a correlated report should still win over retirement"
+    [ "$(phase_of "$state" "$crash_window")" = reconciled_stale ] \
+      || fail "a terminal unreported stale record should stay terminal"
+    [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$crash_window")" reconciled_reported_epoch)" ] \
+      || fail "a terminal stale record should be marked after summary publication"
     [ "$(phase_of "$state" "$tmux_stale")" = awaiting_report ] \
       || fail "a pre-upgrade pane-backed record must not be retired by the sbx sweep"
     [ ! -s "$hook_log" ] || fail "stale reconciliation must not send recovery nags"
     if grep -Fq "pending-reply-missed" "$state/hibit.status"; then
       fail "stale reconciliation must not escalate retired records"
     fi
-    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=2" "$state/hibit.status")
+    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=3" "$state/hibit.status")
     [ "$summaries" = 1 ] || fail "expected one visible retirement summary, got $summaries"
     # Durably terminal: later ticks and signal activity never resurrect them.
     printf 'x' >> "$sig_dir/hibit.turn-ended"
@@ -1062,7 +1070,7 @@ test_sbx_stale_records_reconcile_once_visibly() {
     [ "$(phase_of "$state" "$stale1")" = reconciled_stale ] \
       || fail "retired record must stay terminal"
     [ ! -s "$hook_log" ] || fail "retired records must never regain recovery eligibility"
-    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=2" "$state/hibit.status")
+    summaries=$(grep -Fc "pending-reply-stale-reconciled: task=hibit retired=3" "$state/hibit.status")
     [ "$summaries" = 1 ] || fail "retirement summary must not repeat, got $summaries"
   ) || fail "sbx stale reconciliation regression failed"
   pass "pre-upgrade stale sbx records retire once, visibly, without a nag burst"
