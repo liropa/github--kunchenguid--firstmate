@@ -882,8 +882,14 @@ test_sbx_turnend_completion_drives_recovery_then_escalation() {
     ln -s "$sig_dir/hibit.turn-ended" "$state/hibit.turn-ended"
     # Zero sbx CLI calls: the sbx tick path must never source an adapter,
     # probe busy state, or capture a pane.
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_source() { fail "sbx tick must not source a backend adapter"; }
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { fail "sbx tick must not probe backend busy state"; }
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "sbx tick must not capture a pane"; }
     corr=$(fm_pending_reply_create "$home" "$state" hibit "sbx missed report")
     fm_pending_reply_mark_delivered "$state" "$corr"
@@ -956,8 +962,14 @@ test_sbx_turnend_absent_or_unreadable_stays_unknown() {
     # Dangling symlink: fresh spawn, no turn-end signal yet (the macOS stat -L
     # trap - the link itself stats fine, but the signal is absent).
     ln -s "$sig_dir/hibit.turn-ended" "$state/hibit.turn-ended"
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_source() { fail "sbx tick must not source a backend adapter"; }
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { fail "sbx tick must not probe backend busy state"; }
+    # Invoked indirectly by the code under test, and should fail if invoked.
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "sbx tick must not capture a pane"; }
     corr=$(fm_pending_reply_create "$home" "$state" hibit "no signal yet")
     fm_pending_reply_mark_delivered "$state" "$corr"
@@ -1106,6 +1118,8 @@ test_failed_send_discards_undelivered_expectation() {
   local home state corr
   home=$(setup_parent discard)
   state="$home/state"
+  # This fixture override is intentionally scoped to the test.
+  # shellcheck disable=SC2030,SC2031
   export FM_PENDING_REPLY_NOW=9400
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "never lands")
   # Not delivered: discard is allowed.
