@@ -466,15 +466,244 @@ test_send_starts_keepalive_after_delivery() {
   w=$(new_sbx_world keepalive); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
   : > "$w/sbx.log"
-  # sbx auto-stop is host-connection-based: a delivered steer starts a guest
-  # turn that dies with the VM unless one exec stays pinned until the turn
-  # ends. The keeper is fire-and-forget, so give its async log line a beat.
+  # sbx auto-stop is host-connection-based: a delivered steer starts guest
+  # work that dies with the VM unless one exec stays pinned until the guest
+  # goes idle. The keeper is fire-and-forget, so give its async log line a
+  # beat. The recorded home= must ride along so the guest loop can watch the
+  # guest home's state/ for child-worker signal advances.
+  printf 'home=/g/home\n' > "$w/state/x.meta"
   run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"; sleep 0.5' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 \
     || fail "a steer with keep-alive enabled should succeed"
   assert_contains "$(cat "$w/sbx.log")" "$w/signals/x/x.turn-ended 60" \
     "delivery must start a keep-alive exec watching the id's turn-ended mount file"
-  pass "send path: delivery pins the VM with a turn-end-bounded keep-alive exec"
+  assert_contains "$(cat "$w/sbx.log")" "/g/home" \
+    "the keep-alive must carry the meta's recorded home for the child-signal probe"
+  assert_contains "$(cat "$w/sbx.log")" "esc (to )?interrupt" \
+    "the keep-alive must carry the busy-pane regex for the in-guest activity probe"
+  pass "send path: delivery pins the VM with a guest-work-bounded keep-alive exec"
+}
+
+# --- keep-alive guest loop: pin/release logic (fork issue #12) ---------------
+#
+# fm_backend_sbx_keepalive_script is plain POSIX sh over stat/tmux/grep, so
+# these tests execute it directly ON THE HOST with a fake tmux and real files -
+# no sandbox, no fake sbx - unit-testing the exact loop the guest runs.
+
+# make_fake_guest_tmux <fakebin>: a one-pane guest tmux whose visible pane
+# content is the file named by FAKE_TMUX_PANE (empty/unset = idle pane).
+make_fake_guest_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-panes) printf 'fm:1.0\n' ;;
+  capture-pane) cat "${FAKE_TMUX_PANE:-/dev/null}" 2>/dev/null ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+}
+
+# run_keepalive_script <fakebin> <pane-file> <args...>: execute the guest loop
+# synchronously with the fake tmux first in PATH; echoes the verdict.
+run_keepalive_script() {
+  local fakebin=$1 pane=$2 script
+  shift 2
+  script=$(run_adapter "$fakebin" "$TMP_ROOT" 'fm_backend_sbx_keepalive_script')
+  PATH="$fakebin:$BASE_PATH" FAKE_TMUX_PANE="$pane" sh -c "$script" _ "$@"
+}
+
+test_keepalive_script_capped_verdicts() {
+  local w fb te out
+  w=$(new_sbx_world keeper-cap); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+
+  # Turn never ends, guest idle: the cap bounds the pin and reads as idle.
+  out=$(run_keepalive_script "$fb" /dev/null "$te" 1 0 120 "" 'esc (to )?interrupt')
+  [ "$out" = "fm-keepalive capped-idle" ] || fail "an idle guest at the cap should read capped-idle, got '$out'"
+  [ ! -e "$w/signals/x/x.guest-active" ] || fail "an idle guest must not touch the guest-active breadcrumb"
+
+  # A busy pane is WORK: the cap verdict flags it and the breadcrumb advances.
+  printf 'esc to interrupt\n' > "$w/pane.txt"
+  out=$(run_keepalive_script "$fb" "$w/pane.txt" "$te" 1 0 120 "" 'esc (to )?interrupt')
+  [ "$out" = "fm-keepalive capped-active" ] || fail "a busy pane at the cap should read capped-active, got '$out'"
+  [ -e "$w/signals/x/x.guest-active" ] || fail "visible work must touch the guest-active breadcrumb"
+
+  # A child worker's fresh signal file is WORK even with every pane idle.
+  rm -f "$w/signals/x/x.guest-active"
+  : > "$w/home/state/w1.status"
+  out=$(run_keepalive_script "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  [ "$out" = "fm-keepalive capped-active" ] || fail "a fresh child signal file should read capped-active, got '$out'"
+  [ -e "$w/signals/x/x.guest-active" ] || fail "child-signal work must touch the guest-active breadcrumb"
+
+  # A stale child signal file is NOT work: the between-turns bridge is bounded.
+  touch -t 202001010000 "$w/home/state/w1.status"
+  out=$(run_keepalive_script "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  [ "$out" = "fm-keepalive capped-idle" ] || fail "a stale child signal file should read capped-idle, got '$out'"
+
+  pass "keep-alive loop: cap verdicts distinguish active work from a genuinely idle guest"
+}
+
+test_keepalive_script_pins_busy_worker_across_turn_end() {
+  # THE issue #12 regression: the v1 keeper released on the secondmate's own
+  # turn-end, so an in-guest crewmate mid-implementation lost its only pin and
+  # the VM died 45-100 s later. A busy worker pane must hold the pin across
+  # the secondmate's turn boundary, and the pin must still release - bounded -
+  # once the guest goes genuinely idle.
+  local w fb script te pid i
+  w=$(new_sbx_world keeper-pin); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  printf 'esc to interrupt\n' > "$w/pane.txt"
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" \
+    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' > "$w/verdict.txt" &
+  pid=$!
+  sleep 0.3
+  touch "$te"
+  # The secondmate's turn just ended; the busy worker pane must keep the pin.
+  sleep 2.5
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "the keeper released on the secondmate's turn-end while a worker pane was busy: $(cat "$w/verdict.txt")"
+  fi
+  # Worker goes idle: the pin must release promptly (auto-stop re-engages).
+  : > "$w/pane.txt"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "the keeper did not release after the guest went idle"
+  fi
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$(cat "$w/verdict.txt")" "fm-keepalive released-idle" \
+    "an idle guest after the turn-end should release the pin"
+  [ -e "$w/signals/x/x.guest-active" ] || fail "the busy stretch should have touched the guest-active breadcrumb"
+  pass "keep-alive loop: a busy worker pane pins across the secondmate's turn-end, then releases on idle"
+}
+
+test_keepalive_script_releases_idle_guest_on_turn_end() {
+  local w fb script te pid i
+  w=$(new_sbx_world keeper-release); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null \
+    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' > "$w/verdict.txt" &
+  pid=$!
+  sleep 0.3
+  touch "$te"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "the keeper did not release an idle guest on the turn-end (v1 contract regressed)"
+  fi
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$(cat "$w/verdict.txt")" "fm-keepalive released-idle" \
+    "a genuinely idle guest should release as released-idle"
+  [ ! -e "$w/signals/x/x.guest-active" ] || fail "an idle guest must not touch the guest-active breadcrumb"
+  pass "keep-alive loop: a genuinely idle guest still releases on the turn-end (auto-stop preserved)"
+}
+
+# --- keep-alive wrapper: mid-task-stop classification ------------------------
+
+test_keepalive_wrapper_marks_midtask_stop_on_capped_active() {
+  local w fb
+  w=$(new_sbx_world keeper-capmark); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT='fm-keepalive capped-active' \
+    || fail "the keep-alive call itself should succeed"
+  [ -f "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "a cap expiry with active work and a stopped VM must record the mid-task-stop marker"
+  assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "expired while in-guest work was still active" \
+    "the marker should carry the cap-expiry reason"
+  pass "keep-alive wrapper: cap expiry with active work + stopped VM records the mid-task-stop marker"
+}
+
+test_keepalive_wrapper_skips_marker_when_vm_still_running() {
+  # Another keeper (or a fresh steer) may still be pinning: a running VM after
+  # the settle means no mid-task stop happened, so no alarm.
+  local w fb
+  w=$(new_sbx_world keeper-still-up); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT='fm-keepalive capped-active' \
+    || fail "the keep-alive call itself should succeed"
+  [ ! -e "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "a VM still running after the settle must not be flagged as a mid-task stop"
+  pass "keep-alive wrapper: a still-running VM after a cap expiry raises no alarm"
+}
+
+test_keepalive_wrapper_marks_dropped_connection_with_fresh_breadcrumb() {
+  # The exec dying without a verdict (sbx stop, a crash) is a mid-task stop
+  # exactly when the guest-active breadcrumb proves work was live.
+  local w fb
+  w=$(new_sbx_world keeper-dropped); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  touch "$w/signals/x/x.guest-active"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_RC=1 \
+    || fail "the keep-alive call itself should succeed"
+  [ -f "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "a dead exec with a fresh breadcrumb and a stopped VM must record the mid-task-stop marker"
+  assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "connection dropped while in-guest work was active" \
+    "the marker should carry the dropped-connection reason"
+  pass "keep-alive wrapper: a dead exec with a fresh breadcrumb + stopped VM records the mid-task-stop marker"
+}
+
+test_keepalive_wrapper_quiet_on_idle_death() {
+  # No verdict and no fresh breadcrumb: an idle keeper dying (VM stopped while
+  # nothing was working) is the healthy auto-stop, not a captain-facing event -
+  # and must not even spend a state probe.
+  local w fb
+  w=$(new_sbx_world keeper-idle-death); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_RC=1 \
+    || fail "the keep-alive call itself should succeed"
+  [ ! -e "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "an idle keeper death must not be flagged as a mid-task stop"
+  assert_not_contains "$(cat "$w/sbx.log")" "ls --json" \
+    "an idle keeper death must not spend a state probe"
+  pass "keep-alive wrapper: an idle keeper death stays silent with zero extra sbx calls"
+}
+
+test_keepalive_wrapper_quiet_on_clean_release() {
+  # A clean idle release wins over everything, breadcrumb freshness included.
+  local w fb
+  w=$(new_sbx_world keeper-clean); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  touch "$w/signals/x/x.guest-active"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT='fm-keepalive released-idle' \
+    || fail "the keep-alive call itself should succeed"
+  [ ! -e "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "a clean idle release must not be flagged as a mid-task stop"
+  assert_not_contains "$(cat "$w/sbx.log")" "ls --json" \
+    "a clean idle release must not spend a state probe"
+  pass "keep-alive wrapper: a clean idle release stays silent with zero extra sbx calls"
 }
 
 test_send_skips_resurrection_when_stack_alive() {
@@ -834,7 +1063,8 @@ test_teardown_clears_beacon_markers() {
   sbx_ls_json fm-domain running > "$w/ls.json"
   : > "$w/sbx.log"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
-           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain; do
+           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
+           .sbx-midtask-stop-domain; do
     : > "$w/home/state/$m"
   done
   set +e
@@ -843,7 +1073,8 @@ test_teardown_clears_beacon_markers() {
   set -e
   [ "$rc" -eq 0 ] || fail "clean-guest teardown should succeed: $out"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
-           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain; do
+           .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
+           .sbx-midtask-stop-domain; do
     [ ! -e "$w/home/state/$m" ] || fail "teardown should remove the beacon marker $m"
   done
   pass "teardown: the id's beat-beacon markers are removed with its state files"
@@ -887,6 +1118,14 @@ test_submit_retypes_when_stale_prefix_goes_busy
 test_submit_counts_full_history_when_window_scrolls
 test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
+test_keepalive_script_capped_verdicts
+test_keepalive_script_pins_busy_worker_across_turn_end
+test_keepalive_script_releases_idle_guest_on_turn_end
+test_keepalive_wrapper_marks_midtask_stop_on_capped_active
+test_keepalive_wrapper_skips_marker_when_vm_still_running
+test_keepalive_wrapper_marks_dropped_connection_with_fresh_breadcrumb
+test_keepalive_wrapper_quiet_on_idle_death
+test_keepalive_wrapper_quiet_on_clean_release
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
 test_sweep_leaves_stopped_secondmate_untouched

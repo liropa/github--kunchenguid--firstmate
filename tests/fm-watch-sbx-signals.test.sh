@@ -258,6 +258,85 @@ test_status_progress_resets_stranding_counter() {
   pass "status progress resets the no-progress counter; healthy turns never alarm"
 }
 
+test_midtask_stop_marker_fires_named_alarm() {
+  # The mid-task-stop consumer (fork issue #12): the keep-alive wrapper
+  # (bin/backends/sbx.sh) records state/.sbx-midtask-stop-<id> when the VM
+  # stopped while in-guest work was active. A stopped VM fires no turn-ends,
+  # so the stranding counter is structurally blind to this failure - the
+  # beacon must surface the marker as ONE named check wake and consume it.
+  local dir state mount out pid
+  dir=$(make_case midtask-stop); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  printf 'the keep-alive cap (60s) expired while in-guest work was still active\n' \
+    > "$state/.sbx-midtask-stop-x"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on a mid-task-stop marker: $(cat "$out")"
+  grep -F "sbx-midtask-stop:x" "$state/.wake-queue" >/dev/null \
+    || fail "the mid-task stop should enqueue a named check wake keyed sbx-midtask-stop:x: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "stopped mid-task" "$state/.wake-queue" >/dev/null \
+    || fail "the alarm should name the mid-task stop pattern: $(cat "$state/.wake-queue")"
+  grep -F "expired while in-guest work" "$state/.wake-queue" >/dev/null \
+    || fail "the alarm should carry the wrapper's recorded reason: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.sbx-midtask-stop-x" ] || fail "the surfaced marker should be consumed"
+
+  # Marker consumed: a restarted watcher must not re-alarm.
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 25 || { reap "$pid"; fail "watcher re-alarmed on an already-surfaced mid-task stop: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(grep -c "sbx-midtask-stop:x" "$state/.wake-queue")" = 1 ] \
+    || fail "one mid-task stop should hold at ONE queued alarm: $(cat "$state/.wake-queue")"
+
+  pass "a mid-task-stop marker raises one named check wake and is consumed"
+}
+
+test_inguest_activity_suppresses_stranding() {
+  # Issue #13's false positive: supervision turns during a long in-guest
+  # pipeline are legitimately status-sparse, so bare turn-ends alone must not
+  # count toward stranding while the keep-alive's guest-active breadcrumb
+  # proves live in-guest work. Once the breadcrumb goes stale, uncounted
+  # turn-ends resume counting and the real stranding alarm still fires.
+  local dir state mount out pid i
+  dir=$(make_case active-suppress); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+
+  # Three bare turn-ends, each with a FRESH breadcrumb: healthy supervision
+  # of live in-guest work, never a stranding candidate.
+  for i in 1 2 3; do
+    touch "$mount/x.guest-active"
+    printf 't%s\n' "$i" >> "$mount/x.turn-ended"
+    : > "$out"
+    watch_bg "$state" "$dir/fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit on supervised turn-end $i: $(cat "$out")"
+  done
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "turn-ends with a fresh guest-active breadcrumb must not trip the stranding alarm: $(cat "$state/.wake-queue")"
+
+  # Breadcrumb stale: the same pattern is now stranding evidence again.
+  touch -t 202001010000 "$mount/x.guest-active"
+  for i in 4 5 6; do
+    printf 't%s\n' "$i" >> "$mount/x.turn-ended"
+    : > "$out"
+    watch_bg "$state" "$dir/fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit on stranded turn-end $i: $(cat "$out")"
+  done
+  grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "no-progress turn-ends after the breadcrumb went stale should still alarm: $(cat "$state/.wake-queue")"
+
+  pass "a fresh guest-active breadcrumb suppresses the stranding count; a stale one re-enables it"
+}
+
 test_mount_write_surfaces_through_symlink
 test_second_mount_write_surfaces_again
 test_foreign_id_file_is_invisible
@@ -265,5 +344,7 @@ test_mount_vanished_fires_mount_alarm
 test_mount_alarm_fires_once_and_rearms
 test_no_progress_turns_fire_stranding_alarm
 test_status_progress_resets_stranding_counter
+test_midtask_stop_marker_fires_named_alarm
+test_inguest_activity_suppresses_stranding
 
 echo "# all fm-watch-sbx-signals tests passed"

@@ -55,9 +55,25 @@ FM_SBX_RESURRECT_SETTLE=${FM_SBX_RESURRECT_SETTLE:-8}
 FM_SBX_RESURRECT_READY_TRIES=${FM_SBX_RESURRECT_READY_TRIES:-15}
 
 # Cap (seconds) on how long a keep-alive exec pins the VM waiting for the
-# guest agent's current turn to end (fm_backend_sbx_keepalive). 0 disables
-# keep-alives entirely (unit tests do).
+# guest to go idle (fm_backend_sbx_keepalive). 0 disables keep-alives
+# entirely (unit tests do).
 FM_SBX_KEEPALIVE_MAX=${FM_SBX_KEEPALIVE_MAX:-7200}
+
+# Poll interval (seconds) for the keep-alive's in-guest activity loop.
+FM_SBX_KEEPALIVE_POLL=${FM_SBX_KEEPALIVE_POLL:-5}
+
+# Horizon (seconds) within which an in-guest signal-file advance (a child
+# worker's status/turn-ended write under the guest home's state/) still counts
+# as live worker activity, and the freshness bound for the host-visible
+# <id>.guest-active breadcrumb the keep-alive maintains. Bridges a worker's
+# short between-turns gaps without pinning a genuinely idle guest.
+FM_SBX_GUEST_ACTIVE_WINDOW=${FM_SBX_GUEST_ACTIVE_WINDOW:-120}
+
+# Wait (seconds) after a suspicious keep-alive exit before the wrapper reads
+# the sandbox state once: covers the measured 45-100 s post-disconnect
+# auto-stop grace, so the wrapper classifies the settled outcome (stopped)
+# rather than the transition.
+FM_SBX_MIDTASK_STOP_SETTLE=${FM_SBX_MIDTASK_STOP_SETTLE:-120}
 
 # In-guest tmux session name. One secondmate per sandbox, so a fixed session
 # name with the task's fm-<id> window is unambiguous within each VM.
@@ -381,11 +397,75 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
   esac
 }
 
-# --- keep-alive: pin the VM through a guest turn -----------------------------
+# --- keep-alive: pin the VM through guest work -------------------------------
 
-# fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until <id>'s
-# turn-ended mount file advances past its current mtime (the guest agent
-# finished the turn) or FM_SBX_KEEPALIVE_MAX elapses. Why this exists:
+# fm_backend_sbx_keepalive_script: print the guest-side sh loop the keep-alive
+# exec runs, factored out so tests can exercise the pin/release logic directly
+# (a fake tmux plus real files) without a sandbox. Args after the _ argv0:
+#   $1 turn-ended mount file    $2 max pin seconds   $3 poll seconds
+#   $4 activity window seconds  $5 guest home path ('' skips the state probe)
+#   $6 busy-pane regex
+# Pin/release contract (docs/sbx-backend.md "Steering and resurrection"):
+#   - Pin at least until the turn-ended mount file advances past its delivery
+#     baseline (the original v1 condition: the delivered turn must not die).
+#   - Past that, keep pinning while the guest shows WORK: any tmux pane whose
+#     visible tail matches the busy regex (the same busy idiom the watcher and
+#     the submit verify use), or a status/turn-ended file under the guest
+#     home's state/ (an in-guest child worker's signals) touched within the
+#     activity window. An in-guest crewmate therefore keeps the VM alive
+#     across the secondmate's own turn boundaries (fork issue #12).
+#   - Release ("released-idle") once the turn ended AND no work is visible: a
+#     genuinely idle guest still auto-stops (stopped-is-healthy stays true).
+#     An idle-parked worker TUI - no busy tail, no recent signals - is NOT
+#     work and never pins, exactly like the secondmate's own idle TUI.
+#   - The cap bounds everything ("capped-active"/"capped-idle"): a wedged or
+#     forever-busy-looking guest can never pin the VM past the cap.
+#   - While work is visible, touch the mount's <id>.guest-active breadcrumb so
+#     the HOST gets a pure-stat view of in-guest activity (the wrapper's
+#     mid-task-stop check below, and fm-watch.sh's stranding suppression).
+# Plain POSIX sh, GNU-first portable stat (the guest is Linux; the BSD arm
+# exists so the host-side unit tests can run the same script on macOS).
+fm_backend_sbx_keepalive_script() {
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$6 expand in the guest sh loop, not here
+  printf '%s' '
+    t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6
+    act=${t%.turn-ended}.guest-active
+    mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+    start=$(date +%s)
+    base=$(mt "$t")
+    while :; do
+      now=$(date +%s)
+      work=0
+      for p in $(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null); do
+        if tmux capture-pane -p -t "$p" 2>/dev/null | grep -v "^[[:space:]]*$" | tail -6 | grep -qiE "$regex"; then
+          work=1
+          break
+        fi
+      done
+      if [ "$work" = 0 ] && [ -n "$home" ]; then
+        for f in "$home"/state/*.status "$home"/state/*.turn-ended; do
+          [ -e "$f" ] || continue
+          [ $((now - $(mt "$f"))) -le "$window" ] || continue
+          work=1
+          break
+        done
+      fi
+      if [ "$work" = 1 ]; then touch "$act" 2>/dev/null; fi
+      if [ $((now - start)) -ge "$max" ]; then
+        if [ "$work" = 1 ]; then echo "fm-keepalive capped-active"; else echo "fm-keepalive capped-idle"; fi
+        exit 0
+      fi
+      cur=$(mt "$t")
+      if [ "$cur" -gt "$base" ] && [ "$work" = 0 ]; then
+        echo "fm-keepalive released-idle"
+        exit 0
+      fi
+      sleep "$poll"
+    done'
+}
+
+# fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until the
+# guest is done working or FM_SBX_KEEPALIVE_MAX elapses. Why this exists:
 # Docker Sandboxes' auto-stop is HOST-CONNECTION-based, not guest-workload-
 # based - a VM with no live exec/attach stops within roughly a minute even
 # with a CPU-busy guest process (verified live; a detached in-guest tmux
@@ -393,29 +473,59 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # IS the connection). Without a keeper, any launch or steered turn that
 # outlasts the post-disconnect grace is killed mid-work: the turn never
 # ends, no signal lands, and the secondmate silently freezes until the next
-# steer resurrects it into the same trap. The keeper is the narrow fix: one
-# connection, held exactly for the expected-work window, self-terminating on
-# the guest side (it reads the same mount file at the same path), so an
-# idle VM still auto-stops - design §8's stopped-is-healthy premise stays.
-# Fire-and-forget: callers never wait on it, and a keeper left waiting by a
-# turn that never comes is bounded by the cap. Multiple keepers (one per
-# steer) are harmless - all exit on the same next turn-end.
-fm_backend_sbx_keepalive() {  # <name> <id>
-  local name=$1 id=$2 turnend
+# steer resurrects it into the same trap. Releasing on the secondmate's own
+# turn-end alone re-opened the same trap one level down: an in-guest crewmate
+# holds no host connection, so the VM died 45-100 s after the secondmate's
+# turn ended and killed the mid-implementation worker (fork issue #12, proven
+# three times 2026-07-23). The keeper is the narrow fix: one connection, held
+# exactly while the guest shows work (fm_backend_sbx_keepalive_script above),
+# self-terminating on the guest side, so an idle VM still auto-stops.
+# Fire-and-forget: callers never wait on it, and a keeper left pinned by work
+# that never ends is bounded by the cap. Multiple keepers (one per steer) are
+# harmless - all release on the same idle reading.
+# The host-side wrapper then classifies how the pin ended: a clean idle
+# release or an idle cap expiry is silent, while a cap expiry with work still
+# active - or an exec death while the guest-active breadcrumb was fresh (an
+# explicit stop, a crash) - waits FM_SBX_MIDTASK_STOP_SETTLE, reads the
+# sandbox state once (the only sbx CLI call, spent per rare suspicious exit,
+# never per poll), and on stopped/absent records the .sbx-midtask-stop marker
+# fm-watch.sh's beacon surfaces as a named mid-task-stop alarm. Guest stdout
+# is untrusted data: only the fixed fm-keepalive verdict shapes are matched,
+# and the breadcrumb is stat'ed, never read.
+fm_backend_sbx_keepalive() {  # <name> <id> [home]
+  local name=$1 id=$2 home=${3:-} turnend script busy key marker
   [ "$FM_SBX_KEEPALIVE_MAX" -gt 0 ] 2>/dev/null || return 0
   turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
-  # shellcheck disable=SC2016  # single quotes deliberate: $1/$2 expand in the guest sh loop, not here
-  nohup sbx exec "$name" -- sh -c '
-    t=$1 max=$2
-    start=$(date +%s)
-    base=$(stat -c %Y "$t" 2>/dev/null || echo 0)
-    while :; do
-      now=$(date +%s)
-      [ $((now - start)) -ge "$max" ] && exit 0
-      cur=$(stat -c %Y "$t" 2>/dev/null || echo 0)
-      [ "$cur" -gt "$base" ] && exit 0
-      sleep 5
-    done' _ "$turnend" "$FM_SBX_KEEPALIVE_MAX" >/dev/null 2>&1 &
+  script=$(fm_backend_sbx_keepalive_script)
+  busy=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
+  key=$(printf '%s' "$id" | tr '.' '_')
+  marker="$(fm_backend_sbx_state_dir)/.sbx-midtask-stop-$key"
+  (
+    trap '' HUP
+    out=$(sbx exec "$name" -- sh -c "$script" _ "$turnend" "$FM_SBX_KEEPALIVE_MAX" \
+      "$FM_SBX_KEEPALIVE_POLL" "$FM_SBX_GUEST_ACTIVE_WINDOW" "$home" "$busy" 2>/dev/null) || true
+    verdict=$(printf '%s\n' "$out" | grep '^fm-keepalive ' | tail -1)
+    why=
+    case "$verdict" in
+      'fm-keepalive released-idle'|'fm-keepalive capped-idle') exit 0 ;;
+      'fm-keepalive capped-active')
+        why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
+        ;;
+      *)
+        # No verdict: the exec died under us. Only suspicious when in-guest
+        # work was recently observed through the breadcrumb; a quiet death of
+        # an idle keeper is not a captain-facing event.
+        m=$(fm_backend_sbx_mtime "${turnend%.turn-ended}.guest-active") || exit 0
+        [ $(($(date +%s) - m)) -le "$FM_SBX_GUEST_ACTIVE_WINDOW" ] || exit 0
+        why="the VM's connection dropped while in-guest work was active"
+        ;;
+    esac
+    sleep "$FM_SBX_MIDTASK_STOP_SETTLE"
+    case "$(fm_backend_sbx_state "$name")" in
+      stopped|absent) printf '%s\n' "$why" > "$marker" 2>/dev/null || true ;;
+    esac
+    exit 0
+  ) </dev/null >/dev/null 2>&1 &
   return 0
 }
 
@@ -529,12 +639,16 @@ fm_backend_sbx_ensure_stack() {  # <target>
 # delivered text (a steer, or fm-spawn's launch command - the spawn's sends
 # dispatch through these same functions) starts a guest turn, and without a
 # pinned connection the auto-stop would kill that turn mid-work (see
-# fm_backend_sbx_keepalive). A non-fm-* name has no derivable id/signal
-# path, so no keeper - nothing host-side would ever see its turn end anyway.
+# fm_backend_sbx_keepalive). The recorded home= rides along so the keeper's
+# guest loop can watch the guest home's state/ for child-worker signal
+# advances; an absent meta simply skips that secondary probe. A non-fm-* name
+# has no derivable id/signal path, so no keeper - nothing host-side would
+# ever see its turn end anyway.
 fm_backend_sbx_send_keepalive() {  # <target>
-  local target=$1 id
+  local target=$1 id home
   id=$(fm_backend_sbx_task_of_target "$target") || return 0
-  fm_backend_sbx_keepalive "$(fm_backend_sbx_name_of_target "$target")" "$id"
+  home=$(fm_meta_get "$(fm_backend_sbx_state_dir)/$id.meta" home) || home=
+  fm_backend_sbx_keepalive "$(fm_backend_sbx_name_of_target "$target")" "$id" "$home"
 }
 
 fm_backend_sbx_send_key() {  # <target> <key> [expected-label]
