@@ -712,20 +712,22 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # declared FM_INHERITABLE_CONFIG item and the shared captain file become
 # symlinks onto the clone-mode RO source mount - the live host home the
 # convergence points (spawn, bootstrap sweep, fm-config-push) already write -
-# so every host-side push is guest-visible immediately, stopped VMs included,
-# at zero sbx CLI calls, and a primary-cleared item reads ABSENT through its
-# dangling link ([ -f ] fails), byte-for-byte the inherit lib's absence
-# mirroring. The .fm-secondmate-home identity marker is the one residue seeded
-# as a REGULAR file (fm_root_is_secondmate_home hard-refuses [ -L ]), content
-# = the task id. .fm-sbx-signals-dir is a second regular-file marker, content
-# = the signal-bridge dir's absolute path: the guest user is `agent`, not the
-# host user, so the guest cannot reconstruct FM_SBX_SIGNALS_ROOT/<id> from its
-# own $HOME - this marker is how bin/fm-backlog-ingest.sh (and any future
-# guest-side signal-bridge consumer) finds its own bind mount without
-# guessing. One idempotent exec; spawn runs it after the brief seed, and
-# resurrection re-runs it before relaunching the agent - healing guest-side
-# link/marker damage (self-blinding only, the mount stays RO) and picking up
-# FM_INHERITABLE_CONFIG items declared since spawn.
+# so every host-side convergence point keeps the guest's inheritance target in
+# one place. The RO source mount is not a runtime delivery channel; it can lag
+# host writes after VM lifecycle changes, so proven-live handoff data rides the
+# signal bridge instead (docs/sbx-backend.md). A primary-cleared item reads
+# ABSENT through its dangling link ([ -f ] fails), byte-for-byte the inherit
+# lib's absence mirroring. The .fm-secondmate-home identity marker is the one
+# residue seeded as a REGULAR file (fm_root_is_secondmate_home hard-refuses
+# [ -L ]), content = the task id. .fm-sbx-signals-dir is a second regular-file
+# marker, content = the signal-bridge dir's absolute path: the guest user is
+# `agent`, not the host user, so the guest cannot reconstruct
+# FM_SBX_SIGNALS_ROOT/<id> from its own $HOME - this marker is how
+# bin/fm-backlog-ingest.sh (and any future guest-side signal-bridge consumer)
+# finds its own bind mount without guessing. One idempotent exec; spawn runs it
+# after the brief seed, and resurrection re-runs it before relaunching the
+# agent - healing guest-side link/marker damage (self-blinding only, the mount
+# stays RO) and picking up FM_INHERITABLE_CONFIG items declared since spawn.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
   local name=$1 home_abs=$2 id=$3 signals_dir=$4
   # shellcheck disable=SC2016  # single quotes deliberate: $1..$5 and the loop expand in the guest sh, not here
