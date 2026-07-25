@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# fm-marker-lib.sh - the from-firstmate request marker.
+# fm-marker-lib.sh - the from-firstmate marker.
 #
-# When the MAIN firstmate relays a work request to one of its SECONDMATES,
+# When the MAIN firstmate relays a request or notice to one of its SECONDMATES,
 # bin/fm-send.sh prepends this marker to the message text. A secondmate is itself
 # a firstmate running in its own home, so without a marker it treats every
 # incoming fm-send/tmux line as if its captain typed it and answers
 # CONVERSATIONALLY in its own chat. But the main firstmate never reads a
 # secondmate's chat: the only main<-secondmate wakeup channel is the status file
 # (charter escalation), optionally pointing to a doc for detail. A detailed
-# chat-only reply therefore strands, unseen.
+# chat-only reply therefore strands, unseen when a reply is required.
 #
-# The marker lets the secondmate tell its supervisor's request apart from a
+# The marker lets the secondmate tell its supervisor's traffic apart from a
 # message the captain typed directly into its pane:
 #
-#   - marked   -> a from-firstmate request. Do the work, then respond via the
-#                 STATUS/ESCALATION path (a status line for a terse result, or a
-#                 doc plus a status pointer - the scout-report pattern - for a
-#                 detailed one) so it surfaces to the main firstmate via the
-#                 watcher signal. It MUST NOT respond only in chat.
+#   - marked   -> from-firstmate traffic. A corr=<id> token means a request
+#                 whose answer must use the STATUS/ESCALATION path (a status
+#                 line for a terse result, or a doc plus a status pointer - the
+#                 scout-report pattern - for a detailed one) so it surfaces to
+#                 the main firstmate via the watcher signal. No corr token means
+#                 a fire-and-forget notice.
 #   - unmarked -> the captain typing directly. Stay conversational, exactly as
 #                 before: authoritative captain intervention.
 #
@@ -41,8 +42,8 @@
 # captain would not type it by hand. This is the part the secondmate's LLM reads.
 FM_FROMFIRST_LABEL='[fm-from-firstmate]'
 
-# The full marker fm-send prepends to a from-firstmate request: the label, then
-# U+2063 INVISIBLE SEPARATOR (UTF-8 e2 81 a3). The request text follows it.
+# The full marker fm-send prepends to from-firstmate traffic: the label, then
+# U+2063 INVISIBLE SEPARATOR (UTF-8 e2 81 a3). The message text follows it.
 FM_FROMFIRST_SEPARATOR=$'\xE2\x81\xA3'
 FM_FROMFIRST_MARK="${FM_FROMFIRST_LABEL}${FM_FROMFIRST_SEPARATOR}"
 
