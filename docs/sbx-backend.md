@@ -216,7 +216,7 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
 
 Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm).
 
-The pending-reply missed-report guard is a second host-side consumer of the same signal-bridge symlinks: `bin/fm-pending-reply-lib.sh` follows `state/<id>.status` to rescan for correlated replies and follows `state/<id>.turn-ended` to prove turn completion for its recovery and escalation legs, with zero sbx CLI calls (contract in that library's header).
+The pending-reply missed-report guard is a second host-side consumer of the same signal-bridge symlinks: `bin/fm-pending-reply-lib.sh` follows `state/<id>.status` to rescan for correlated replies and follows `state/<id>.turn-ended` to prove turn completion with zero sbx CLI calls (contract in that library's header); its recovery delivery preflight is covered by "Caller reachability" above.
 
 ## Teardown (`fm_backend_sbx_unlanded_work`)
 
