@@ -1422,17 +1422,10 @@ if [ "$BACKEND" = sbx ]; then
   # The GOTMPDIR export below lands in the guest pane; create its target
   # inside the VM (the host-side mkdir above cannot reach the guest's /tmp).
   sbx exec "$W" -- mkdir -p "$TASK_TMP/gotmp" || true
-  # Guest-home provisioning (agent-dotfiles
-  # docs/firstmate-sbx-guest-home-provisioning.md §4): the rest of the home's
-  # private surface becomes a READ PATH onto the clone-mode RO source mount -
-  # each inherited config/ item and the shared captain file as symlinks, so
-  # every later host-side convergence push (bootstrap sweep, fm-config-push)
-  # writes one host-side target. The RO source mount is only the inheritance
-  # read path; runtime data that must be proven live rides the signal bridge
-  # because the mount can lag after VM lifecycle changes (docs/sbx-backend.md).
-  # A cleared item reads ABSENT through its dangling link. The
-  # .fm-secondmate-home identity marker is seeded as a regular file. One
-  # idempotent exec, shared with resurrection's re-assert (bin/backends/sbx.sh).
+  # Guest-home provisioning: one idempotent exec, shared with resurrection's
+  # re-assert (bin/backends/sbx.sh). It rebuilds the inherited read path and
+  # markers owned by docs/sbx-backend.md "Guest-home provisioning", and also
+  # plants the shell-profile env snippet owned by "Guest shell-profile env".
   fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" "$SIG_DIR" || {
     echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
     exit 1
