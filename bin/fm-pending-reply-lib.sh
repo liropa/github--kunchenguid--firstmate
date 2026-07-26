@@ -1242,7 +1242,7 @@ fm_pending_reply_tick() {  # <state-dir>
       continue
     fi
     case "$phase" in
-      recovery_failed|recovery_unknown)
+      recovery_failed|recovery_unknown|recovery_deferred)
         fm_pending_reply_tick_one "$state" "$corr" unknown "" || true
         continue
         ;;

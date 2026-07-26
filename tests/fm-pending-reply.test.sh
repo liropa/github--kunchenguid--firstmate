@@ -33,6 +33,8 @@
 #  19. A recovery with no route from this context is deferred with its one
 #      attempt unspent, never recorded as a delivery, escalated exactly once as
 #      undeliverable, and still resolvable by a late correlated reply
+#  20. Scanner retries deferred recovery escalation publication once, without
+#      duplicate undeliverable lines
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -351,6 +353,44 @@ test_escalation_publication_failure_retries() {
   escalations=$(grep -Fc "pending-reply-id=$corr" "$target")
   [ "$escalations" = 1 ] || fail "successful retry should publish exactly once, got $escalations"
   pass "failed escalation publication remains retryable and publishes once"
+}
+
+test_deferred_escalation_publication_failure_retries_through_scanner() {
+  local home state corr rec target escalations
+  home=$(setup_parent deferred-escalation-retry)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4550
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "retry deferred escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase recovery_deferred \
+    || fail "failed to set deferred phase"
+  fm_pending_reply_set "$rec" recovery_deferred_epoch 4550 \
+    || fail "failed to set deferred epoch"
+  fm_pending_reply_set "$rec" recovery_defer_reason "transport-unreachable-from-watcher" \
+    || fail "failed to set defer reason"
+  target="$state/deferred-escalation-target"
+  mkdir -p "$target"
+  fm_pending_reply_set "$rec" parent_status "$target" \
+    || fail "failed to set deferred escalation target"
+
+  fm_pending_reply_tick "$state" || fail "scanner tick should not error"
+  [ "$(phase_of "$state" "$corr")" = recovery_deferred ] \
+    || fail "publication failure must leave deferred escalation retryable"
+
+  rmdir "$target"
+  fm_pending_reply_tick "$state" || fail "scanner retry should not error"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "scanner retry should commit deferred escalation"
+  escalations=$(grep -Fc "pending-reply-recovery-undeliverable:" "$target")
+  [ "$escalations" = 1 ] \
+    || fail "scanner retry should publish one undeliverable line, got $escalations"
+
+  fm_pending_reply_tick "$state" || fail "post-escalation scanner tick should not error"
+  escalations=$(grep -Fc "pending-reply-recovery-undeliverable:" "$target")
+  [ "$escalations" = 1 ] \
+    || fail "post-escalation scanner tick must not duplicate the line, got $escalations"
+  pass "scanner retries deferred escalation publication exactly once"
 }
 
 test_transport_success_is_not_reply_success() {
@@ -1367,6 +1407,7 @@ test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
+test_deferred_escalation_publication_failure_retries_through_scanner
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
