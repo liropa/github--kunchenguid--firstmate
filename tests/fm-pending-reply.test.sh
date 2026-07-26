@@ -833,6 +833,8 @@ test_tick_end_to_end_missed_then_escalate() {
   mkdir -p "$sm_home/state"
   hook_log="$TMP_ROOT/tick-hook.log"
   : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_hook() { printf 'recovered\n' >> "$hook_log"; }
   export -f recovery_hook
   # Reset hook and clock fixtures after isolated subshell tests.
