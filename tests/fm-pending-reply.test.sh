@@ -24,6 +24,10 @@
 #  13. Absent or unreadable sbx turn-ended signal leaves completion unset
 #  14. Pre-upgrade stale sbx records retire once, visibly, without a nag burst
 #  15. fm-send --notice marks a secondmate message without an expectation
+#  16. A correlated reply behind a symlinked (signal-bridge) parent status file
+#      still resolves after the first scan (stat -L rescan gate)
+#  17. A ps-less environment (sandboxed watcher) still sends one recovery with
+#      a self-declared sender identity and escalates once
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -201,21 +205,26 @@ test_recovery_attempt_is_never_reinjected() {
     || fail "failed recovery delivery should escalate explicitly"
   grep -Fq "pending-reply-recovery-delivery-failed:" "$state/hibit.status" \
     || fail "failed recovery escalation should name delivery failure"
-  live_corr=$(fm_pending_reply_create "$home" "$state" hibit "live recovery")
-  fm_pending_reply_mark_delivered "$state" "$live_corr"
-  fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
-  live_rec=$(fm_pending_reply_path "$state" "$live_corr")
+  # The live-sender leg needs a re-verifiable ps identity by nature; in a
+  # ps-less environment (a sandboxed watcher) an in-flight sender is by design
+  # not provably alive, so this leg only runs where ps identity is computable.
   live_pid=${BASHPID:-$$}
-  live_identity=$(fm_pending_reply_pid_identity "$live_pid") \
-    || fail "live sender identity should be observable"
-  fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
-  fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
-  fm_pending_reply_set "$live_rec" recovery_sender_identity "$live_identity" \
-    || fail "live sender identity commit failed"
-  fm_pending_reply_set "$live_rec" phase recovery_sending || fail "live sending phase failed"
-  fm_pending_reply_tick_one "$state" "$live_corr" unknown || fail "live recovery tick failed"
-  [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
-    || fail "live recovery must remain in progress without elapsed-time inference"
+  if live_identity=$(fm_pending_reply_pid_identity "$live_pid"); then
+    live_corr=$(fm_pending_reply_create "$home" "$state" hibit "live recovery")
+    fm_pending_reply_mark_delivered "$state" "$live_corr"
+    fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
+    live_rec=$(fm_pending_reply_path "$state" "$live_corr")
+    fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
+    fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
+    fm_pending_reply_set "$live_rec" recovery_sender_identity "$live_identity" \
+      || fail "live sender identity commit failed"
+    fm_pending_reply_set "$live_rec" phase recovery_sending || fail "live sending phase failed"
+    fm_pending_reply_tick_one "$state" "$live_corr" unknown || fail "live recovery tick failed"
+    [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
+      || fail "live recovery must remain in progress without elapsed-time inference"
+  else
+    printf '# skip: live-sender identity leg needs a ps-capable environment\n'
+  fi
   corr=$(fm_pending_reply_create "$home" "$state" hibit "crashed recovery")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_pending_reply_mark_turn_completed "$state" "$corr" request
@@ -1136,6 +1145,96 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_symlinked_parent_status_resolves_after_first_scan() {
+  local home state corr status target rec
+  home=$(setup_parent symlink-resolve)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=8000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "signal bridge reply")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  # sbx shape: the parent status file is a symlink onto the signal bridge and
+  # only the TARGET ever changes (bin/fm-spawn.sh's sbx branch). A link-based
+  # rescan signature never changes, so a reply landing after the first scan
+  # would stay invisible forever.
+  status="$state/hibit.status"
+  target="$home/signals-hibit.status"
+  printf 'working: unrelated earlier line\n' > "$target"
+  ln -s "$target" "$status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "unrelated symlinked status must not resolve"
+  fi
+  printf 'done: corr=%s bridge reply landed\n' "$corr" >> "$target"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "correlated reply behind a status symlink should resolve"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "phase should be resolved, got $(phase_of "$state" "$corr")"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+    || fail "resolved_via should be status"
+  pass "correlated reply resolves through a symlinked parent status file"
+}
+
+test_psless_recovery_sends_and_escalates_once() {
+  local home state corr rec hook_log lines nops saved_path
+  home=$(setup_parent psless-recovery)
+  state="$home/state"
+  hook_log="$TMP_ROOT/psless-recovery-hook.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=9000
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() {
+    printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
+  }
+  export -f recovery_hook
+  # Reset the hook fixture after isolated subshell tests.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+  # The live watcher's sandbox denies exec of ps entirely; shadow ps with a
+  # failing stub so the suite reproduces that environment even when run from
+  # a ps-capable shell.
+  nops=$(fm_fakebin "$TMP_ROOT/psless")
+  cat > "$nops/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$nops/ps"
+  saved_path=$PATH
+  PATH="$nops:$PATH"
+  if fm_pending_reply_pid_identity "${BASHPID:-$$}" >/dev/null 2>&1; then
+    PATH=$saved_path
+    fail "ps stub should make pid identity uncomputable"
+  fi
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "psless recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "psless tick should not error"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -n "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+    || fail "psless recovery must still commit an attempt"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "phase should be recovery_sent, got $(phase_of "$state" "$corr")"
+  case "$(fm_pending_reply_get "$rec" recovery_sender_identity)" in
+    'flock-identity pid='*) : ;;
+    *) fail "psless sender identity should be the self-declared marker" ;;
+  esac
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "expected exactly one psless recovery send, got $lines"
+  # Recovery turn completes with no correlated reply: escalate exactly once.
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "psless escalation tick should not error"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "phase should be escalated, got $(phase_of "$state" "$corr")"
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "post-escalation tick should not error"
+  [ "$(grep -c 'pending-reply-missed:' "$state/hibit.status")" = 1 ] \
+    || fail "escalation must publish exactly once"
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "escalation must not re-send recovery, got $lines"
+  PATH=$saved_path
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "ps-less environment still sends one recovery and escalates once"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1164,5 +1263,7 @@ test_sbx_turnend_absent_or_unreadable_stays_unknown
 test_sbx_stale_records_reconcile_once_visibly
 test_fm_send_notice_marks_without_expectation
 test_failed_send_discards_undelivered_expectation
+test_symlinked_parent_status_resolves_after_first_scan
+test_psless_recovery_sends_and_escalates_once
 
 printf 'ok - all pending-reply tests passed\n'
