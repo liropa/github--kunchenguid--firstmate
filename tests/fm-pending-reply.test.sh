@@ -28,6 +28,11 @@
 #      still resolves after the first scan (stat -L rescan gate)
 #  17. A ps-less environment (sandboxed watcher) still sends one recovery with
 #      a self-declared sender identity and escalates once
+#  18. Only an unreadable sbx inventory blocks delivery - a stopped guest is as
+#      deliverable as a running one, so the CALLER's route is what gates
+#  19. A recovery with no route from this context is deferred with its one
+#      attempt unspent, never recorded as a delivery, escalated exactly once as
+#      undeliverable, and still resolvable by a late correlated reply
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1060,7 +1065,11 @@ test_sbx_stale_records_reconcile_once_visibly() {
     fm_pending_reply_set "$(fm_pending_reply_path "$state" "$crash_window")" reconciled_epoch 13005
     printf 'done corr=%s: answered long ago\n' "$answered" >> "$state/hibit.status"
     # The pane-home record still walks the observation path; keep it inert.
+    # Invoked indirectly by the code under test.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { printf 'unknown'; }
+    # Invoked indirectly by the code under test.
+    # shellcheck disable=SC2329
     fm_backend_capture() { return 1; }
     # New signal activity that would have burst-nagged all stale records.
     printf 'x' >> "$sig_dir/hibit.turn-ended"
@@ -1237,6 +1246,119 @@ SH
   pass "ps-less environment still sends one recovery and escalates once"
 }
 
+# make_sbx_stub <dir> <ls-rc> <status>: a fake `sbx` (plus the real jq the
+# adapter's inventory parser needs) whose `ls --json` either fails with <ls-rc>
+# - the sandboxed-watcher condition, where sbx cannot reach its daemon socket,
+# decides no daemon is running and gives up trying to start its own - or
+# answers cleanly. A <status> of `absent` answers with an EMPTY inventory,
+# which is what a confirmed absence actually looks like on the wire; anything
+# else answers with fm-hibit in that state. Local to this suite for the same
+# reason make_stubs is: the deliverability gate only ever exercises `sbx ls`.
+make_sbx_stub() {  # <dir> <ls-rc> <running|stopped|absent> -> fakebin
+  local dir=$1 rc=$2 status=$3 fb body
+  fb=$(fm_fakebin "$dir")
+  ln -sf "$(command -v jq)" "$fb/jq"
+  if [ "$status" = absent ]; then
+    body='{"sandboxes":[]}'
+  else
+    body='{"sandboxes":[{"name":"fm-hibit","id":"fake","agent":"shell","status":"'$status'","workspaces":["/w"]}]}'
+  fi
+  cat > "$fb/sbx" <<SH
+#!/usr/bin/env bash
+set -u
+[ "\${1:-}" = ls ] || exit 0
+[ "$rc" = 0 ] || exit $rc
+printf '%s\n' '$body'
+SH
+  chmod +x "$fb/sbx"
+  printf '%s\n' "$fb"
+}
+
+# The counterfactual matrix behind the deferral gate, run at the layer below a
+# live VM. Only an UNREADABLE inventory means this context has no route; a
+# stopped sandbox is as deliverable as a running one (`sbx exec` auto-starts
+# it), and a confirmed-absent one is a target problem the send path already
+# reports. This is what proves the caller's sandbox - not the guest's power
+# state - is the load-bearing condition.
+test_sbx_transport_reachability_matrix() {
+  local home state fb saved_path
+  home=$(setup_parent sbx-reach)
+  state="$home/state"
+  mkdir -p "$home/sm/state"
+  fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sbx:fm-hibit"
+  printf 'backend=sbx\n' >> "$state/hibit.meta"
+  saved_path=$PATH
+  for case_ in "0 running deliverable" "0 stopped deliverable" \
+    "0 absent deliverable" "1 running blocked"; do
+    # shellcheck disable=SC2086
+    set -- $case_
+    fb=$(make_sbx_stub "$TMP_ROOT/sbx-reach-$1-$2" "$1" "$2")
+    PATH="$fb:$saved_path"
+    if fm_pending_reply_transport_deliverable "$state" hibit; then
+      [ "$3" = deliverable ] || fail "ls-rc=$1 status=$2 should NOT be deliverable"
+    else
+      [ "$3" = blocked ] || fail "ls-rc=$1 status=$2 should be deliverable"
+    fi
+    PATH=$saved_path
+  done
+  pass "only an unreadable sbx inventory blocks delivery; a stopped VM does not"
+}
+
+# The live defect (issue #27), reproduced end to end: the watcher's context
+# cannot reach the sbx daemon, so the recovery send can never leave the host.
+# The guard must not spend its one recovery attempt on that send, must not
+# record a delivery it did not make, and must still say so out loud exactly
+# once - naming a missing route rather than a failed delivery.
+test_unreachable_transport_defers_recovery_unspent() {
+  local home state corr rec fb saved_path status_file
+  home=$(setup_parent sbx-defer)
+  state="$home/state"
+  status_file="$state/hibit.status"
+  mkdir -p "$home/sm/state"
+  fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sbx:fm-hibit"
+  printf 'backend=sbx\n' >> "$state/hibit.meta"
+  export FM_PENDING_REPLY_NOW=9500
+  # No FM_PENDING_REPLY_SEND_HOOK on purpose: the real delivery path must run,
+  # because the hook is exactly what masked this leg from the suite before.
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "unreachable recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  saved_path=$PATH
+  fb=$(make_sbx_stub "$TMP_ROOT/sbx-defer-bin" 1 running)
+  PATH="$fb:$saved_path"
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "defer tick should not error"
+  PATH=$saved_path
+  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+    || fail "an undeliverable recovery must not spend the record's one attempt"
+  [ -z "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" ] \
+    || fail "no delivery was made, so no delivery outcome may be recorded"
+  [ -n "$(fm_pending_reply_get "$rec" recovery_deferred_epoch)" ] \
+    || fail "deferral must be recorded durably"
+  [ -n "$(fm_pending_reply_get "$rec" recovery_defer_reason)" ] \
+    || fail "deferral must record why there was no route"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "deferral must escalate, got $(phase_of "$state" "$corr")"
+  [ "$(grep -c 'pending-reply-recovery-undeliverable:' "$status_file")" = 1 ] \
+    || fail "deferral must publish the undeliverable escalation exactly once"
+  grep -q 'pending-reply-recovery-delivery-' "$status_file" \
+    && fail "a deferral must never be reported as a failed DELIVERY"
+  # Standing condition, so the expensive probe must not be re-spent per poll.
+  PATH="$fb:$saved_path"
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "second defer tick should not error"
+  PATH=$saved_path
+  [ "$(grep -c 'pending-reply-recovery-undeliverable:' "$status_file")" = 1 ] \
+    || fail "the undeliverable escalation must stay one-shot"
+  # Deferral is not a dead end: the reply the guard was waiting for still wins.
+  printf 'done: corr=%s handled it\n' "$corr" >> "$status_file"
+  export FM_PENDING_REPLY_NOW=9600
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "resolve tick should not error"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a late correlated reply must still resolve a deferred record"
+  unset FM_PENDING_REPLY_NOW
+  pass "unreachable transport defers the recovery unspent and escalates once"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1267,5 +1389,7 @@ test_fm_send_notice_marks_without_expectation
 test_failed_send_discards_undelivered_expectation
 test_symlinked_parent_status_resolves_after_first_scan
 test_psless_recovery_sends_and_escalates_once
+test_sbx_transport_reachability_matrix
+test_unreachable_transport_defers_recovery_unspent
 
 printf 'ok - all pending-reply tests passed\n'

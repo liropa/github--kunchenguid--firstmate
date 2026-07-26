@@ -34,7 +34,13 @@
 #                           (empty until delivery; delivery never resolves)
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
-#                           escalated | resolved | reconciled_stale
+#                           recovery_deferred | escalated | resolved |
+#                           reconciled_stale
+#                           recovery_failed means a send was made and did not
+#                           land; recovery_deferred means no send was made at
+#                           all because this context had no route to the
+#                           endpoint. Both escalate; only the first consumed the
+#                           record's one recovery attempt.
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
 #   request_turnend_signature=  size:mtime signature of state/<task_id>.turn-ended
@@ -53,6 +59,11 @@
 #                           unavailable (fm_pending_reply_sender_identity)
 #   recovery_sent_epoch=
 #   recovery_delivery_outcome=
+#   recovery_deferred_epoch= when the recovery send was deferred UNATTEMPTED
+#                           because this context had no route to the endpoint;
+#                           recovery_attempted_epoch stays empty, so the one
+#                           recovery is still owed rather than spent
+#   recovery_defer_reason=  short token naming that no-route condition
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
@@ -739,10 +750,40 @@ fm_pending_reply_recovery_message() {  # <record-path>
   printf '%s' "$msg"
 }
 
+# Can a recovery steer issued from THIS context actually reach the task's
+# endpoint? Answers 1 only on a demonstrated environmental no-route, so an
+# unknown backend, a missing meta, or a test hook all stay deliverable and the
+# send is attempted exactly as before.
+# The tick runs on a sandboxed watcher that is denied the host transport
+# daemons, and every sbx delivery primitive funnels through an inventory read
+# that fails there: the send cannot leave the host regardless of whether the
+# guest VM is running or stopped. Asking first is what keeps the single
+# recovery attempt from being spent on a send with no route.
+# Cost discipline: the sbx probe costs ~10s when denied, so this is called ONCE
+# per record, after every eligibility gate has already passed - never per poll.
+# Idle supervision keeps its structurally-zero-CLI-calls property.
+fm_pending_reply_transport_deliverable() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2 meta backend target
+  [ -z "${FM_PENDING_REPLY_SEND_HOOK:-}" ] || return 0
+  meta="$state/${task_id}.meta"
+  [ -f "$meta" ] || return 0
+  backend=$(fm_backend_of_meta "$meta") || return 0
+  [ -n "$backend" ] || return 0
+  target=$(fm_backend_target_of_meta "$meta") || target=
+  fm_backend_transport_reachable "$backend" "$target" 2>/dev/null
+}
+
 # Deliver the recovery message once. Caller must hold phase awaiting_report with
 # turn completed and grace elapsed. Uses FM_PENDING_REPLY_SEND_HOOK when set
 # (tests), otherwise invokes fm-send with FM_PENDING_REPLY_EXISTING_CORR so a
 # second expectation is not created.
+# When this context has no route to the endpoint the send is DEFERRED, not
+# attempted: the record keeps its unspent recovery attempt, records why, and
+# escalates once so the delivery is owed to a context that can reach the
+# transport. Deferral is deliberately one-shot and terminal-by-escalation - the
+# missing route is a standing property of the watcher's sandbox, not a
+# transient, so retrying would re-spend a ~10s probe every poll forever while
+# never succeeding. A late correlated report still resolves the record normally.
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
@@ -767,6 +808,14 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   [ "$age" -ge "$grace" ] || return 1
   task_id=$(fm_pending_reply_get "$rec" task_id)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
+  # Last gate before the attempt is spent: no route means defer, never a
+  # claimed-and-failed delivery for a message that was never put on the wire.
+  if ! fm_pending_reply_transport_deliverable "$state" "$task_id"; then
+    fm_pending_reply_set "$rec" recovery_deferred_epoch "$(fm_pending_reply_now)" || return 1
+    fm_pending_reply_set "$rec" recovery_defer_reason "transport-unreachable-from-watcher" || return 1
+    fm_pending_reply_set "$rec" phase recovery_deferred || return 1
+    return 1
+  fi
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
   sender_identity=$(fm_pending_reply_sender_identity "$sender_pid") || return 1
@@ -905,7 +954,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
       completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
       [ -n "$completed" ] || return 1
       ;;
-    delivery_unknown|recovery_failed|recovery_unknown) ;;
+    delivery_unknown|recovery_failed|recovery_unknown|recovery_deferred) ;;
     *) return 1 ;;
   esac
   # Resolve wins if a late report arrived between completion and this call.
@@ -924,6 +973,13 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
       ;;
     recovery_failed|recovery_unknown)
       payload="pending-reply-recovery-delivery-${outcome}: task=${task_id} pending-reply-id=${corr} request=${summary}"
+      ;;
+    recovery_deferred)
+      # Distinct from a failed delivery on purpose: nothing was sent, so the
+      # repost is still owed and must be made from a context that can reach the
+      # endpoint. Naming the reason keeps the operator from reading this as a
+      # sick secondmate.
+      payload="pending-reply-recovery-undeliverable: task=${task_id} pending-reply-id=${corr} reason=$(fm_pending_reply_get "$rec" recovery_defer_reason) request=${summary}"
       ;;
     *) payload="pending-reply-missed: task=${task_id} pending-reply-id=${corr} request=${summary}" ;;
   esac
@@ -1105,7 +1161,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
       return 0
       ;;
     recovery_sending) return 0 ;;
-    recovery_failed|recovery_unknown)
+    recovery_failed|recovery_unknown|recovery_deferred)
       fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
       return 0
       ;;
@@ -1124,7 +1180,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   fi
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
-    recovery_sent|recovery_failed|recovery_unknown)
+    recovery_sent|recovery_failed|recovery_unknown|recovery_deferred)
       fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
       ;;
   esac

@@ -136,7 +136,7 @@ Verified against the fixtures in `tests/fm-sbx-tracked-sync.test.sh` (the fake `
 Delivery is `sbx exec <name> -- tmux send-keys` into the in-guest `fm:fm-<id>` pane.
 Because auto-stop kills the guest process tree, the send path owns the resurrection sequence:
 
-1. Refuse a confirmed-absent/unreadable sandbox.
+1. Refuse a confirmed-absent sandbox, or one whose inventory this caller cannot read (the two are reported apart - see "Caller reachability" below).
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
 3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), then new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
@@ -157,6 +157,31 @@ The keep-alive loop, its release/pin decisions, and the wrapper's marker classif
 In-guest daemons a workflow needs (e.g. the no-mistakes daemon) do not come back on VM start; the resumed agent restarts them on demand - its brief owns that knowledge.
 
 Triage protection (design doc §7.3): `bin/fm-crew-state.sh`'s `pane_readable` uses the state probe for sbx (a stopped sandbox is present, classified from the status log), and the adapter's capture refuses outright unless the sandbox is already running - so routine triage can never churn an idle-stopped VM.
+
+### Caller reachability (`fm_backend_sbx_transport_reachable`)
+
+Steering requires the caller to reach the **sbx daemon**, and not every firstmate context can.
+Every primitive above funnels through `fm_backend_sbx_ensure_stack`, whose first act is the `sbx ls --json` inventory read, so a caller with no route cannot steer a *running* sandbox any more than a stopped one.
+Reachability is therefore a property of the caller, never of the guest's power state.
+
+Verified on this host 2026-07-26 (`sbx ls --json` from inside a script, sandboxed vs not):
+
+```
+sandboxed:   rc=1  Starting sandboxd daemon...
+                   Waiting for the previous sandboxd to exit...
+                   ERROR: ensure daemon: previous sandboxd (PID 89025) did not exit within 10s
+unsandboxed: rc=0  {"sandboxes":[{"name":"fm-agent-dotfiles",...,"status":"stopped"}]}
+```
+
+Denied the daemon socket, `sbx` concludes no daemon is running, tries to start its own, finds the real one's pid file, and gives up after ~10 s.
+The agent-dotfiles sandbox policy lists `sbx` in `excludedCommands`, but that exempts only **top-level** commands - `sbx` nested inside `bin/fm-*.sh` stays sandboxed, which is exactly how the watcher calls it.
+The same denial shape applies to the tmux backend's server socket (`/private/tmp/tmux-501/default`, `Operation not permitted`), so this is a general property of the sandboxed watcher context rather than an sbx quirk.
+
+`fm_backend_sbx_transport_reachable` reports that route: a **confirmed absence is reachable** (the inventory answered; the target is simply gone), and only an unreadable inventory is unreachable.
+`ensure_stack` reports the two apart, because they need opposite operator responses - recreate the sandbox, versus re-issue the steer from a context that can reach the daemon.
+
+The probe costs ~10 s when denied, so callers must spend it only when they are about to steer, never per poll: idle supervision keeps its structurally-zero-sbx-CLI-calls property.
+`bin/fm-pending-reply-lib.sh`'s recovery leg is the first caller - it asks once, after every eligibility gate has passed, and **defers** an unroutable recovery instead of spending the record's single attempt on a send that cannot leave the host (fork issue #27).
 
 ## Live verification status (codex rig 2026-07-19: adf-codex:v2; claude rig + 5-secondmate soak 2026-07-20: adf-claude:v3; scratch primary + plain-clone homes)
 
@@ -229,6 +254,7 @@ Verified only against the fixtures in `tests/fm-backlog-handoff-sbx.test.sh`, `t
 - **Keep-alive covers only windows where a keeper is armed** - pins are created at delivery (launch and steers) and released when the guest goes genuinely idle, so in-guest child work and guest-initiated turns are protected only while at least one keeper from a prior delivery is alive and under its cap ("Steering and resurrection" above). Guest work that starts after every keeper has released or capped still dies with the ~45-100 s post-disconnect stop; the mid-task-stop alarm now names that outcome instead of leaving silence, but does not prevent it. The auto-stop grace is Docker's heuristic and may change under us; revisit if sbx grows a keep-alive/idle knob.
 - **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
 - **Projects-bearing homes stay refused at spawn** until an in-guest re-clone story exists (the remaining deferral from the guest-home provisioning v2 scope; the other half - tracked files frozen at spawn HEAD - is closed by "Tracked-file sync" above, after the 2026-07-24 staleness evidence showed it biting).
+- **The sandboxed watcher cannot steer a secondmate at all** - it has no route to the sbx daemon ("Caller reachability" above), so no automatic recovery, nudge, or repost it wants to send can leave the host, whatever the guest's power state. The pending-reply guard now defers those sends unspent and escalates them as owed rather than reporting a delivery it never made, but the delivery itself still has to come from a context that can reach the daemon. Closing this needs a sanctioned route for nested `sbx` calls from watcher-context scripts, which lives in the agent-dotfiles sandbox policy, not here; `excludedCommands` cannot supply it because it exempts only top-level commands.
 - **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). The beacon's stranding alarm (above) now names the pattern for the captain; the recovery itself is still manual.
 
 ## Security posture

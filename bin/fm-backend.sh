@@ -581,6 +581,27 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_transport_reachable: 0 when a steer issued from THIS process
+# context could reach the backend's control plane, 1 when it demonstrably could
+# not. This asks about the CALLER's route, not the target's health: a
+# confirmed-absent target is still "reachable" (the control plane answered), so
+# callers keep their existing absent/dead handling untouched.
+# It exists because an unroutable caller must not spend a one-shot delivery on a
+# send that cannot leave the host - see fm-pending-reply-lib.sh's recovery leg,
+# which defers instead of burning its single recovery attempt.
+# Backends that steer through a host daemon socket can answer this; the default
+# is REACHABLE, so a backend without a probe keeps attempting exactly as before
+# and no unproven backend is newly held back. Probes may be expensive (sbx's
+# costs ~10s when denied), so callers must only ask when about to steer.
+fm_backend_transport_reachable() {  # <backend> <target>
+  local backend=$1 target=${2-}
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    sbx) fm_backend_sbx_transport_reachable "$(fm_backend_sbx_name_of_target "$target")" ;;
+    *) return 0 ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
