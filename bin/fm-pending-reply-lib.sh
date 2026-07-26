@@ -25,7 +25,9 @@
 #   task_id=                secondmate task id in the parent home
 #   parent_home=            absolute parent FM_HOME
 #   parent_status=          absolute path of parent state/<task_id>.status
-#   parent_status_scan_signature=
+#   parent_status_scan_signature=  rescan gate signature of parent_status
+#                           (fm_pending_reply_file_signature owns the stat -L
+#                           symlink semantics)
 #   request_summary=        short sanitized summary (no secrets by design)
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
@@ -46,7 +48,9 @@
 #   reconciled_reported_epoch= when the stale retirement summary was published
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
-#   recovery_sender_identity=
+#   recovery_sender_identity=  ps identity of the committing sender, or a
+#                           self-declared flock-identity marker when ps is
+#                           unavailable (fm_pending_reply_sender_identity)
 #   recovery_sent_epoch=
 #   recovery_delivery_outcome=
 #   recovery_turn_seen_busy=
@@ -463,13 +467,20 @@ fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
   return 0
 }
 
+# Full-attribute change signature of a file, following symlinks (-L): an sbx
+# task's parent state/<id>.status is a symlink onto the signal-bridge mount
+# (bin/fm-spawn.sh's sbx branch), and the TARGET's change is what the rescan
+# gates must see - the link's own lstat attributes never change, which froze
+# try_resolve's rescan gate for any reply landing after the first scan.
+# -L is load-bearing exactly as in fm_pending_reply_turnend_signature below.
+# The [ -f ] gate follows symlinks, so a dangling link reports missing.
 fm_pending_reply_file_signature() {  # <path>
   local path=$1
   [ -f "$path" ] || { printf 'missing'; return 0; }
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
+    LC_ALL=C stat -L -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
   else
-    LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
+    LC_ALL=C stat -L -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
   fi
 }
 
@@ -758,7 +769,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
-  sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
+  sender_identity=$(fm_pending_reply_sender_identity "$sender_pid") || return 1
   fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" || return 1
   fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" || return 1
   fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" || return 1
@@ -793,11 +804,34 @@ fm_pending_reply_pid_identity() {  # <pid>
   printf '%s' "$identity"
 }
 
+# Identity string for a recovery sender: the inspectable ps lstart+command
+# line when this environment can exec ps, otherwise a self-declared
+# "flock-identity pid=<pid> nonce=<nonce>" marker in bin/fm-wake-lib.sh's
+# fallback format. A sandboxed watcher that cannot exec ps must still commit
+# and send recoveries - identity is crash-reconciliation bookkeeping, never a
+# send precondition. A self-declared marker is never re-verifiable, so
+# fm_pending_reply_sender_alive treats it as not provably alive and an
+# interrupted attempt keeps the fail-safe unknown -> escalate path.
+fm_pending_reply_sender_identity() {  # <pid>
+  local pid=$1 identity
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if identity=$(fm_pending_reply_pid_identity "$pid") && [ -n "$identity" ]; then
+    printf '%s' "$identity"
+    return 0
+  fi
+  printf 'flock-identity pid=%s nonce=%s' "$pid" "$(fm_pending_reply_new_id)"
+}
+
 fm_pending_reply_sender_alive() {  # <record-path>
   local rec=$1 pid expected actual
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
   [ -n "$expected" ] || return 1
+  # A self-declared ps-less identity can never be re-verified; report the
+  # sender as not provably alive so reconciliation escalates (fail-safe).
+  case "$expected" in
+    'flock-identity '*) return 1 ;;
+  esac
   actual=$(fm_pending_reply_pid_identity "$pid") || return 1
   [ "$actual" = "$expected" ]
 }
