@@ -298,7 +298,7 @@ fm_sbx_guest_env_source_line() {
 }
 
 fm_file_mode() {  # <path>
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
 # seed_debian_guest_user_home <dir>: a guest user $HOME shaped like the stock
