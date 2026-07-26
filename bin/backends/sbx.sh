@@ -867,9 +867,29 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # after the brief seed, and resurrection re-runs it before relaunching the
 # agent - healing guest-side link/marker damage (self-blinding only, the mount
 # stays RO) and picking up FM_INHERITABLE_CONFIG items declared since spawn.
+#
+# The same pass also plants the guest shell-profile env snippet
+# (docs/sbx-backend.md "Guest shell-profile env"). sbx plants
+# CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox creation, and the
+# claude agent does NOT pass it down to the processes it spawns - so an in-guest
+# daemon started by the agent (the no-mistakes daemon, observed live 2026-07-23)
+# comes up unauthenticated and 401s, while interactive sessions in the same VM
+# authenticate fine. The snippet re-supplies it at shell init, which is the only
+# seam a stripped child ever crosses. Three properties make that safe:
+#   - The value is a PLACEHOLDER, not a credential: the real token is swapped in
+#     host-side at the sbx proxy and never enters the VM (agent-dotfiles
+#     docs/docker-sandboxes-fit-assessment.md, evidence chain items 1 and 4), so
+#     persisting it to a guest file discloses nothing.
+#   - It is read from THIS exec's own guest env, never passed as an argument, so
+#     the value never reaches the host process table or any host-side log.
+#   - Assignment is `:=`, so an operator's own already-set value always wins,
+#     whatever the ordering.
+# The snippet is sourced from the TOP of each profile, ahead of the stock
+# Debian `~/.bashrc` early return for non-interactive shells - the failing case
+# is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
   local name=$1 home_abs=$2 id=$3 signals_dir=$4
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$5 and the loop expand in the guest sh, not here
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$5, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
   # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   sbx exec "$name" -- sh -c '
     home=$1 src=$2 id=$3 captain=$4 signals=$5; shift 5
@@ -880,9 +900,30 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     done
     ln -sfn "$src/$captain" "$captain" || exit 1
     rm -f .fm-secondmate-home || exit 1
-    printf "%s\n" "$id" > .fm-secondmate-home
+    printf "%s\n" "$id" > .fm-secondmate-home || exit 1
     rm -f .fm-sbx-signals-dir || exit 1
-    printf "%s\n" "$signals" > .fm-sbx-signals-dir
+    printf "%s\n" "$signals" > .fm-sbx-signals-dir || exit 1
+    tok=${CLAUDE_CODE_OAUTH_TOKEN:-}
+    case $tok in *[!A-Za-z0-9._:/+=-]*) tok= ;; esac
+    if [ -n "$tok" ] && [ -n "${HOME:-}" ]; then
+      snip=$HOME/.fm-sbx-env.sh
+      {
+        echo "# Managed by firstmate sbx guest provisioning; rewritten on every"
+        echo "# spawn and resurrection (docs/sbx-backend.md). Do not edit."
+        printf ": \"\${CLAUDE_CODE_OAUTH_TOKEN:=%s}\"\n" "$tok"
+        echo "export CLAUDE_CODE_OAUTH_TOKEN"
+      } > "$snip" && chmod 600 "$snip" 2>/dev/null
+      for f in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+        case $f in *.bash_profile) [ -f "$f" ] || continue ;; esac
+        [ -e "$f" ] || : > "$f"
+        grep -qF ".fm-sbx-env.sh" "$f" 2>/dev/null && continue
+        {
+          echo "if [ -r \"\$HOME/.fm-sbx-env.sh\" ]; then . \"\$HOME/.fm-sbx-env.sh\"; fi  # firstmate sbx guest env"
+          cat "$f"
+        } > "$f.fm-sbx-tmp" && mv -f "$f.fm-sbx-tmp" "$f"
+      done
+    fi
+    exit 0
   ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" $FM_INHERITABLE_CONFIG
 }
 

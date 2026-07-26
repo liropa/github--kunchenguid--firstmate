@@ -336,6 +336,149 @@ test_resurrection_reasserts_guest_home() {
   pass "send path: resurrection re-asserts the guest home's read path (links + marker) before relaunch"
 }
 
+# --- guest shell-profile env (docs/sbx-backend.md "Guest shell-profile env") -
+#
+# sbx plants CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox
+# creation, and the claude agent does not pass it down to the processes it
+# spawns - so an in-guest daemon the agent starts comes up unauthenticated
+# (401), while interactive sessions in the same VM authenticate fine. The
+# provisioning pass re-supplies it at shell init. These tests drive the real
+# callers and then measure what an AGENT-SPAWNED child actually inherits;
+# asserting that a line was written to a file would have passed before the bug
+# existed. The guest-user-home fixture and the agent-child probe are shared
+# with tests/fm-spawn-sbx.test.sh, so they live in tests/sbx-helpers.sh.
+
+# steer_with_guest_env <fakebin> <world> <home> <guest-user-home> [env k=v...]:
+# resurrect and steer sbx:fm-x, which is the REAL caller of the provisioning
+# pass (fm_backend_sbx_ensure_stack re-asserts it before relaunching the
+# agent). Driving the provisioning function directly would skip that wiring.
+steer_with_guest_env() {  # <fakebin> <world> <home> <guest-user-home> [env...]
+  local fb=$1 w=$2 home=$3 guest_user=$4
+  shift 4
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" "$@"
+}
+
+test_guest_profiles_reinject_placeholder_into_agent_children() {
+  local w fb home guest_user out
+  w=$(new_sbx_world guest-env); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data"
+  seed_debian_guest_user_home "$guest_user"
+
+  # Baseline: the fixture reproduces the failing case AND its filter. An agent
+  # child starts without the placeholder, and ~/.bashrc's early return really
+  # does swallow everything below it for such a child.
+  out=$(agent_child_var "$guest_user" bashrc)
+  [ "$out" = UNSET ] \
+    || fail "fixture baseline: an agent-spawned child must start with no placeholder, got '$out'"
+  out=$(agent_child_var "$guest_user" bashrc FM_TEST_OPERATOR_RC_MARKER)
+  [ "$out" = UNSET ] \
+    || fail "fixture baseline: the non-interactive early return must swallow anything below it, got '$out'"
+
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  # The regression itself: the same non-interactive, agent-spawned child now
+  # inherits the placeholder, which only happens if the snippet is sourced
+  # ABOVE the early return.
+  out=$(agent_child_var "$guest_user" bashrc)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "a non-interactive agent-spawned child must inherit the planted placeholder, got '$out'"
+  out=$(agent_child_var "$guest_user" login)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "a login shell must inherit the planted placeholder, got '$out'"
+  out=$(agent_child_var "$guest_user" posix)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "the snippet must parse and export under POSIX sh too, got '$out'"
+
+  # The operator's own profile content survives untouched, and the value never
+  # reaches a host-side log (it is read from the guest exec env, never passed
+  # as an argument).
+  assert_contains "$(cat "$guest_user/.bashrc")" "FM_TEST_OPERATOR_RC_MARKER" \
+    "the operator's existing ~/.bashrc content must be preserved"
+  assert_contains "$(cat "$guest_user/.profile")" "FM_TEST_OPERATOR_PROFILE_MARKER" \
+    "the operator's existing ~/.profile content must be preserved"
+  assert_not_contains "$(cat "$w/sbx.log")" "$SBX_FAKE_PLACEHOLDER" \
+    "the token value must never appear in a host-side command line or log"
+
+  pass "guest env: a non-interactive agent-spawned child inherits the planted placeholder"
+}
+
+test_guest_profile_seed_is_idempotent_and_yields_to_the_operator() {
+  local w fb home guest_user out n
+  w=$(new_sbx_world guest-env-idem); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data"
+  seed_debian_guest_user_home "$guest_user"
+  # An operator's own export, below where the snippet lands: it runs last and
+  # must therefore win, which is what the snippet's `:=` assignment buys.
+  printf 'export CLAUDE_CODE_OAUTH_TOKEN=operator-own-value\n' >> "$guest_user/.profile"
+
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" \
+    || fail "the first steer should succeed"
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" \
+    || fail "a re-provisioning steer should succeed"
+
+  for out in .bashrc .profile; do
+    n=$(grep -cF '.fm-sbx-env.sh' "$guest_user/$out")
+    [ "$n" -eq 1 ] \
+      || fail "re-provisioning must not append a second source line to ~/$out, found $n"
+  done
+
+  # An operator value already in the child's env is never overwritten...
+  # shellcheck disable=SC2016  # deliberate: the probe must expand in the CHILD shell, after ~/.bashrc ran
+  out=$(env HOME="$guest_user" CLAUDE_CODE_OAUTH_TOKEN=operator-env-value bash -c \
+    '. "$HOME/.bashrc"; printf "%s" "${CLAUDE_CODE_OAUTH_TOKEN-UNSET}"')
+  [ "$out" = operator-env-value ] \
+    || fail "an operator's already-set value must win over the planted placeholder, got '$out'"
+  # ...and neither is one the operator exports from their own profile.
+  out=$(agent_child_var "$guest_user" posix)
+  [ "$out" = operator-own-value ] \
+    || fail "an operator's own profile export must win over the planted placeholder, got '$out'"
+
+  pass "guest env: re-provisioning is idempotent and never fights the operator's own value"
+}
+
+test_guest_profile_seed_skips_absent_or_unsafe_values() {
+  local w fb home guest_user
+  w=$(new_sbx_world guest-env-skip); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data"
+  seed_debian_guest_user_home "$guest_user"
+
+  # No placeholder in the guest env (a template or agent type sbx plants
+  # nothing for): the profiles are left exactly as the operator had them.
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    || fail "a steer with no planted placeholder should still succeed"
+  [ ! -e "$guest_user/.fm-sbx-env.sh" ] \
+    || fail "no planted placeholder means no snippet file"
+  assert_not_contains "$(cat "$guest_user/.bashrc")" ".fm-sbx-env.sh" \
+    "no planted placeholder means no source line"
+
+  # A value outside the token charset is refused rather than interpolated: the
+  # snippet is shell source, so an unexpected value must never become code.
+  # shellcheck disable=SC2016  # deliberate: the injection attempt must stay literal here, not expand host-side
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN='x"; touch $HOME/pwned; :"' \
+    || fail "a steer with an unsafe planted value should still succeed"
+  [ ! -e "$guest_user/.fm-sbx-env.sh" ] \
+    || fail "a value outside the token charset must not be persisted"
+  [ ! -e "$guest_user/pwned" ] \
+    || fail "a value outside the token charset must never be executed"
+
+  pass "guest env: an absent or unsafe planted value writes nothing"
+}
+
 # --- send_text_submit: verify-and-retry (resume-time notices eat keys) ------
 
 test_submit_confirms_busy_pane() {
@@ -1160,6 +1303,9 @@ test_resume_template_quoting
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
+test_guest_profiles_reinject_placeholder_into_agent_children
+test_guest_profile_seed_is_idempotent_and_yields_to_the_operator
+test_guest_profile_seed_skips_absent_or_unsafe_values
 test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed

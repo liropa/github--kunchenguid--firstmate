@@ -107,6 +107,30 @@ Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idem
 
 Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
 
+## Guest shell-profile env (`CLAUDE_CODE_OAUTH_TOKEN`)
+
+sbx plants `CLAUDE_CODE_OAUTH_TOKEN=<placeholder>` into the guest env once, at sandbox creation, and the claude agent does not pass it down to the processes it spawns.
+An in-guest daemon the agent starts therefore comes up unauthenticated while interactive sessions in the same VM authenticate fine: observed live 2026-07-23 in the `agent-dotfiles` secondmate, where the no-mistakes daemon restarted from the secondmate's own shell failed with `Not logged in` / `401`, twice, each costing a validation round and a manual repair.
+Verified at the time: `bash -lc` through `sbx exec` carries the placeholder; a child the agent spawns does not.
+
+The same guest-home provisioning pass (`fm_backend_sbx_provision_guest_home`) closes it by re-supplying the value at shell init, which is the only seam a stripped child ever crosses:
+
+- `~/.fm-sbx-env.sh` (mode 0600) is rewritten on every pass with `: "${CLAUDE_CODE_OAUTH_TOKEN:=<placeholder>}"` plus an `export`, and a one-line `. "$HOME/.fm-sbx-env.sh"` guard is inserted at the **top** of `~/.bashrc`, `~/.profile`, and `~/.bash_profile` when that file already exists (its presence would otherwise shadow `~/.profile` for bash login shells).
+- **Top, not bottom**: the stock Debian `~/.bashrc` the sbx templates build on returns early for non-interactive shells, and the failing case is precisely a non-interactive agent child, so an appended export would never run.
+  `tests/fm-backend-sbx.test.sh` reproduces that early return in its guest-home fixture and measures what a non-interactive child actually inherits; asserting the line was written would pass either way.
+- **`:=`, so the operator always wins**: a value already set in the child's env, or exported by the operator's own profile, is never overwritten, whatever the ordering.
+- **The value never leaves the guest**: it is read from the provisioning exec's own guest env rather than passed as an argument, so it reaches no host process table and no host-side log.
+  It is also refused unless every character is in `[A-Za-z0-9._:/+=-]`, because the snippet is shell source and an unexpected value must never become code - that set covers realistic token alphabets while excluding every character that could break out of the assignment.
+- **No credential is involved**: the planted value is the proxy placeholder, not the token.
+  The real token is substituted host-side on egress and never enters the VM (agent-dotfiles `docs/docker-sandboxes-fit-assessment.md`: an httpbin `/headers` echo showed the real value arriving server-side while the guest held only the placeholder, and the guest filesystem carried no token material).
+  A host-side rotation reuses the pinned `--placeholder` string, so a persisted snippet does not go stale.
+
+**Coverage**: new sandboxes get this at spawn, and existing sandboxes at their next resurrection or respawn - the same reach the `FM_INHERITABLE_CONFIG` re-assert has, for the same reason (both ride the one provisioning exec).
+A guest that is running right now, with its tmux server alive, is not touched until it auto-stops and the next steer resurrects it.
+Nothing here hot-applies to a live guest, and `~/.bash_login` is not handled (the Debian-based templates ship neither it nor `~/.bash_profile`).
+
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh` and `tests/fm-spawn-sbx.test.sh` (a fake `sbx` CLI plus a plain-directory guest-user-home fixture, per this doc's testing convention) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
+
 ## Tracked-file sync (guest clone fast-forward)
 
 Clone mode snapshots the host home's committed files into the VM exactly once, at provisioning, so the guest clone's tracked surface (`AGENTS.md`, `bin/`, `.agents/skills/`) froze at spawn HEAD while every host-side sync path - `/updatefirstmate`, the bootstrap secondmate sweep, `fm-spawn`'s pre-launch fast-forward - advanced only the HOST clone and reported updated/current from the host's point of view (fork issue #20).
@@ -155,6 +179,7 @@ When the exec ends, the keep-alive's host-side wrapper classifies the outcome: a
 The keep-alive loop, its release/pin decisions, and the wrapper's marker classification are verified against the fixtures in `tests/fm-backend-sbx.test.sh` (the loop executed directly with a fake tmux, the wrapper against the fake `sbx` CLI) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
 
 In-guest daemons a workflow needs (e.g. the no-mistakes daemon) do not come back on VM start; the resumed agent restarts them on demand - its brief owns that knowledge.
+Such a daemon inherits its credentials from the guest shell profiles ("Guest shell-profile env" above), not from the agent's own env.
 
 Triage protection (design doc §7.3): `bin/fm-crew-state.sh`'s `pane_readable` uses the state probe for sbx (a stopped sandbox is present, classified from the status log), and the adapter's capture refuses outright unless the sandbox is already running - so routine triage can never churn an idle-stopped VM.
 
