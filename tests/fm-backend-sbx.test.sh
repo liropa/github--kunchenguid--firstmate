@@ -449,6 +449,51 @@ test_guest_profile_seed_is_idempotent_and_yields_to_the_operator() {
   pass "guest env: re-provisioning is idempotent and never fights the operator's own value"
 }
 
+test_guest_profile_seed_reports_unowned_source_without_touching_profile() {
+  local w fb home guest_user out
+  w=$(new_sbx_world guest-env-unowned); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data"
+  seed_debian_guest_user_home "$guest_user"
+  printf ". \"\$HOME/.fm-sbx-env.sh\"\n" >> "$guest_user/.bashrc"
+  cp "$guest_user/.bashrc" "$w/bashrc.before"
+
+  out=$(steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" 2>&1) \
+    || fail "a steer with unowned profile content should still succeed: $out"
+
+  cmp -s "$w/bashrc.before" "$guest_user/.bashrc" \
+    || fail "an unowned source line must leave the operator profile byte-identical"
+  assert_contains "$out" "$guest_user/.bashrc may not reach non-interactive shells" \
+    "an unowned source line must be reported to stderr"
+  assert_contains "$out" "not moving operator content" \
+    "the diagnostic must say operator content was left alone"
+
+  pass "guest env: unowned profile source is reported without rewriting"
+}
+
+test_guest_profile_seed_repositions_owned_stale_source_line() {
+  local w fb home guest_user out n
+  w=$(new_sbx_world guest-env-stale-owned); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data"
+  seed_debian_guest_user_home "$guest_user"
+  fm_sbx_guest_env_source_line >> "$guest_user/.bashrc"
+
+  steer_with_guest_env "$fb" "$w" "$home" "$guest_user" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" \
+    || fail "a steer with a stale owned source line should still succeed"
+
+  out=$(agent_child_var "$guest_user" bashrc)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "a repositioned owned source line must reach non-interactive children, got '$out'"
+  n=$(grep -cF '.fm-sbx-env.sh' "$guest_user/.bashrc")
+  [ "$n" -eq 1 ] \
+    || fail "repositioning an owned source line must not duplicate it, found $n"
+
+  pass "guest env: stale owned source line is repositioned before early return"
+}
+
 test_guest_profile_seed_skips_absent_or_unsafe_values() {
   local w fb home guest_user
   w=$(new_sbx_world guest-env-skip); fb=$(make_fake_sbx "$w")
@@ -1305,6 +1350,8 @@ test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
 test_guest_profiles_reinject_placeholder_into_agent_children
 test_guest_profile_seed_is_idempotent_and_yields_to_the_operator
+test_guest_profile_seed_reports_unowned_source_without_touching_profile
+test_guest_profile_seed_repositions_owned_stale_source_line
 test_guest_profile_seed_skips_absent_or_unsafe_values
 test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed

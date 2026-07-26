@@ -116,6 +116,9 @@ Verified at the time: `bash -lc` through `sbx exec` carries the placeholder; a c
 The same guest-home provisioning pass (`fm_backend_sbx_provision_guest_home`) closes it by re-supplying the value at shell init, which is the only seam a stripped child ever crosses:
 
 - `~/.fm-sbx-env.sh` (mode 0600) is rewritten on every pass with `: "${CLAUDE_CODE_OAUTH_TOKEN:=<placeholder>}"` plus an `export`, and a one-line `. "$HOME/.fm-sbx-env.sh"` guard is inserted at the **top** of `~/.bashrc`, `~/.profile`, and `~/.bash_profile` when that file already exists (its presence would otherwise shadow `~/.profile` for bash login shells).
+- A stale source line bearing firstmate's `# firstmate sbx guest env` signature is removed and reinserted before the first non-comment statement so resurrection repairs an owned line that landed below Debian's non-interactive early return.
+- A profile mention without that signature is treated as operator-authored content: provisioning leaves the file byte-identical, prints a stderr diagnostic naming the profile, and still returns success.
+- Rewriting an existing profile preserves its file mode, while a newly created profile keeps the default umask behavior.
 - **Top, not bottom**: the stock Debian `~/.bashrc` the sbx templates build on returns early for non-interactive shells, and the failing case is precisely a non-interactive agent child, so an appended export would never run.
   `tests/fm-backend-sbx.test.sh` reproduces that early return in its guest-home fixture and measures what a non-interactive child actually inherits; asserting the line was written would pass either way.
 - **`:=`, so the operator always wins**: a value already set in the child's env, or exported by the operator's own profile, is never overwritten, whatever the ordering.
