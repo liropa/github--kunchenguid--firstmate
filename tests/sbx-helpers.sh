@@ -47,6 +47,20 @@
 #   FM_FAKE_SBX_PROVISION_RC non-zero fails the guest-home provisioning exec
 #                            (the `sh -c` pass carrying `ln -sfn`) instead of
 #                            executing it
+#   FM_FAKE_SBX_GUEST_USER_HOME
+#                            the guest USER's own $HOME (where the shell
+#                            profiles live) for the provisioning exec, which is
+#                            a different directory from the home clone. The
+#                            fake ALWAYS overrides $HOME for that exec -
+#                            defaulting to a scratch dir beside the log - so a
+#                            suite can never write the real developer's shell
+#                            profiles.
+#   FM_FAKE_SBX_GUEST_ENV_TOKEN
+#                            value the provisioning exec's guest env carries as
+#                            CLAUDE_CODE_OAUTH_TOKEN (sbx plants the non-secret
+#                            placeholder at sandbox creation). Unset = the guest
+#                            sees the variable UNSET; the host's own credential
+#                            env is never forwarded into a fixture.
 #   FM_FAKE_SBX_GUEST_HOME   when set, in-guest home paths are REMAPPED to this
 #                            directory before real execution: clone mode places
 #                            the guest clone at the SAME absolute path as the
@@ -181,7 +195,18 @@ case "$cmd" in
         if [ -n "${FM_FAKE_SBX_GUEST_HOME:-}" ]; then
           set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
         fi
-        sh -c "$script" "$@"
+        # The pass also writes the guest USER's shell profiles, which live in
+        # $HOME, not in the home clone. Force $HOME onto a fixture and scrub
+        # the host's own CLAUDE_CODE_OAUTH_TOKEN: a suite must never write the
+        # developer's real profiles, nor persist a real credential anywhere.
+        guest_user_home=${FM_FAKE_SBX_GUEST_USER_HOME:-${FM_FAKE_SBX_LOG:-/dev/null}.guest-user-home}
+        mkdir -p "$guest_user_home" 2>/dev/null || true
+        if [ -n "${FM_FAKE_SBX_GUEST_ENV_TOKEN:-}" ]; then
+          env HOME="$guest_user_home" \
+            CLAUDE_CODE_OAUTH_TOKEN="$FM_FAKE_SBX_GUEST_ENV_TOKEN" sh -c "$script" "$@"
+        else
+          env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$guest_user_home" sh -c "$script" "$@"
+        fi
         exit $?
         ;;
       "sh -c "*"merge --ff-only"*)
@@ -259,6 +284,59 @@ exit 0
 SH
   chmod +x "$fakebin/sbx"
   printf '%s\n' "$fakebin"
+}
+
+# The non-secret placeholder shape sbx plants (`sk-ant-oat01-{rand}`): the real
+# token is swapped in host-side at the proxy and never enters a VM, so no real
+# credential is ever involved here. Consumed by the sourcing suites, not by
+# this library, exactly like SBX_LS_EMPTY below.
+# shellcheck disable=SC2034
+SBX_FAKE_PLACEHOLDER=sk-ant-oat01-fixtureplaceholder
+
+# seed_debian_guest_user_home <dir>: a guest user $HOME shaped like the stock
+# Debian image the sbx templates build on. ~/.bashrc's FIRST statement is the
+# non-interactive early return - that guard is the filter carrying the defect,
+# because anything appended below it never runs for the agent-spawned children
+# this fix exists for. A fixture without it would pass either way.
+seed_debian_guest_user_home() {  # <dir>
+  local h=$1
+  mkdir -p "$h"
+  cat > "$h/.bashrc" <<'RC'
+# ~/.bashrc: executed by bash(1) for non-login shells.
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+export FM_TEST_OPERATOR_RC_MARKER=interactive-only
+RC
+  cat > "$h/.profile" <<'PR'
+# ~/.profile: executed by the command interpreter for login shells.
+export FM_TEST_OPERATOR_PROFILE_MARKER=login
+PR
+}
+
+# agent_child_var <guest-user-home> <bashrc|login|posix> [var]: what <var>
+# (default CLAUDE_CODE_OAUTH_TOKEN) a process the AGENT spawned would see -
+# `UNSET` when it has no value. Every mode starts from `env -u`, because the
+# observed defect is precisely that the agent hands its children an env with
+# the placeholder missing.
+#   bashrc - a NON-INTERACTIVE bash initializing from ~/.bashrc: the exact
+#            failing shape (an agent Bash-tool child, and the shell an in-guest
+#            daemon gets restarted from).
+#   login  - a login shell reading ~/.profile: the shape the manual per-VM
+#            mitigation proved on the live guest.
+#   posix  - POSIX sh sourcing ~/.profile: proves the written snippet parses
+#            outside bash.
+agent_child_var() {  # <guest-user-home> <mode> [var]
+  local h=$1 mode=$2 var=${3:-CLAUDE_CODE_OAUTH_TOKEN} prog
+  # shellcheck disable=SC2016  # deliberate: the probe must expand in the CHILD shell, after its profile ran
+  prog='printf "%s" "${'$var'-UNSET}"'
+  case "$mode" in
+    bashrc) env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$h" bash -c ". \"\$HOME/.bashrc\"; $prog" ;;
+    login)  env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$h" bash -lc "$prog" ;;
+    posix)  env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$h" sh -c ". \"\$HOME/.profile\"; $prog" ;;
+    *) fail "agent_child_var: unknown mode '$mode'" ;;
+  esac
 }
 
 # sbx_ls_json <name> <status>: one-sandbox inventory JSON in the REAL

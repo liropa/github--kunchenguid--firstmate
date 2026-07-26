@@ -81,6 +81,8 @@ run_spawn() {  # <world> <fakebin> <args...> -> stdout+stderr; rc preserved
     FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
     FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-smx running)" \
     FM_FAKE_SBX_WRITE_DIR="$w/guest-writes" \
+    FM_FAKE_SBX_GUEST_USER_HOME="$w/guest-user-home" \
+    FM_FAKE_SBX_GUEST_ENV_TOKEN="$SBX_FAKE_PLACEHOLDER" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
 }
 
@@ -302,6 +304,36 @@ test_spawn_provisions_guest_home() {
   pass "spawn: guest home gets read-through symlinks onto the source mount, a regular-file identity marker, and a regular-file signals-dir marker"
 }
 
+test_spawn_seeds_guest_shell_profile_env() {
+  local w fb out home guest_user
+  w=$(new_world guest-env); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  home="$w/sm"
+  guest_user="$w/guest-user-home"
+  # The stock Debian shell profiles the sbx templates build on, including
+  # ~/.bashrc's non-interactive early return - the filter the defect hid
+  # behind (docs/sbx-backend.md "Guest shell-profile env").
+  seed_debian_guest_user_home "$guest_user"
+
+  out=$(run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+
+  # A fresh sandbox's agent gets the placeholder from sbx's own creation-time
+  # env planting, but the processes it SPAWNS do not - so the check that
+  # matters is what a non-interactive agent child inherits, not what the file
+  # contains.
+  out=$(agent_child_var "$guest_user" bashrc)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "a non-interactive agent-spawned child must inherit the planted placeholder after spawn, got '$out'"
+  out=$(agent_child_var "$guest_user" login)
+  [ "$out" = "$SBX_FAKE_PLACEHOLDER" ] \
+    || fail "a login shell must inherit the planted placeholder after spawn, got '$out'"
+  assert_not_contains "$(cat "$w/sbx.log")" "$SBX_FAKE_PLACEHOLDER" \
+    "the token value must never appear in a host-side command line or log"
+
+  pass "spawn: the guest's shell profiles re-supply the planted placeholder to agent-spawned children"
+}
+
 test_spawn_read_through_and_absence_semantics() {
   local w fb out home mount
   w=$(new_world read-through); fb=$(make_fake_sbx "$w")
@@ -406,6 +438,7 @@ test_preexisting_status_history_is_folded
 test_template_pin_is_recorded_in_meta
 test_untemplated_spawn_records_no_template_key
 test_spawn_provisions_guest_home
+test_spawn_seeds_guest_shell_profile_env
 test_spawn_read_through_and_absence_semantics
 test_refuses_projects_bearing_home
 test_refuses_missing_source_mount
