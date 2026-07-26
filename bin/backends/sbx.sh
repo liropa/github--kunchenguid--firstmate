@@ -154,6 +154,22 @@ fm_backend_sbx_state() {  # <name>
   esac
 }
 
+# fm_backend_sbx_transport_reachable: 0 when THIS process context can reach the
+# sbx control plane at all, 1 when it demonstrably cannot. A confirmed-absent
+# sandbox is REACHABLE (the inventory answered; the target is simply gone) -
+# only an unreadable inventory means no route. The distinction matters because
+# every steering primitive below funnels through fm_backend_sbx_ensure_stack,
+# whose first act is this same inventory read: a caller with no route cannot
+# deliver to a running sandbox any more than to a stopped one, so "unreachable"
+# is a property of the CALLER, never of the target's power state.
+# Live cause on this host: a sandboxed caller (the watcher's context) is denied
+# the daemon socket, so `sbx` decides no daemon is running, tries to start its
+# own, finds the real one's pid file and gives up after ~10s. Callers must
+# therefore spend this probe only when they are about to steer, never per poll.
+fm_backend_sbx_transport_reachable() {  # <name>
+  [ "$(fm_backend_sbx_state "$1")" != error ]
+}
+
 # fm_backend_sbx_mtime: portable file mtime in epoch seconds (BSD stat -f on
 # macOS, GNU stat -c on Linux CI). Empty output + rc 1 when unreadable.
 fm_backend_sbx_mtime() {  # <file>
@@ -556,7 +572,16 @@ fm_backend_sbx_ensure_stack() {  # <target>
   name=$(fm_backend_sbx_name_of_target "$target")
   case "$(fm_backend_sbx_state "$name")" in
     running|stopped) ;;
-    *) echo "error: sandbox $name is not steerable (absent or unreadable)" >&2; return 1 ;;
+    absent) echo "error: sandbox $name is not steerable (confirmed absent from the inventory)" >&2; return 1 ;;
+    *)
+      # NOT a confirmed absence: the inventory itself was unreadable, so this
+      # caller has no route to the control plane (a denied daemon socket, or a
+      # missing sbx/jq). Naming the two apart matters operationally - absent
+      # means the sandbox is gone, unreadable means the CALLER cannot see it
+      # and a steer from a context that can reach the daemon would still work.
+      echo "error: sandbox $name is not steerable (sbx inventory unreadable from this context; the sbx daemon may be unreachable here)" >&2
+      return 1
+      ;;
   esac
   if fm_backend_sbx_guest_tmux_ready "$name"; then
     return 0

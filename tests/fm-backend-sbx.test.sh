@@ -735,6 +735,56 @@ test_send_refuses_absent_sandbox() {
   pass "send path: a confirmed-absent sandbox is refused, not exec'd"
 }
 
+# A caller with no route to the control plane cannot steer ANY sandbox, so the
+# refusal must not read as "the sandbox is gone" - that sends an operator
+# hunting a healthy guest. The two conditions need different responses:
+# recreate the sandbox vs re-issue from a context that can reach the daemon.
+test_send_refusal_names_unreadable_apart_from_absent() {
+  local w fb absent_err unreadable_err
+  w=$(new_sbx_world send-refusal); fb=$(make_fake_sbx "$w")
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  absent_err=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" 2>&1 >/dev/null || true)
+  assert_contains "$absent_err" "confirmed absent" \
+    "a clean inventory lacking the name must be reported as a confirmed absence"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  unreadable_err=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_LS_RC=1 2>&1 >/dev/null || true)
+  assert_contains "$unreadable_err" "unreadable from this context" \
+    "an unreadable inventory must be reported as this caller's missing route"
+  assert_not_contains "$unreadable_err" "absent" \
+    "an unreadable inventory must never be reported as an absence"
+  pass "send path: an unreadable inventory is refused as a missing route, not an absence"
+}
+
+# The deliverability probe behind fm-pending-reply-lib.sh's recovery deferral.
+# It asks whether THIS caller has a route, so a stopped guest stays reachable
+# (`sbx exec` auto-starts it) and only an unreadable inventory says no.
+test_transport_reachable_tracks_route_not_power_state() {
+  local w fb
+  w=$(new_sbx_world reachable); fb=$(make_fake_sbx "$w")
+  for st in running stopped; do
+    sbx_ls_json fm-x "$st" > "$w/ls.json"
+    run_adapter "$fb" "$w" 'fm_backend_sbx_transport_reachable fm-x' \
+      FM_STATE_OVERRIDE="$w/state" \
+      || fail "a $st sandbox must count as reachable"
+  done
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_transport_reachable fm-x' \
+    FM_STATE_OVERRIDE="$w/state" \
+    || fail "a confirmed absence is a target problem, not an unreachable control plane"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  if run_adapter "$fb" "$w" 'fm_backend_sbx_transport_reachable fm-x' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_LS_RC=1 2>/dev/null; then
+    fail "an unreadable inventory must report the control plane as unreachable"
+  fi
+  # The generic dispatcher must not hold back a backend with no probe.
+  run_adapter "$fb" "$w" 'fm_backend_transport_reachable tmux fm-x:0' \
+    FM_STATE_OVERRIDE="$w/state" \
+    || fail "a backend without a reachability probe must default to reachable"
+  pass "transport_reachable follows the caller's route, not the guest's power state"
+}
+
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
 
 # make_toolchain <dir>: the fixed stub set bin/fm-bootstrap.sh's read-only
@@ -1128,6 +1178,8 @@ test_keepalive_wrapper_quiet_on_idle_death
 test_keepalive_wrapper_quiet_on_clean_release
 test_send_skips_resurrection_when_stack_alive
 test_send_refuses_absent_sandbox
+test_send_refusal_names_unreadable_apart_from_absent
+test_transport_reachable_tracks_route_not_power_state
 test_sweep_leaves_stopped_secondmate_untouched
 test_sweep_never_acts_on_probe_error
 test_sweep_respawns_confirmed_absent_secondmate
