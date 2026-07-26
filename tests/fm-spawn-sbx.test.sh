@@ -305,7 +305,7 @@ test_spawn_provisions_guest_home() {
 }
 
 test_spawn_seeds_guest_shell_profile_env() {
-  local w fb out home guest_user
+  local w fb out home guest_user mode_before mode_after
   w=$(new_world guest-env); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes"
   home="$w/sm"
@@ -314,6 +314,8 @@ test_spawn_seeds_guest_shell_profile_env() {
   # ~/.bashrc's non-interactive early return - the filter the defect hid
   # behind (docs/sbx-backend.md "Guest shell-profile env").
   seed_debian_guest_user_home "$guest_user"
+  chmod 600 "$guest_user/.bashrc"
+  mode_before=$(fm_file_mode "$guest_user/.bashrc")
 
   out=$(run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
     || fail "claude sbx secondmate spawn failed: $out"
@@ -330,6 +332,9 @@ test_spawn_seeds_guest_shell_profile_env() {
     || fail "a login shell must inherit the planted placeholder after spawn, got '$out'"
   assert_not_contains "$(cat "$w/sbx.log")" "$SBX_FAKE_PLACEHOLDER" \
     "the token value must never appear in a host-side command line or log"
+  mode_after=$(fm_file_mode "$guest_user/.bashrc")
+  [ "$mode_after" = "$mode_before" ] \
+    || fail "seeding an existing profile must preserve its mode, got $mode_after from $mode_before"
 
   pass "spawn: the guest's shell profiles re-supply the planted placeholder to agent-spawned children"
 }

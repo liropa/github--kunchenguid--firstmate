@@ -913,14 +913,24 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
         printf ": \"\${CLAUDE_CODE_OAUTH_TOKEN:=%s}\"\n" "$tok"
         echo "export CLAUDE_CODE_OAUTH_TOKEN"
       } > "$snip" && chmod 600 "$snip" 2>/dev/null
+      seed_line="if [ -r \"\$HOME/.fm-sbx-env.sh\" ]; then . \"\$HOME/.fm-sbx-env.sh\"; fi  # firstmate sbx guest env"
       for f in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
         case $f in *.bash_profile) [ -f "$f" ] || continue ;; esac
         [ -e "$f" ] || : > "$f"
-        grep -qF ".fm-sbx-env.sh" "$f" 2>/dev/null && continue
+        if grep -F ".fm-sbx-env.sh" "$f" 2>/dev/null | grep -vF "$seed_line" >/dev/null; then
+          printf "%s\n" "firstmate sbx: $f may not reach non-interactive shells because an unowned .fm-sbx-env.sh source line was found; not moving operator content" >&2
+          continue
+        fi
+        seed_line_no=$(grep -nF "$seed_line" "$f" 2>/dev/null | head -n 1 | cut -d: -f1)
+        first_code_no=$(grep -n -v "^[[:space:]]*\($\|#\)" "$f" 2>/dev/null | head -n 1 | cut -d: -f1)
+        if [ -n "$seed_line_no" ] && { [ -z "$first_code_no" ] || [ "$seed_line_no" -le "$first_code_no" ]; }; then
+          continue
+        fi
         {
-          echo "if [ -r \"\$HOME/.fm-sbx-env.sh\" ]; then . \"\$HOME/.fm-sbx-env.sh\"; fi  # firstmate sbx guest env"
-          cat "$f"
-        } > "$f.fm-sbx-tmp" && mv -f "$f.fm-sbx-tmp" "$f"
+          printf "%s\n" "$seed_line"
+          grep -vF "$seed_line" "$f" || :
+        } > "$f.fm-sbx-tmp" && cat "$f.fm-sbx-tmp" > "$f"
+        rm -f "$f.fm-sbx-tmp"
       done
     fi
     exit 0

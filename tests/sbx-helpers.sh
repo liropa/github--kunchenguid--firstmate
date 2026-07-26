@@ -293,6 +293,14 @@ SH
 # shellcheck disable=SC2034
 SBX_FAKE_PLACEHOLDER=sk-ant-oat01-fixtureplaceholder
 
+fm_sbx_guest_env_source_line() {
+  printf '%s\n' "if [ -r \"\$HOME/.fm-sbx-env.sh\" ]; then . \"\$HOME/.fm-sbx-env.sh\"; fi  # firstmate sbx guest env"
+}
+
+fm_file_mode() {  # <path>
+  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+}
+
 # seed_debian_guest_user_home <dir>: a guest user $HOME shaped like the stock
 # Debian image the sbx templates build on. ~/.bashrc's FIRST statement is the
 # non-interactive early return - that guard is the filter carrying the defect,
