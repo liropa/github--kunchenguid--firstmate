@@ -216,7 +216,8 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: after Enter it reads the pane back; text absent → clear (C-u) and retype; text parked in the composer with no busy footer → re-send Enter only (never retype); busy on the text → `submitted`.
 Retries exhausted stays the conservative `unknown`.
 **Presence means newly appeared, not merely visible**: the needle is the steer's first 24 chars (marker + a few payload chars), which a *previous* steer's rendered line in scrollback also matches - so the occurrence count is baselined from the full tmux history after the ready poll and before typing, and only a count above the baseline reads as our text (one extra capture exec per steer). Without this, a resume-time swallow behind a stale same-prefix line converts the designed retype into a no-op Enter loop and the steer is lost behind a clean exit (observed live, 5-secondmate soak: 1 of 5 concurrent resurrections).
-Every successful delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
+Every successful turn-submitting delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
+Literal typing and control-only keys such as Escape and C-c do not start a turn, so they neither arm the delivery alarm nor start a keep-alive; Enter does both because it submits the composed input.
 The loop releases only when the id's `turn-ended` mount file has advanced past its delivery baseline (the original v1 condition) AND the guest shows no work: no tmux pane whose visible tail matches the busy regex (`FM_BUSY_REGEX`, the same busy idiom the watcher and the submit verify use), and no `*.status`/`*.turn-ended` file under the guest home's `state/` (an in-guest child worker's signals) touched within `FM_SBX_GUEST_ACTIVE_WINDOW` (default 120 s).
 Releasing on the secondmate's own turn-end alone re-opened the auto-stop trap one level down: an in-guest crewmate holds no host connection, so the VM died 45-100 s after the secondmate's turn ended and killed the mid-implementation worker (fork issue #12, proven three times 2026-07-23, the third taking an in-guest no-mistakes daemon and a live validation run with it).
 The busy-pane probe is the primary activity signal because worker status appends are sparse by contract (a mid-implementation worker may write nothing for half an hour) while a working TUI shows its busy tail continuously; the child-signal window is the secondary leg that bridges a worker's short between-turns gaps.
@@ -287,14 +288,23 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
 - **Mid-task stop** (`sbx-midtask-stop:<id>`): surfaces the keep-alive wrapper's `state/.sbx-midtask-stop-` marker (above) - a VM that stopped while in-guest work was under way. A stopped VM fires no turn-ends, so the stranding counter is structurally blind to exactly this failure (fork issues #12/#13: three real mid-work stops on 2026-07-23 produced zero alarms). The wake carries the wrapper's recorded reason and is consumed with its marker; a recurrence re-records, and no turn-end is required first (a VM stopped before its first turn-end still alarms).
 - **Stranding** (`sbx-stranded:<id>`): two arms, because a count of events cannot measure their absence, and the observed failures come in both shapes. Both raise the same wake key and share one `.sbx-stranded-alarmed-` marker, so an episode alarms exactly once however it was detected, and status progress re-arms both - acknowledgement silences the delivery it answers but never clears the marker, or a guest that answers every steer without progressing would re-alarm on each one.
   - *No-progress turn-ends*: `FM_SBX_NOPROGRESS_TURNS` (default 3; 0 disables) consecutive turn-ends with zero status-file progress. This is the guest that still runs its turn-end hook but cannot make progress: each bare turn-end already surfaces as a generic signal wake, and the beacon names the pattern. Any status progress resets the counter and re-arms. A turn-end that lands while the mount's `<id>.guest-active` breadcrumb is fresh (within `FM_SBX_GUEST_ACTIVE_WINDOW`) is recorded but **not counted**: supervision turns during a long in-guest pipeline are legitimately status-sparse, and counting them produced issue #13's false alarms.
-  - *Unacknowledged delivery*: `FM_SBX_DELIVERY_ACK_SECS` (default 900; 0 disables) of complete silence after the host last delivered to the guest. **This arm exists because the counter above is structurally blind to the worst variant**: an agent that cannot process at all fires no turn-ends, so the counter it depends on never advances (evidence below). Every successful delivery touches a host-written `state/.sbx-delivered-<id>` breadcrumb (`fm_backend_sbx_after_send`), and the arm alarms when no guest-side file has moved at or after that moment. Acknowledgement is any of three signals - the turn-ended beat, the status file, or the `<id>.guest-active` breadcrumb - so the beacon **never rests on turn-ends exclusively**. Comparing mount mtimes against the delivery mtime is stateless, so a watcher restart cannot lose the edge, and it trusts guest clocks no more than the freshness check above already does, with a far wider tolerance. The `[ -e ]` gate before each stat is load-bearing: macOS `stat -L` on a dangling link signs the *link*, so a guest that never wrote a mount file would otherwise acknowledge every delivery with its own spawn-time symlink, silently and on one platform only.
+  - *Unacknowledged delivery*: `FM_SBX_DELIVERY_ACK_SECS` (default 900; 0 disables) of complete silence after the host last delivered to the guest.
+    **This arm exists because the counter above is structurally blind to the worst variant**: an agent that cannot process at all fires no turn-ends, so the counter it depends on never advances (evidence below).
+    Before a turn-submitting send injects input, it creates a host-written, content-free candidate; a successful send atomically promotes that candidate to `state/.sbx-delivered-<id>` without changing its pre-injection mtime.
+    A preparation failure refuses before input is sent.
+    A rare post-delivery promotion failure reports that the input was delivered but untracked and explicitly says not to resend.
+    The arm alarms when no guest-side file is strictly newer than the delivery.
+    Acknowledgement is any of three signals - the turn-ended beat, the status file, or the `<id>.guest-active` breadcrumb - so the beacon **never rests on turn-ends exclusively**.
+    The strict platform-stat comparison preserves native filesystem nanosecond precision, preventing a signal from immediately before delivery in the same integer-mtime second from acknowledging it.
+    Comparing mount mtimes against the delivery mtime is stateless, so a watcher restart cannot lose the edge, and it trusts guest clocks no more than the freshness check above already does, with a far wider tolerance.
+    The `[ -e ]` gate before each comparison is load-bearing: macOS stat behavior on dangling links could otherwise let a guest that never wrote a mount file acknowledge every delivery with its spawn-time symlink, silently and on one platform only.
 
   Delivery is **not** processing evidence: a send lands in the guest tmux pane whether or not the agent behind it can work, which is exactly why the acknowledgement clock is a separate signal from delivery success.
   The wake's reason carries the recovery (`sbx stop fm-<id>` + steer, secret refresh first).
   The delivery breadcrumb is host-written in the primary's `state/`, so a guest can neither forge nor suppress it, and a hostile guest touching the mount's `<id>.guest-active` forever only suppresses its own stranding alarm - the same self-harm class as deleting its own provisioning links.
   An sbx secondmate with no outstanding delivery is silent by construction: an empty queue and a stopped VM are its healthy resting state, never a fault.
 
-Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`, `.sbx-delivered-`), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm, and a leftover delivery marker would raise one for a delivery the replacement never received).
+Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`, `.sbx-delivered-`, plus transient `.sbx-delivery-pending-` candidates), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm, and a leftover delivery marker would raise one for a delivery the replacement never received).
 
 ### Stranding evidence and what each arm covers (2026-07-23 incident, corrected 2026-07-27)
 
@@ -317,6 +327,7 @@ Verified at the beacon level 2026-07-27 (this tree, `bash tests/fm-watch-sbx-sig
 ```
 ok - a healthy idle secondmate with no outstanding delivery never alarms
 ok - a delivery still inside the acknowledgement window never alarms
+ok - a same-timestamp signal does not acknowledge a later delivery
 ok - an unacknowledged delivery alarms once even with zero turn-ends
 ok - a turn end acknowledges its delivery; a later unanswered one re-alarms
 ok - a status line acknowledges a delivery with no turn-end at all
@@ -325,6 +336,17 @@ ok - a fresh guest-active breadcrumb suppresses the stranding count; a stale one
 ok - status progress resets the no-progress counter; healthy turns never alarm
 ok - acknowledging a delivery never re-arms an alarm that already stands
 ok - status progress re-arms the alarm with no turn-end in the whole episode
+```
+
+Verified at the delivery boundary 2026-07-27 (this tree, `bash tests/fm-backend-sbx.test.sh`):
+
+```
+ok - send_text_submit: text visible + busy pane -> submitted, typed once
+ok - send path: the delivery breadcrumb causally predates an immediate guest acknowledgement
+ok - send path: a beacon preparation failure refuses before delivery
+ok - send path: a post-delivery beacon failure reports untracked delivery without inviting resend
+ok - send path: failed injection preserves the previous delivery edge
+ok - send path: only turn-submitting input arms the delivery beacon
 ```
 
 The last two are the falsification check for the shared-marker rules, not decoration: with acknowledgement restored to clearing the marker, `acknowledged steers must not re-arm a standing alarm` fails, and with the status bookkeeping moved back below the turn-end gates, `status progress must re-arm the alarm even with no turn-ended file at all` fails.

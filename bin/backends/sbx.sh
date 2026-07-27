@@ -702,7 +702,7 @@ fm_backend_sbx_ensure_stack() {  # <target>
   return 0
 }
 
-# Every successful delivery does two things.
+# Every successful turn-submitting delivery does two things.
 #
 # It arms a fire-and-forget keep-alive: the delivered text (a steer, or
 # fm-spawn's launch command - the spawn's sends dispatch through these same
@@ -712,40 +712,69 @@ fm_backend_sbx_ensure_stack() {  # <target>
 # home's state/ for child-worker signal advances; an absent meta simply skips
 # that secondary probe.
 #
-# It also touches the host-side .sbx-delivered- breadcrumb the watcher's
+# It also publishes the host-side .sbx-delivered- breadcrumb the watcher's
 # stranding beacon uses as its acknowledgement clock (docs/sbx-backend.md
-# "Beat-beacon alarms"). DELIVERY IS NOT PROCESSING EVIDENCE: a send lands in
-# the guest tmux pane whether or not the agent behind it can work, so the
-# breadcrumb's mtime is only "we last spoke to this guest at T" and the beacon
-# alarms when nothing came back. The breadcrumb is deliberately host-written
-# and content-free - a guest cannot forge or suppress it, and no delivered
-# text is ever recorded. It is written even when keep-alives are disabled,
-# because the acknowledgement clock does not depend on a pinned connection.
+# "Beat-beacon alarms"). A content-free candidate is created before input is
+# injected, then atomically promoted after delivery. A preparation failure
+# refuses before delivery; a promotion failure reports delivered-but-untracked
+# without returning a send failure that could invite a duplicate resend.
 #
 # A non-fm-* name has no derivable id/signal path, so neither applies -
 # nothing host-side would ever see its turn end anyway.
-fm_backend_sbx_after_send() {  # <target>
-  local target=$1 id home
+fm_backend_sbx_delivery_prepare() {  # <target>
+  local target=$1 id key pending
   id=$(fm_backend_sbx_task_of_target "$target") || return 0
-  touch "$(fm_backend_sbx_state_dir)/.sbx-delivered-$(printf '%s' "$id" | tr '.' '_')" 2>/dev/null || true
+  key=$(printf '%s' "$id" | tr '.' '_')
+  pending="$(fm_backend_sbx_state_dir)/.sbx-delivery-pending-$key-${BASHPID:-$$}-$RANDOM"
+  if ! : > "$pending"; then
+    echo "error: cannot arm the sbx delivery beacon for $id; refusing to deliver untracked input" >&2
+    return 1
+  fi
+  printf '%s' "$pending"
+}
+
+fm_backend_sbx_delivery_abort() {  # <pending>
+  [ -z "${1:-}" ] || rm -f -- "$1"
+}
+
+fm_backend_sbx_after_send() {  # <target> <pending>
+  local target=$1 pending=${2:-} id key home
+  id=$(fm_backend_sbx_task_of_target "$target") || return 0
+  key=$(printf '%s' "$id" | tr '.' '_')
+  if [ -n "$pending" ] \
+    && ! mv -f -- "$pending" "$(fm_backend_sbx_state_dir)/.sbx-delivered-$key"; then
+    rm -f -- "$pending" 2>/dev/null || true
+    echo "warning: input was delivered to $target but its sbx delivery beacon could not be published; do not resend" >&2
+  fi
   home=$(fm_meta_get "$(fm_backend_sbx_state_dir)/$id.meta" home) || home=
   fm_backend_sbx_keepalive "$(fm_backend_sbx_name_of_target "$target")" "$id" "$home"
+  return 0
 }
 
 fm_backend_sbx_send_key() {  # <target> <key> [expected-label]
-  local target=$1 key=$2 name
+  local target=$1 key=$2 name pending=
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key" || return 1
-  fm_backend_sbx_after_send "$target"
+  if [ "$key" = Enter ]; then
+    pending=$(fm_backend_sbx_delivery_prepare "$target") || return 1
+  fi
+  if ! sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key"; then
+    fm_backend_sbx_delivery_abort "$pending"
+    return 1
+  fi
+  [ "$key" != Enter ] || fm_backend_sbx_after_send "$target" "$pending"
 }
 
 fm_backend_sbx_send_text_line() {  # <target> <text>
-  local target=$1 text=$2 name
+  local target=$1 text=$2 name pending
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$text" Enter || return 1
-  fm_backend_sbx_after_send "$target"
+  pending=$(fm_backend_sbx_delivery_prepare "$target") || return 1
+  if ! sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$text" Enter; then
+    fm_backend_sbx_delivery_abort "$pending"
+    return 1
+  fi
+  fm_backend_sbx_after_send "$target" "$pending"
 }
 
 fm_backend_sbx_send_literal() {  # <target> <text>
@@ -753,7 +782,6 @@ fm_backend_sbx_send_literal() {  # <target> <text>
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text" || return 1
-  fm_backend_sbx_after_send "$target"
 }
 
 # fm_backend_sbx_send_text_submit: type, submit, VERIFY, retry - echo a
@@ -779,7 +807,7 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # composer text.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
-  local name pane_t probe base_pane pane tries typed base cur busy
+  local name pane_t probe base_pane pane tries typed base cur busy pending
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
   pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
@@ -796,16 +824,18 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
     || { printf 'send-failed'; return 1; }
   base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
+  pending=$(fm_backend_sbx_delivery_prepare "$target") \
+    || { printf 'send-failed'; return 1; }
   typed=0
   tries=0
   while [ "$tries" -le "$retries" ]; do
     if [ "$typed" -eq 0 ]; then
       sbx exec "$name" -- tmux send-keys -t "$pane_t" -l "$text" \
-        || { printf 'send-failed'; return 1; }
+        || { fm_backend_sbx_delivery_abort "$pending"; printf 'send-failed'; return 1; }
       typed=1
     fi
     sbx exec "$name" -- tmux send-keys -t "$pane_t" Enter \
-      || { printf 'send-failed'; return 1; }
+      || { fm_backend_sbx_delivery_abort "$pending"; printf 'send-failed'; return 1; }
     sleep "$settle"
     pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || pane=
     if [ -n "$pane" ]; then
@@ -818,7 +848,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
         # otherwise it is still sitting in the composer - loop re-sends
         # Enter only.
         if [ "$busy" -eq 1 ]; then
-          fm_backend_sbx_after_send "$target"
+          fm_backend_sbx_after_send "$target" "$pending"
           printf 'submitted'
           return 0
         fi
@@ -837,7 +867,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # ambiguous (unreadable pane, or text present but the busy footer never
   # showed). Deliver the conservative verdict and let the caller's fallback
   # policy own it - the text was never typed twice.
-  fm_backend_sbx_after_send "$target"
+  fm_backend_sbx_after_send "$target" "$pending"
   printf 'unknown'
 }
 

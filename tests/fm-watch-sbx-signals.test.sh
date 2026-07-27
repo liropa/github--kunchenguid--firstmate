@@ -519,6 +519,27 @@ test_recent_delivery_is_not_yet_stranding() {
   pass "a delivery still inside the acknowledgement window never alarms"
 }
 
+test_same_timestamp_signal_does_not_ack_delivery() {
+  local dir state mount out pid
+  dir=$(make_case equal-time-pre-signal); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  printf 'working: older signal\n' > "$mount/x.status"
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+  touch -r "$state/.sbx-delivered-x" "$mount/x.status"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "watcher did not alarm when only a same-timestamp pre-delivery signal existed: $(cat "$out")"
+  grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a signal with the delivery's exact timestamp must not acknowledge it: $(cat "$state/.wake-queue" 2>/dev/null)"
+
+  pass "a same-timestamp signal does not acknowledge a later delivery"
+}
+
 test_acknowledgement_never_rearms_a_standing_alarm() {
   # The two arms share one alarmed marker, and only STATUS PROGRESS may clear
   # it. Acknowledgement must not: a guest that answers every steer with a bare
@@ -613,6 +634,7 @@ test_midtask_stop_marker_fires_named_alarm
 test_inguest_activity_suppresses_stranding
 test_healthy_idle_secondmate_never_alarms
 test_recent_delivery_is_not_yet_stranding
+test_same_timestamp_signal_does_not_ack_delivery
 test_unacked_delivery_fires_stranding_alarm
 test_turnend_acknowledgement_silences_and_rearms
 test_status_only_acknowledgement_silences
