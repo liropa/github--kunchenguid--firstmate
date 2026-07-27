@@ -101,6 +101,8 @@ make_fake_sbx() {
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_SBX_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_SBX_LOG"
+# Retry ordinals still need per-fake persistence when a caller does not log.
+fake_state=${FM_FAKE_SBX_LOG:-$0.state}
 cmd=${1:-}
 shift || true
 case "$cmd" in
@@ -168,14 +170,14 @@ case "$cmd" in
         enter_count=0
         case "$guest" in
           *" -l "*)
-            type_count_file="${FM_FAKE_SBX_LOG:?FM_FAKE_SBX_LOG unset}.type-count"
+            type_count_file="$fake_state.type-count"
             type_count=$(cat "$type_count_file" 2>/dev/null || echo 0)
             type_count=$((type_count + 1))
             printf '%s\n' "$type_count" > "$type_count_file"
             [ "$type_count" != "${FM_FAKE_SBX_TYPE_FAIL_ON:-0}" ] || exit 1
             ;;
           *" Enter")
-            enter_count_file="${FM_FAKE_SBX_LOG:?FM_FAKE_SBX_LOG unset}.enter-count"
+            enter_count_file="$fake_state.enter-count"
             enter_count=$(cat "$enter_count_file" 2>/dev/null || echo 0)
             enter_count=$((enter_count + 1))
             printf '%s\n' "$enter_count" > "$enter_count_file"
@@ -202,7 +204,7 @@ case "$cmd" in
           *" Enter")
             if [ -n "${FM_FAKE_SBX_EXPECT_PENDING_DIR:-}" ]; then
               pending=
-              last_pending=$(cat "${FM_FAKE_SBX_LOG}.pending-last" 2>/dev/null || true)
+              last_pending=$(cat "$fake_state.pending-last" 2>/dev/null || true)
               for candidate in "$FM_FAKE_SBX_EXPECT_PENDING_DIR"/.sbx-delivery-pending-*; do
                 if [ -e "$candidate" ] \
                   && { [ -z "${FM_FAKE_SBX_REQUIRE_FRESH_PENDING:-}" ] \
@@ -212,7 +214,7 @@ case "$cmd" in
                 fi
               done
               [ -n "$pending" ] || exit 1
-              printf '%s\n' "$pending" > "${FM_FAKE_SBX_LOG}.pending-last"
+              printf '%s\n' "$pending" > "$fake_state.pending-last"
             fi
             if [ -n "${FM_FAKE_SBX_ACK_ON_ENTER:-}" ] \
               && { [ -z "${FM_FAKE_SBX_ACK_ON_ENTER_ONCE:-}" ] \
