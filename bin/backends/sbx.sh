@@ -835,7 +835,15 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   while [ "$tries" -le "$retries" ]; do
     if [ "$typed" -eq 0 ]; then
       sbx exec "$name" -- tmux send-keys -t "$pane_t" -l "$text" \
-        || { fm_backend_sbx_delivery_abort "$pending"; printf 'send-failed'; return 1; }
+        || {
+          if [ -n "$pending" ]; then
+            fm_backend_sbx_after_send "$target" "$pending"
+            printf 'unknown'
+            return 0
+          fi
+          printf 'send-failed'
+          return 1
+        }
       typed=1
     fi
     if ! attempt_pending=$(fm_backend_sbx_delivery_prepare "$target"); then
