@@ -520,10 +520,64 @@ test_sweep_respawn_ignores_ambient_template_without_recorded_template() {
   pass "sweep: an untemplated sbx respawn ignores ambient FM_SBX_TEMPLATE"
 }
 
+test_sweep_respawn_preserves_recorded_sbx_agent_flavor() {
+  # The sandbox's agent flavor decides which vendor credential the guest can
+  # resolve, and changing it needs a full VM destroy + recreate - so a respawn
+  # that silently reverted to the driver's own flavor would strand the guest
+  # without the credentials its work needs (docs/sbx-backend.md "Agent flavor
+  # vs driver harness"). The recorded flavor must ride from meta exactly as
+  # the template does, even though the HARNESS keeps re-resolving via config.
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; return 0; }
+  local w fb home out meta
+  w=$(new_world sbx-respawn-flavor)
+  w=$(cd "$w" && pwd -P)
+  home="$w/sm1"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects" \
+    "$w/signals/sm1" "$w/guest-writes"
+  printf 'sm1\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  {
+    printf 'Charter body.\n'
+    printf "Report by appending one line:\n"
+    printf "   \`echo \"{state}: {note}\" >> '%s/home/state/sm1.status'\`\n" "$w"
+  } > "$home/data/charter.md"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  {
+    printf 'window=sbx:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=sbx\n'
+    printf 'sbx_agent=codex\n'
+    printf 'sbx_signals_dir=%s/signals/sm1\n' "$w"
+    printf 'home=%s\n' "$home"
+  } > "$w/home/state/sm1.meta"
+  fb=$(make_fake_sbx "$w")
+  : > "$w/sbx.log"
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+
+  out=$(PATH="$fb:$BASE_PATH" TMUX='' HERDR_ENV='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" FM_SBX_RESURRECT_SETTLE=0 FM_SBX_RESURRECT_READY_TRIES=0 \
+    FM_SBX_KEEPALIVE_MAX=0 FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_FAKE_SBX_CREATE_JSON="$(sbx_ls_json fm-sm1 running)" FM_FAKE_SBX_WRITE_DIR="$w/guest-writes" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$out" "respawn failed" \
+    "the dead codex-flavor sbx secondmate's respawn should succeed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-sm1 codex $home $w/signals/sm1" \
+    "the respawn must re-enter the RECORDED codex flavor, not the re-resolved claude driver's own"
+  meta=$(cat "$w/home/state/sm1.meta")
+  assert_contains "$meta" "harness=claude" \
+    "the harness must still re-resolve through config (the durable-mode contract is unchanged)"
+  assert_contains "$meta" "sbx_agent=codex" \
+    "the respawned meta must re-record the flavor so the NEXT respawn reproduces it too"
+  pass "sweep: a dead sbx secondmate respawns with its recorded agent flavor, harness still re-resolved via config"
+}
+
 test_tmux_agent_alive_classifies
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawn_preserves_sbx_backend_and_template
+test_sweep_respawn_preserves_recorded_sbx_agent_flavor
 test_sweep_respawn_ignores_ambient_template_without_recorded_template
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched

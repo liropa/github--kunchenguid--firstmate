@@ -147,6 +147,103 @@ test_agent_alive_dispatcher_routes_sbx() {
   pass "fm_backend_agent_alive: routes sbx to the adapter"
 }
 
+# --- agent flavor vs driver harness (docs/sbx-backend.md) -------------------
+#
+# The sandbox's agent FLAVOR decides which vendor credential the guest can
+# resolve; the driver HARNESS decides which CLI firstmate launches in the
+# pane. Measured 2026-07-27: a claude-flavor sandbox 401s in-guest codex,
+# while a codex-flavor sandbox serves both drivers - so the flavor must be
+# pinnable apart from the driver, and an unservable pairing must refuse before
+# a VM exists rather than after the guest's first authenticated call fails.
+
+test_agent_flavor_defaults_to_the_driver() {
+  local w fb out
+  w=$(new_sbx_world flavor-default); fb=$(make_fake_sbx "$w")
+
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness claude')
+  [ "$out" = claude ] || fail "an unpinned claude driver must resolve the claude flavor, got '$out'"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness codex')
+  [ "$out" = codex ] || fail "an unpinned codex driver must resolve the codex flavor, got '$out'"
+  # An EMPTY pin is not a pin: the liveness sweep passes FM_SBX_AGENT="" for
+  # every meta with no recorded flavor, exactly as it does for the template.
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness claude' FM_SBX_AGENT=)
+  [ "$out" = claude ] || fail "an empty FM_SBX_AGENT must resolve exactly like an unset one, got '$out'"
+
+  pass "fm_backend_sbx_agent_for_harness: unpinned resolution is the 1:1 driver map (existing spawns unchanged)"
+}
+
+test_agent_flavor_pin_is_independent_of_the_driver() {
+  local w fb out
+  w=$(new_sbx_world flavor-pin); fb=$(make_fake_sbx "$w")
+
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness claude' FM_SBX_AGENT=codex)
+  [ "$out" = codex ] || fail "FM_SBX_AGENT must pin the flavor independently of the driver, got '$out'"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness codex' FM_SBX_AGENT=codex)
+  [ "$out" = codex ] || fail "a pin matching the driver's own flavor must resolve normally, got '$out'"
+
+  pass "fm_backend_sbx_agent_for_harness: FM_SBX_AGENT=codex backs a claude driver (codex credentials kept alive for review)"
+}
+
+test_agent_flavor_refuses_pairings_it_cannot_serve() {
+  local w fb out rc
+  w=$(new_sbx_world flavor-refuse); fb=$(make_fake_sbx "$w")
+
+  rc=0
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness codex' FM_SBX_AGENT=claude 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a claude flavor must be refused for a codex driver (in-guest codex 401s there)"
+  assert_contains "$out" "cannot serve a 'codex' driver" \
+    "the refusal should name the concrete unservable pairing"
+  assert_contains "$out" "this flavor serves: claude" \
+    "the refusal should name what the flavor DOES serve, so the operator can act on it"
+
+  rc=0
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness claude' FM_SBX_AGENT=shell 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unsupported agent flavor must be refused"
+  assert_contains "$out" "FM_SBX_AGENT='shell' is not a supported sbx agent flavor (supported: claude codex)" \
+    "the refusal should name the offending value and the supported flavor set"
+
+  # The pre-existing driver gate is unchanged: an unverified harness is still
+  # refused on the harness, not misreported as a flavor problem.
+  rc=0
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_agent_for_harness pi' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unverified driver harness must still be refused"
+  assert_contains "$out" "harness 'pi' is not verified on the sbx backend (supported: claude codex)" \
+    "an unverified harness must still refuse on the harness gate"
+
+  [ ! -s "$w/sbx.log" ] || fail "flavor resolution must never touch the sbx CLI: $(cat "$w/sbx.log")"
+  pass "fm_backend_sbx_agent_for_harness: unsupported flavors and unservable pairings refuse with concrete messages"
+}
+
+test_create_task_refuses_unservable_flavor_before_anything_exists() {
+  local w fb out rc=0
+  w=$(new_sbx_world flavor-create-refuse); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/sm"
+
+  out=$(run_adapter "$fb" "$w" \
+    'fm_backend_sbx_create_task fm-x '"$w"'/sm codex '"$w"'/signals/sm' FM_SBX_AGENT=claude 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "create_task must refuse a flavor that cannot serve the driver"
+  assert_contains "$out" "cannot serve a 'codex' driver" \
+    "create_task's refusal should carry the resolver's concrete message"
+  [ ! -s "$w/sbx.log" ] || fail "the refusal must land before ANY sbx CLI call: $(cat "$w/sbx.log")"
+  [ ! -d "$w/signals/sm" ] || fail "the refusal must land before the signal directory is created"
+
+  pass "fm_backend_sbx_create_task: an unservable pairing refuses before any sandbox, signal dir, or guest state exists"
+}
+
+test_create_task_creates_with_the_pinned_flavor() {
+  local w fb
+  w=$(new_sbx_world flavor-create); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/sm"
+
+  run_adapter "$fb" "$w" \
+    'fm_backend_sbx_create_task fm-x '"$w"'/sm claude '"$w"'/signals/sm' FM_SBX_AGENT=codex \
+    || fail "creating a codex-flavor sandbox for a claude driver should succeed"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-x codex $w/sm $w/signals/sm" \
+    "sbx create must receive the PINNED flavor, not the driver's own"
+
+  pass "fm_backend_sbx_create_task: the pinned flavor is what sbx create receives"
+}
+
 # --- probe reads never exec (auto-start protection) -------------------------
 
 test_target_exists_never_execs() {
@@ -1344,6 +1441,11 @@ test_teardown_force_skips_guest_probe() {
 test_state_probe_classifies
 test_agent_alive_matrix
 test_agent_alive_dispatcher_routes_sbx
+test_agent_flavor_defaults_to_the_driver
+test_agent_flavor_pin_is_independent_of_the_driver
+test_agent_flavor_refuses_pairings_it_cannot_serve
+test_create_task_refuses_unservable_flavor_before_anything_exists
+test_create_task_creates_with_the_pinned_flavor
 test_target_exists_never_execs
 test_capture_gated_on_running
 test_send_resurrects_dead_guest_stack

@@ -336,6 +336,67 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
   return 0
 }
 
+# --- agent flavor vs driver harness -----------------------------------------
+#
+# `sbx create <agent>` picks the sandbox's AGENT FLAVOR, which decides which
+# vendor credential sandboxd resolves for the guest - NOT which CLI the guest
+# can run. The two are separable, so firstmate chooses them separately: the
+# DRIVER HARNESS is the agent firstmate launches in the guest pane, while the
+# FLAVOR is the credential wiring that pane and everything it spawns inherit.
+# The load-bearing case is a claude driver that must also run codex in-guest
+# for a no-mistakes adversarial review.
+#
+# FM_SBX_AGENT pins the flavor independently, exactly as FM_SBX_TEMPLATE pins
+# the template image; unset resolves to the driver's own flavor, which is the
+# 1:1 map this replaced. docs/sbx-backend.md "Agent flavor vs driver harness"
+# owns the measured credential matrix.
+#
+# sbx itself only WARNS on a template/agent mismatch and creates the sandbox
+# anyway, so an unusable pairing has to be refused here - before a VM exists -
+# rather than discovered when the guest 401s on its first authenticated call.
+
+# fm_backend_sbx_harnesses_for_agent: the driver harnesses an agent flavor's
+# credential wiring actually serves in-guest, measured live 2026-07-27 (both
+# rows from one adf-codex:v4 template; docs/sbx-backend.md). A claude-flavor
+# sandbox resolves only the Anthropic credential, so in-guest codex reads the
+# proxy-managed bearer placeholder its own config carries and 401s; a
+# codex-flavor sandbox serves both drivers. An unsupported flavor answers
+# nothing and rc 1.
+fm_backend_sbx_harnesses_for_agent() {  # <agent>
+  case "$1" in
+    claude) printf 'claude' ;;
+    codex)  printf 'claude codex' ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_sbx_agent_for_harness: the agent flavor to create the sandbox
+# with for <harness>, honoring the FM_SBX_AGENT pin and refusing any pairing
+# whose credentials cannot serve the driver.
+fm_backend_sbx_agent_for_harness() {  # <harness>
+  local harness=$1 agent served
+  case "$harness" in
+    claude) agent=${FM_SBX_AGENT:-claude} ;;
+    codex)  agent=${FM_SBX_AGENT:-codex} ;;
+    *)
+      echo "error: harness '$harness' is not verified on the sbx backend (supported: claude codex)" >&2
+      return 1
+      ;;
+  esac
+  served=$(fm_backend_sbx_harnesses_for_agent "$agent") || {
+    echo "error: FM_SBX_AGENT='$agent' is not a supported sbx agent flavor (supported: claude codex)" >&2
+    return 1
+  }
+  case " $served " in
+    *" $harness "*) ;;
+    *)
+      echo "error: sbx agent flavor '$agent' cannot serve a '$harness' driver: that flavor wires only its own vendor credential into the guest, so in-guest $harness has no resolvable auth token and fails its first authenticated call (this flavor serves: $served; measured 2026-07-27, docs/sbx-backend.md 'Agent flavor vs driver harness'). Set FM_SBX_AGENT to a flavor that serves $harness, or drive this sandbox with $agent." >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$agent"
+}
+
 # --- launch / resume templates ----------------------------------------------
 #
 # The guest-side launch commands live HERE, not in fm-spawn.sh's host
@@ -350,17 +411,6 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
 # a verified turn-end + resume shape on this backend: claude and codex.
 # Everything else is refused loudly at spawn (never dispatch on an unverified
 # adapter - AGENTS.md section 4).
-
-fm_backend_sbx_agent_for_harness() {  # <harness>
-  case "$1" in
-    claude) printf 'claude' ;;
-    codex)  printf 'codex' ;;
-    *)
-      echo "error: harness '$1' is not verified on the sbx backend (supported: claude codex)" >&2
-      return 1
-      ;;
-  esac
-}
 
 # fm_backend_sbx_launch_template: the initial in-guest launch command for a
 # freshly provisioned sbx secondmate. Placeholders __BRIEF__, __TURNEND__,
@@ -793,7 +843,10 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
 # (clone mode clones it into the VM at the SAME absolute path; only committed
 # files arrive - the brief copy and signal wiring are fm-spawn's job).
 # FM_SBX_TEMPLATE optionally pins a template image (stock agent images may
-# lack tmux, which is refused loudly here).
+# lack tmux, which is refused loudly here) and FM_SBX_AGENT optionally pins
+# the agent flavor independently of the driver harness (above). Resolution
+# runs FIRST so an unusable flavor/driver pairing refuses before any sandbox,
+# signal directory, or guest state exists.
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1

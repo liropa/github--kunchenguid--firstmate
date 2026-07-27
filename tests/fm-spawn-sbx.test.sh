@@ -22,6 +22,11 @@
 #     mount's turn-ended AND beat files.
 #   - Meta records backend=sbx, window=sbx:fm-<id>, sbx_signals_dir=, and the
 #     actual in-VM harness.
+#   - The sandbox's AGENT FLAVOR (which vendor credential the guest resolves)
+#     is chosen independently of the driver harness via FM_SBX_AGENT,
+#     defaulting to the driver's own flavor; the resolved value is always
+#     recorded as sbx_agent=, and a flavor that cannot serve the driver is
+#     refused before any sandbox or signal directory exists.
 #   - Guest-home provisioning (agent-dotfiles design doc
 #     firstmate-sbx-guest-home-provisioning.md §4): the home's private
 #     surface becomes a READ PATH - inherited config/ items and the shared
@@ -243,6 +248,61 @@ test_template_pin_is_recorded_in_meta() {
   pass "spawn: FM_SBX_TEMPLATE is recorded in meta for respawn reproducibility"
 }
 
+# --- agent flavor vs driver harness (docs/sbx-backend.md) -------------------
+
+test_default_spawn_creates_and_records_the_driver_flavor() {
+  local w fb out meta
+  w=$(new_world flavor-default); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "an unpinned sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx claude $w/sm $w/signals/smx" \
+    "with no flavor pin the sandbox must be created with the driver's own flavor (unchanged default)"
+  meta=$(cat "$w/home/state/smx.meta")
+  assert_contains "$meta" "sbx_agent=claude" \
+    "meta must record the resolved flavor even on the default path, so a live guest's credential wiring is readable off the record"
+
+  pass "spawn: with no pin, the flavor is the driver's own and meta records it"
+}
+
+test_agent_flavor_pin_creates_and_records_the_pinned_flavor() {
+  local w fb out meta
+  w=$(new_world flavor-pin); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  # The load-bearing case: a claude driver in a codex-flavor sandbox, so the
+  # guest keeps working codex credentials for a no-mistakes adversarial review.
+  out=$(FM_SBX_AGENT=codex run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "a codex-flavor sbx secondmate spawn for a claude driver failed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx codex $w/sm $w/signals/smx" \
+    "sbx create must receive the pinned flavor, not the driver's"
+  meta=$(cat "$w/home/state/smx.meta")
+  assert_contains "$meta" "sbx_agent=codex" \
+    "meta must record the flavor actually used, so a respawn reproduces the same credential wiring"
+  assert_contains "$meta" "harness=claude" \
+    "the driver harness must stay claude - the flavor pin changes credentials, not the driver"
+
+  pass "spawn: FM_SBX_AGENT=codex provisions a codex-flavor sandbox for a claude driver and records it"
+}
+
+test_spawn_refuses_flavor_that_cannot_serve_the_driver() {
+  local w fb out rc=0
+  w=$(new_world flavor-refuse); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(FM_SBX_AGENT=claude run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a claude-flavor sandbox for a codex driver must be refused (in-guest codex 401s)"
+  assert_contains "$out" "cannot serve a 'codex' driver" \
+    "the refusal should name the unservable pairing concretely"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the refusal must land before any sandbox is created"
+  [ ! -d "$w/signals/smx" ] || fail "the refusal must land before the signal directory is created"
+  [ ! -f "$w/home/state/smx.meta" ] || fail "a refused spawn must leave no task metadata behind"
+
+  pass "spawn: an unservable flavor/driver pairing is refused before a guest that would 401 exists"
+}
+
 test_untemplated_spawn_records_no_template_key() {
   local w fb out
   w=$(new_world no-template-meta); fb=$(make_fake_sbx "$w")
@@ -441,6 +501,9 @@ test_codex_launch_carries_mount_notify
 test_refuses_worktree_home
 test_preexisting_status_history_is_folded
 test_template_pin_is_recorded_in_meta
+test_default_spawn_creates_and_records_the_driver_flavor
+test_agent_flavor_pin_creates_and_records_the_pinned_flavor
+test_spawn_refuses_flavor_that_cannot_serve_the_driver
 test_untemplated_spawn_records_no_template_key
 test_spawn_provisions_guest_home
 test_spawn_seeds_guest_shell_profile_env
