@@ -166,6 +166,12 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # alarmed as stranded (scan_sbx_beacon). 0 disables the stranding alarm; the
 # mount-health alarm is unconditional.
 FM_SBX_NOPROGRESS_TURNS=${FM_SBX_NOPROGRESS_TURNS:-3}
+# Silence (seconds) after the host last delivered to an sbx guest before the
+# beacon's second stranding arm alarms on an unacknowledged delivery
+# (scan_sbx_beacon). 0 disables that arm. Generous by design: it must clear
+# any legitimate single turn, and its whole job is catching an agent that
+# produces nothing at all, which no threshold in this range can miss.
+FM_SBX_DELIVERY_ACK_SECS=${FM_SBX_DELIVERY_ACK_SECS:-900}
 # Horizon (seconds) within which the sbx keep-alive's <id>.guest-active
 # breadcrumb (bin/backends/sbx.sh) still proves live in-guest work; a fresh
 # breadcrumb keeps a status-sparse supervision turn-end out of the stranding
@@ -482,15 +488,28 @@ scan_signals() {
 # secondmate, so raise a captain-facing check wake. A dangling link whose
 # directory exists is a freshly provisioned secondmate that has not signaled
 # yet - quiescent by contract (tests/fm-watch-sbx-signals.test.sh).
-# Stranding: a guest TUI that can no longer work (observed live: an auth-dead
-# claude after a host OAuth rotation) keeps firing its turn-end hook on every
-# steer while the status file never progresses. Each bare turn-end already
-# surfaces as a generic signal wake; after FM_SBX_NOPROGRESS_TURNS consecutive
-# turn-ends with zero status progress the beacon NAMES the pattern with one
-# check wake. A turn-end that lands while the mount's <id>.guest-active
-# breadcrumb is fresh is recorded but NOT counted: verifiably live in-guest
-# work (a busy child pane, advancing child signals) makes status-sparse
-# supervision turns healthy, not stranding evidence.
+# Stranding has TWO arms because a count of events cannot measure their
+# absence, and the observed failures come in both shapes (fork issue #13).
+#   Arm 1, no-progress turn-ends: a guest TUI that still runs its turn-end
+#   hook but can no longer make progress fires a turn-end per steer while the
+#   status file never advances. After FM_SBX_NOPROGRESS_TURNS consecutive such
+#   turn-ends the beacon NAMES the pattern. A turn-end that lands while the
+#   mount's <id>.guest-active breadcrumb is fresh is recorded but NOT counted:
+#   verifiably live in-guest work (a busy child pane, advancing child signals)
+#   makes status-sparse supervision turns healthy, not stranding evidence.
+#   Arm 2, unacknowledged delivery: an agent that cannot process AT ALL fires
+#   no turn-ends, so arm 1's counter never advances - it is structurally blind
+#   to the worst variant (observed live: an auth-dead claude after a host OAuth
+#   rotation left the beat directory empty from creation, zero turn-ends). This
+#   arm measures SILENCE instead of events: the host touched .sbx-delivered-
+#   when it last spoke to the guest (bin/backends/sbx.sh), and NOTHING has come
+#   back since - no turn-end, no status line, no in-guest work breadcrumb - for
+#   FM_SBX_DELIVERY_ACK_SECS. Delivery is not processing evidence: a send lands
+#   in the pane whether or not the agent behind it can work.
+# Both arms share one wake key and one alarmed marker, so an episode raises
+# exactly one alarm however it was detected, and status progress re-arms both.
+# An sbx secondmate with no outstanding delivery is silent by construction:
+# an empty queue and a stopped VM are the healthy idle state, never a fault.
 # Mid-task stop: the keep-alive wrapper (bin/backends/sbx.sh) records a
 # .sbx-midtask-stop marker for a VM that stopped while in-guest work was
 # active - a stopped VM fires no turn-ends, so the stranding counter is
@@ -499,7 +518,7 @@ scan_signals() {
 # All tracking is marker files, so state survives the actionable exit each
 # turn-end causes.
 scan_sbx_beacon() {
-  local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m
+  local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m del_m ack_m ackf acked
   for te in "$STATE"/*.turn-ended; do
     [ -L "$te" ] || continue
     id=$(basename "$te" .turn-ended)
@@ -530,19 +549,70 @@ scan_sbx_beacon() {
       wake "$reason"
     fi
 
+    # --- shared progress bookkeeping -----------------------------------
+    # Status progress is the re-arm for BOTH arms, so it is read before every
+    # gate below: a guest recovering from the zero-turn-end variant can write
+    # status again before it ever produces another turn-end, and leaving this
+    # behind an arm-1 gate would latch the alarm permanently for exactly the
+    # secondmate that just came back. A dangling status link signs constantly
+    # (the target's absence, not a write), so it never fakes progress.
+    sf_sig=$(stat_sig "$STATE/$id.status" 2>/dev/null || echo absent)
+    if [ "$sf_sig" != "$(cat "$STATE/.sbx-beat-status-$key" 2>/dev/null)" ]; then
+      printf '%s' "$sf_sig" > "$STATE/.sbx-beat-status-$key"
+      rm -f "$STATE/.sbx-noprogress-$key" "$STATE/.sbx-stranded-alarmed-$key"
+    fi
+
+    # --- stranding arm 2: unacknowledged delivery ----------------------
+    # Evaluated BEFORE every turn-end gate below, because the variant it
+    # exists for produces no turn-ended file at all - anything gated on one
+    # is blind to it by construction.
+    # Acknowledgement is any guest-side file that moved at or after the
+    # delivery: the turn-ended beat (a turn completed), the status file (the
+    # agent reported), or the guest-active breadcrumb (the keep-alive saw
+    # in-guest work). One rule, three signals, so the alarm never rests on
+    # turn-ends alone. Comparing mount mtimes against the host-written
+    # delivery mtime is stateless - no baseline bookkeeping to lose across a
+    # watcher restart - and trusts guest clocks no more than the breadcrumb
+    # freshness check below already does, with a far wider tolerance.
+    # The [ -e ] gate is load-bearing for the same reason it is below: macOS
+    # stat -L on a DANGLING link signs the link itself, so a guest that never
+    # created a mount file would otherwise acknowledge every delivery with its
+    # own spawn-time symlink - silently, and only on one platform.
+    if [ "$FM_SBX_DELIVERY_ACK_SECS" -gt 0 ] 2>/dev/null \
+      && del_m=$(stat_mtime "$STATE/.sbx-delivered-$key") && [ -n "$del_m" ]; then
+      acked=0
+      for ackf in "$te" "$STATE/$id.status" "$mdir/$id.guest-active"; do
+        [ -e "$ackf" ] || continue
+        ack_m=$(stat_mtime "$ackf") || continue
+        [ -n "$ack_m" ] || continue
+        [ "$ack_m" -ge "$del_m" ] 2>/dev/null || continue
+        acked=1
+        break
+      done
+      # Acknowledgement silences this delivery; it never CLEARS the alarmed
+      # marker. Re-arming belongs to status progress alone (above): a guest
+      # that keeps answering steers without ever making progress would
+      # otherwise clear the marker on every steer and re-alarm on the next
+      # one, turning one episode into an alarm per steer.
+      if [ "$acked" = 0 ] \
+        && [ $(($(date +%s) - del_m)) -ge "$FM_SBX_DELIVERY_ACK_SECS" ] \
+        && [ ! -e "$STATE/.sbx-stranded-alarmed-$key" ]; then
+        reason="check: sbx secondmate $id looks stranded: nothing has come back since it was last steered $(( ($(date +%s) - del_m) / 60 ))m ago - no turn end, no status line, no in-guest work, so the guest agent may be unable to process at all (e.g. an auth-dead claude TUI after a host OAuth rotation; recover with 'sbx stop fm-$id' + a steer, refreshing the custom secret first if the host token rotated)"
+        fm_wake_append check "sbx-stranded:$id" "$reason" || exit 1
+        : > "$STATE/.sbx-stranded-alarmed-$key"
+        wake "$reason"
+      fi
+    fi
+
+    # --- stranding arm 1: consecutive no-progress turn-ends ------------
     [ "$FM_SBX_NOPROGRESS_TURNS" -gt 0 ] 2>/dev/null || continue
     # No real turn-end yet (fresh spawn, dangling link): nothing to track.
     # NOTE: macOS stat -L on a dangling link signs the LINK itself (rc 0),
     # so the [ -e ] gate, not stat_sig failure, keeps fresh spawns out.
     [ -e "$te" ] || continue
     te_sig=$(stat_sig "$te") || continue
-    # Status progress - through the symlink or an absent target's constant
-    # link signature - resets the counter and re-arms the alarm.
-    sf_sig=$(stat_sig "$STATE/$id.status" 2>/dev/null || echo absent)
-    if [ "$sf_sig" != "$(cat "$STATE/.sbx-beat-status-$key" 2>/dev/null)" ]; then
-      printf '%s' "$sf_sig" > "$STATE/.sbx-beat-status-$key"
-      rm -f "$STATE/.sbx-noprogress-$key" "$STATE/.sbx-stranded-alarmed-$key"
-    fi
+    # Status progress (read above, before the gates) has already reset the
+    # counter and re-armed the alarm for this cycle.
     [ "$te_sig" != "$(cat "$STATE/.sbx-beat-te-$key" 2>/dev/null)" ] || continue
     printf '%s' "$te_sig" > "$STATE/.sbx-beat-te-$key"
     # A fresh guest-active breadcrumb proves live in-guest work, so this

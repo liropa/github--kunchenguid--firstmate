@@ -769,6 +769,45 @@ test_send_starts_keepalive_after_delivery() {
   pass "send path: delivery pins the VM with a guest-work-bounded keep-alive exec"
 }
 
+test_send_records_delivery_breadcrumb() {
+  # The stranding beacon's acknowledgement clock (fm-watch.sh scan_sbx_beacon).
+  # Delivery is NOT processing evidence - a send lands in the guest pane
+  # whether or not the agent behind it can work - so the host records WHEN it
+  # last spoke to the guest and the beacon alarms when nothing comes back.
+  # Host-written and content-free by design: a guest can neither forge nor
+  # suppress it, and no delivered text is ever stored.
+  local w fb
+  w=$(new_sbx_world delivered); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # Keep-alives OFF: the acknowledgement clock must not depend on a pinned
+  # connection, so the breadcrumb is written on this path too.
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "a steer with keep-alives disabled should still succeed"
+  [ -f "$w/state/.sbx-delivered-x" ] \
+    || fail "a delivered steer must record the beacon's delivery breadcrumb"
+  [ ! -s "$w/state/.sbx-delivered-x" ] \
+    || fail "the breadcrumb must stay content-free: $(cat "$w/state/.sbx-delivered-x")"
+  pass "send path: delivery records the beacon's content-free acknowledgement breadcrumb"
+}
+
+test_send_to_foreign_name_records_no_breadcrumb() {
+  # A non-fm-* sandbox has no derivable id or signal path, so nothing
+  # host-side would ever see its turn end - arming an acknowledgement clock
+  # that can never be acknowledged would alarm forever.
+  local w fb
+  w=$(new_sbx_world delivered-foreign); fb=$(make_fake_sbx "$w")
+  sbx_ls_json other running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:other "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "a steer to a non-fm sandbox should still deliver"
+  [ -z "$(find "$w/state" -name '.sbx-delivered-*' 2>/dev/null)" ] \
+    || fail "a non-fm sandbox must not arm the acknowledgement clock"
+  pass "send path: a non-fm sandbox records no delivery breadcrumb"
+}
+
 # --- keep-alive guest loop: pin/release logic (fork issue #12) ---------------
 #
 # fm_backend_sbx_keepalive_script is plain POSIX sh over stat/tmux/grep, so
@@ -1395,14 +1434,16 @@ test_teardown_clears_beacon_markers() {
   # the parent's state dir. Teardown must remove them with the id's other
   # state files: a leftover .sbx-stranded-alarmed marker would SUPPRESS the
   # stranding alarm for a re-provisioned same-id secondmate that is stranded
-  # from birth (its status never progresses, so nothing ever clears it).
+  # from birth (its status never progresses, so nothing ever clears it), and a
+  # leftover .sbx-delivered marker would RAISE one for a delivery made to the
+  # retired secondmate the replacement never received.
   local w fb out rc m
   w=$(new_teardown_world teardown-beacon); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-domain running > "$w/ls.json"
   : > "$w/sbx.log"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
-           .sbx-midtask-stop-domain; do
+           .sbx-midtask-stop-domain .sbx-delivered-domain; do
     : > "$w/home/state/$m"
   done
   set +e
@@ -1412,7 +1453,7 @@ test_teardown_clears_beacon_markers() {
   [ "$rc" -eq 0 ] || fail "clean-guest teardown should succeed: $out"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
-           .sbx-midtask-stop-domain; do
+           .sbx-midtask-stop-domain .sbx-delivered-domain; do
     [ ! -e "$w/home/state/$m" ] || fail "teardown should remove the beacon marker $m"
   done
   pass "teardown: the id's beat-beacon markers are removed with its state files"
@@ -1466,6 +1507,8 @@ test_submit_retypes_when_stale_prefix_goes_busy
 test_submit_counts_full_history_when_window_scrolls
 test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
+test_send_records_delivery_breadcrumb
+test_send_to_foreign_name_records_no_breadcrumb
 test_keepalive_script_capped_verdicts
 test_keepalive_script_pins_busy_worker_across_turn_end
 test_keepalive_script_releases_idle_guest_on_turn_end

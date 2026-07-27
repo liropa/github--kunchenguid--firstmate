@@ -702,18 +702,32 @@ fm_backend_sbx_ensure_stack() {  # <target>
   return 0
 }
 
-# Every successful delivery is followed by a fire-and-forget keep-alive: the
-# delivered text (a steer, or fm-spawn's launch command - the spawn's sends
-# dispatch through these same functions) starts a guest turn, and without a
-# pinned connection the auto-stop would kill that turn mid-work (see
-# fm_backend_sbx_keepalive). The recorded home= rides along so the keeper's
-# guest loop can watch the guest home's state/ for child-worker signal
-# advances; an absent meta simply skips that secondary probe. A non-fm-* name
-# has no derivable id/signal path, so no keeper - nothing host-side would
-# ever see its turn end anyway.
-fm_backend_sbx_send_keepalive() {  # <target>
+# Every successful delivery does two things.
+#
+# It arms a fire-and-forget keep-alive: the delivered text (a steer, or
+# fm-spawn's launch command - the spawn's sends dispatch through these same
+# functions) starts a guest turn, and without a pinned connection the
+# auto-stop would kill that turn mid-work (see fm_backend_sbx_keepalive). The
+# recorded home= rides along so the keeper's guest loop can watch the guest
+# home's state/ for child-worker signal advances; an absent meta simply skips
+# that secondary probe.
+#
+# It also touches the host-side .sbx-delivered- breadcrumb the watcher's
+# stranding beacon uses as its acknowledgement clock (docs/sbx-backend.md
+# "Beat-beacon alarms"). DELIVERY IS NOT PROCESSING EVIDENCE: a send lands in
+# the guest tmux pane whether or not the agent behind it can work, so the
+# breadcrumb's mtime is only "we last spoke to this guest at T" and the beacon
+# alarms when nothing came back. The breadcrumb is deliberately host-written
+# and content-free - a guest cannot forge or suppress it, and no delivered
+# text is ever recorded. It is written even when keep-alives are disabled,
+# because the acknowledgement clock does not depend on a pinned connection.
+#
+# A non-fm-* name has no derivable id/signal path, so neither applies -
+# nothing host-side would ever see its turn end anyway.
+fm_backend_sbx_after_send() {  # <target>
   local target=$1 id home
   id=$(fm_backend_sbx_task_of_target "$target") || return 0
+  touch "$(fm_backend_sbx_state_dir)/.sbx-delivered-$(printf '%s' "$id" | tr '.' '_')" 2>/dev/null || true
   home=$(fm_meta_get "$(fm_backend_sbx_state_dir)/$id.meta" home) || home=
   fm_backend_sbx_keepalive "$(fm_backend_sbx_name_of_target "$target")" "$id" "$home"
 }
@@ -723,7 +737,7 @@ fm_backend_sbx_send_key() {  # <target> <key> [expected-label]
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key" || return 1
-  fm_backend_sbx_send_keepalive "$target"
+  fm_backend_sbx_after_send "$target"
 }
 
 fm_backend_sbx_send_text_line() {  # <target> <text>
@@ -731,7 +745,7 @@ fm_backend_sbx_send_text_line() {  # <target> <text>
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$text" Enter || return 1
-  fm_backend_sbx_send_keepalive "$target"
+  fm_backend_sbx_after_send "$target"
 }
 
 fm_backend_sbx_send_literal() {  # <target> <text>
@@ -739,7 +753,7 @@ fm_backend_sbx_send_literal() {  # <target> <text>
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text" || return 1
-  fm_backend_sbx_send_keepalive "$target"
+  fm_backend_sbx_after_send "$target"
 }
 
 # fm_backend_sbx_send_text_submit: type, submit, VERIFY, retry - echo a
@@ -804,7 +818,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
         # otherwise it is still sitting in the composer - loop re-sends
         # Enter only.
         if [ "$busy" -eq 1 ]; then
-          fm_backend_sbx_send_keepalive "$target"
+          fm_backend_sbx_after_send "$target"
           printf 'submitted'
           return 0
         fi
@@ -823,7 +837,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # ambiguous (unreadable pane, or text present but the busy footer never
   # showed). Deliver the conservative verdict and let the caller's fallback
   # policy own it - the text was never typed twice.
-  fm_backend_sbx_send_keepalive "$target"
+  fm_backend_sbx_after_send "$target"
   printf 'unknown'
 }
 

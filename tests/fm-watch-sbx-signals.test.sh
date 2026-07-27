@@ -337,6 +337,188 @@ test_inguest_activity_suppresses_stranding() {
   pass "a fresh guest-active breadcrumb suppresses the stranding count; a stale one re-enables it"
 }
 
+test_healthy_idle_secondmate_never_alarms() {
+  # Over-alarming is as harmful as under-alarming (issue #13: two false alarms,
+  # zero true ones, in one night). A persistent secondmate with an empty queue
+  # is HEALTHY - for sbx a stopped VM with no signals at all is its normal
+  # resting state - so with no outstanding delivery the beacon must stay
+  # completely silent no matter how long it sits there.
+  local dir state mount out pid
+  dir=$(make_case healthy-idle); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "an idle secondmate with no delivery woke the watcher: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$state/.wake-queue" ] 2>/dev/null \
+    || ! grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a healthy idle secondmate must never raise a stranding alarm: $(cat "$state/.wake-queue")"
+
+  pass "a healthy idle secondmate with no outstanding delivery never alarms"
+}
+
+test_unacked_delivery_fires_stranding_alarm() {
+  # Issue #13's structural blind spot: the no-progress counter can only count
+  # turn-ends that HAPPEN, so an agent that cannot process AT ALL (the observed
+  # auth-dead claude TUI: the beat directory stayed EMPTY from creation, zero
+  # turn-ends ever) never advances it. This case reproduces exactly that shape
+  # - a delivered steer, then permanent silence with no turn-ended file at all
+  # - and the beacon must still name it.
+  local dir state mount out pid
+  dir=$(make_case unacked); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  # The host spoke to the guest long ago; nothing in the mount ever moved.
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+  [ ! -e "$mount/x.turn-ended" ] || fail "fixture bug: the beat file must not exist"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on an unacknowledged delivery: $(cat "$out")"
+  grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a delivery with zero turn-ends must still raise the stranding alarm: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "nothing has come back" "$state/.wake-queue" >/dev/null \
+    || fail "the alarm should name the unacknowledged-delivery pattern: $(cat "$state/.wake-queue")"
+
+  # One alarm per episode, durable across the restart the wake itself caused.
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 25 || { reap "$pid"; fail "watcher re-alarmed on an already-alarmed stranding: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(grep -c "sbx-stranded:x" "$state/.wake-queue")" = 1 ] \
+    || fail "one stranding episode should hold at ONE queued alarm: $(cat "$state/.wake-queue")"
+
+  pass "an unacknowledged delivery alarms once even with zero turn-ends"
+}
+
+test_turnend_acknowledgement_silences_and_rearms() {
+  # The acknowledgement rule, first signal: a turn end at or after the delivery
+  # proves the guest processed it, so the arm stays silent however old the
+  # delivery gets - and a LATER unacknowledged delivery alarms again, so one
+  # recovered episode never disarms the next.
+  local dir state mount out pid
+  dir=$(make_case acked-turnend); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+  # The guest answered that steer: its beat is newer than the delivery.
+  printf 't1\n' >> "$mount/x.turn-ended"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  # The turn-end is itself an ordinary signal wake; it must NOT be a stranding.
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the acknowledging turn-end: $(cat "$out")"
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a turn end after the delivery must acknowledge it: $(cat "$state/.wake-queue")"
+  # Quiet from here: the signal is consumed, so nothing at all should wake.
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 25 || { reap "$pid"; fail "an acknowledged delivery woke the watcher: $(cat "$out")"; }
+  reap "$pid"
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "an acknowledged delivery must never alarm later: $(cat "$state/.wake-queue")"
+
+  # A NEW steer that the guest never answers is a fresh episode: the delivery
+  # now postdates the last beat, which is what "unacknowledged" means.
+  touch -t 202001010000 "$mount/x.turn-ended"
+  touch -t 202001020000 "$state/.sbx-delivered-x"
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on the next unacknowledged delivery: $(cat "$out")"
+  grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a delivery newer than the last beat should alarm again: $(cat "$state/.wake-queue")"
+
+  pass "a turn end acknowledges its delivery; a later unanswered one re-alarms"
+}
+
+test_status_only_acknowledgement_silences() {
+  # The beacon must not rest on turn-ends EXCLUSIVELY (issue #13's doc
+  # correction): a guest that reports through its status file but whose
+  # turn-end hook never fires is working, not stranded.
+  local dir state mount out pid
+  dir=$(make_case acked-status); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+  printf 'working: on it\n' >> "$mount/x.status"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the status write: $(cat "$out")"
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "a status line after the delivery must acknowledge it: $(cat "$state/.wake-queue")"
+
+  pass "a status line acknowledges a delivery with no turn-end at all"
+}
+
+test_inguest_work_acknowledges_delivery() {
+  # Issue #13's false-positive shape, seen by the second arm: the secondmate is
+  # healthily supervising a long in-guest pipeline, so it is status-sparse AND
+  # its own turn has not ended. The keep-alive's guest-active breadcrumb is the
+  # only thing moving, and it must be enough to keep the beacon quiet.
+  local dir state mount out pid
+  dir=$(make_case acked-inguest); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+  touch "$mount/x.guest-active"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "live in-guest work woke the watcher: $(cat "$out")"; }
+  reap "$pid"
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" 2>/dev/null >/dev/null \
+    || fail "verifiable in-guest work must acknowledge the delivery: $(cat "$state/.wake-queue")"
+
+  # The pipeline ends and the guest goes silent without ever answering: the
+  # same delivery is now unacknowledged evidence again.
+  touch -t 201901010000 "$mount/x.guest-active"
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm once in-guest work predated the delivery: $(cat "$out")"
+  grep -F "sbx-stranded:x" "$state/.wake-queue" >/dev/null \
+    || fail "work older than the delivery is not acknowledgement: $(cat "$state/.wake-queue")"
+
+  pass "live in-guest work acknowledges a delivery; stale work does not"
+}
+
+test_recent_delivery_is_not_yet_stranding() {
+  # The window is a grace, not a trigger: an ordinary steer the guest is still
+  # thinking about must never alarm.
+  local dir state mount out pid
+  dir=$(make_case fresh-delivery); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  touch "$state/.sbx-delivered-x"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "a just-delivered steer woke the watcher: $(cat "$out")"; }
+  reap "$pid"
+  ! grep -F "sbx-stranded:x" "$state/.wake-queue" 2>/dev/null >/dev/null \
+    || fail "a delivery inside the acknowledgement window must not alarm: $(cat "$state/.wake-queue")"
+
+  pass "a delivery still inside the acknowledgement window never alarms"
+}
+
 test_mount_write_surfaces_through_symlink
 test_second_mount_write_surfaces_again
 test_foreign_id_file_is_invisible
@@ -346,5 +528,11 @@ test_no_progress_turns_fire_stranding_alarm
 test_status_progress_resets_stranding_counter
 test_midtask_stop_marker_fires_named_alarm
 test_inguest_activity_suppresses_stranding
+test_healthy_idle_secondmate_never_alarms
+test_recent_delivery_is_not_yet_stranding
+test_unacked_delivery_fires_stranding_alarm
+test_turnend_acknowledgement_silences_and_rearms
+test_status_only_acknowledgement_silences
+test_inguest_work_acknowledges_delivery
 
 echo "# all fm-watch-sbx-signals tests passed"

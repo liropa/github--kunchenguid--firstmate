@@ -1217,11 +1217,14 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 # Beat-beacon markers (fm-watch.sh scan_sbx_beacon; key = id with dots
 # folded to underscores). A leftover .sbx-stranded-alarmed marker would
-# suppress the stranding alarm for a re-provisioned same-id secondmate.
+# suppress the stranding alarm for a re-provisioned same-id secondmate, and a
+# leftover .sbx-delivered marker would alarm one as unacknowledged for a
+# delivery made to the retired secondmate it replaced.
 _beacon_key=$(printf '%s' "$ID" | tr '.' '_')
 rm -f "$STATE/.sbx-beat-te-$_beacon_key" "$STATE/.sbx-beat-status-$_beacon_key" \
   "$STATE/.sbx-noprogress-$_beacon_key" "$STATE/.sbx-stranded-alarmed-$_beacon_key" \
-  "$STATE/.sbx-mount-alarmed-$_beacon_key" "$STATE/.sbx-midtask-stop-$_beacon_key"
+  "$STATE/.sbx-mount-alarmed-$_beacon_key" "$STATE/.sbx-midtask-stop-$_beacon_key" \
+  "$STATE/.sbx-delivered-$_beacon_key"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
