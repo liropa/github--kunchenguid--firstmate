@@ -338,30 +338,22 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
 
 # --- agent flavor vs driver harness -----------------------------------------
 #
-# `sbx create <agent>` picks the sandbox's AGENT FLAVOR, which decides which
-# vendor credential sandboxd resolves for the guest - NOT which CLI the guest
-# can run. The two are separable, so firstmate chooses them separately: the
-# DRIVER HARNESS is the agent firstmate launches in the guest pane, while the
-# FLAVOR is the credential wiring that pane and everything it spawns inherit.
-# The load-bearing case is a claude driver that must also run codex in-guest
-# for a no-mistakes adversarial review.
+# `sbx create <agent>` picks the sandbox's credential wiring, not the CLI
+# firstmate launches in the guest pane. The flavor and driver are therefore
+# resolved separately.
 #
 # FM_SBX_AGENT pins the flavor independently, exactly as FM_SBX_TEMPLATE pins
-# the template image; unset resolves to the driver's own flavor, which is the
-# 1:1 map this replaced. docs/sbx-backend.md "Agent flavor vs driver harness"
-# owns the measured credential matrix.
+# the template image; unset or empty resolves to the driver's own flavor.
+# docs/sbx-backend.md "Agent flavor vs driver harness" owns the supported
+# matrix and its measured evidence.
 #
 # sbx itself only WARNS on a template/agent mismatch and creates the sandbox
 # anyway, so an unusable pairing has to be refused here - before a VM exists -
 # rather than discovered when the guest 401s on its first authenticated call.
 
 # fm_backend_sbx_harnesses_for_agent: the driver harnesses an agent flavor's
-# credential wiring actually serves in-guest, measured live 2026-07-27 (both
-# rows from one adf-codex:v4 template; docs/sbx-backend.md). A claude-flavor
-# sandbox resolves only the Anthropic credential, so in-guest codex reads the
-# proxy-managed bearer placeholder its own config carries and 401s; a
-# codex-flavor sandbox serves both drivers. An unsupported flavor answers
-# nothing and rc 1.
+# credential wiring serves in-guest. An unsupported flavor answers nothing
+# and rc 1; docs/sbx-backend.md owns the matrix and evidence.
 fm_backend_sbx_harnesses_for_agent() {  # <agent>
   case "$1" in
     claude) printf 'claude' ;;

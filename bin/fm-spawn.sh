@@ -1012,7 +1012,7 @@ EOF
     # anything, so meta can only ever record an in-VM harness the liveness
     # sweep's verified list accepts.
     # The sandbox's AGENT FLAVOR is resolved here, first of everything: it
-    # decides which vendor credential the guest can resolve, it is chosen
+    # decides which credential wiring the guest receives, it is chosen
     # independently of the driver harness (FM_SBX_AGENT; bin/backends/sbx.sh),
     # and a flavor that cannot serve this driver must refuse before any
     # sandbox, signal directory, or guest state exists rather than produce a
@@ -1383,7 +1383,7 @@ META_WINDOW=$T
   if [ "$BACKEND" = sbx ]; then
     echo "sbx_signals_dir=$SIG_DIR"
     # The RESOLVED agent flavor, always recorded: it is the only durable
-    # record of which vendor credential wiring a live guest actually has, and
+    # record of which credential wiring a live guest actually has, and
     # recording it only when pinned would force every reader to re-derive the
     # default map. It is placement state in the strongest sense - changing a
     # sandbox's flavor means destroying and recreating the VM - so the
