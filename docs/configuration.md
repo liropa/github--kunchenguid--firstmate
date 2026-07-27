@@ -66,7 +66,8 @@ A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zel
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 An sbx task additionally records `sbx_signals_dir=`, the resolved `sbx_agent=`, and, when `FM_SBX_TEMPLATE` was set, `sbx_template=`, with `window=sbx:fm-<id>` naming the sandbox target.
-`sbx_agent=` is the sandbox's agent flavor - which vendor credential the guest can resolve, chosen independently of the driver harness via `FM_SBX_AGENT` and always recorded so a respawn reproduces it (`docs/sbx-backend.md` "Agent flavor vs driver harness").
+`sbx_agent=` is the sandbox's agent flavor - the credential wiring available to the guest, chosen independently of the driver harness via `FM_SBX_AGENT` and always recorded so operators can inspect the wiring actually used without re-deriving defaults.
+[`docs/sbx-backend.md`](sbx-backend.md#agent-liveness-probe-fm_backend_sbx_agent_alive) owns how the liveness sweep re-enters that recorded placement on respawn.
 An sbx task also carries `sbx_guest_synced=`, the guest clone's last verified HEAD, recorded only from the guest's own report and maintained by the tracked-file sync (`docs/sbx-backend.md` "Tracked-file sync"); its absence means the next sync verifies in-guest instead of trusting a cache.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
@@ -367,6 +368,7 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_HARNESS_PID=          # optional launcher-provided live harness pid for fm-lock.sh when its ps ancestry walk finds no harness; checked before Claude's CLAUDE_PID
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, sbx is secondmate-only, codex-app is not accepted
+FM_SBX_AGENT=           # sbx-only: optional agent-flavor pin for a spawn; unset or empty defaults to the driver harness's own flavor; docs/sbx-backend.md owns the supported flavor/driver matrix and durable respawn behavior
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
