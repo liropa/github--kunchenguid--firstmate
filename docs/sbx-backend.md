@@ -323,7 +323,12 @@ ok - a status line acknowledges a delivery with no turn-end at all
 ok - live in-guest work acknowledges a delivery; stale work does not
 ok - a fresh guest-active breadcrumb suppresses the stranding count; a stale one re-enables it
 ok - status progress resets the no-progress counter; healthy turns never alarm
+ok - acknowledging a delivery never re-arms an alarm that already stands
+ok - status progress re-arms the alarm with no turn-end in the whole episode
 ```
+
+The last two are the falsification check for the shared-marker rules, not decoration: with acknowledgement restored to clearing the marker, `acknowledged steers must not re-arm a standing alarm` fails, and with the status bookkeeping moved back below the turn-end gates, `status progress must re-arm the alarm even with no turn-ended file at all` fails.
+Both were confirmed failing against the reverted logic on 2026-07-27 before being accepted as passing.
 
 The auth-dead reproduction is a fixture, not a live rig: `state/x.turn-ended` is left dangling with the mount directory present (the observed "empty from creation" shape) and the delivery breadcrumb backdated past the window.
 **A live-host confirmation on a real auth-dead guest is still outstanding** - the logic is verified, the end-to-end path is not.

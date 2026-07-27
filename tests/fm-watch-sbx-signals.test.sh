@@ -519,6 +519,89 @@ test_recent_delivery_is_not_yet_stranding() {
   pass "a delivery still inside the acknowledgement window never alarms"
 }
 
+test_acknowledgement_never_rearms_a_standing_alarm() {
+  # The two arms share one alarmed marker, and only STATUS PROGRESS may clear
+  # it. Acknowledgement must not: a guest that answers every steer with a bare
+  # turn-end while never progressing would otherwise clear the marker on each
+  # steer and alarm again on the next one - one episode becoming an alarm per
+  # steer, the same over-alarming this beacon was fixed for.
+  local dir state mount out pid i
+  dir=$(make_case ack-no-rearm); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+
+  # Drive the counter arm to its one alarm.
+  for i in 1 2 3; do
+    printf 't%s\n' "$i" >> "$mount/x.turn-ended"
+    : > "$out"
+    watch_bg "$state" "$dir/fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit on stranded turn-end $i: $(cat "$out")"
+  done
+  [ "$(grep -c "sbx-stranded:x" "$state/.wake-queue")" = 1 ] \
+    || fail "setup: the counter arm should have alarmed exactly once: $(cat "$state/.wake-queue")"
+
+  # Two more steers, each ANSWERED by a bare turn-end and each still making no
+  # progress. Every one of them acknowledges its delivery; none may re-alarm.
+  for i in 4 5; do
+    touch "$state/.sbx-delivered-x"
+    printf 't%s\n' "$i" >> "$mount/x.turn-ended"
+    : > "$out"
+    watch_bg "$state" "$dir/fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit on answered steer $i: $(cat "$out")"
+  done
+  [ "$(grep -c "sbx-stranded:x" "$state/.wake-queue")" = 1 ] \
+    || fail "acknowledged steers must not re-arm a standing alarm: $(cat "$state/.wake-queue")"
+
+  pass "acknowledging a delivery never re-arms an alarm that already stands"
+}
+
+test_status_progress_rearms_without_any_turn_end() {
+  # The re-arm must not sit behind a turn-end gate. A guest recovering from the
+  # zero-turn-end variant can write status again before it ever produces
+  # another turn-end, and gating the re-arm on a turn-ended file would latch
+  # the alarm forever for exactly the secondmate that just came back.
+  local dir state mount out pid
+  dir=$(make_case rearm-no-turnend); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  ln -s "$mount/x.status" "$state/x.status"
+  ln -s "$mount/x.turn-ended" "$state/x.turn-ended"
+  touch -t 202001010000 "$state/.sbx-delivered-x"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on the first stranding: $(cat "$out")"
+  [ "$(grep -c "sbx-stranded:x" "$state/.wake-queue")" = 1 ] \
+    || fail "setup: expected exactly one alarm: $(cat "$state/.wake-queue")"
+  [ -e "$state/.sbx-stranded-alarmed-x" ] || fail "setup: the alarm should have latched"
+
+  # Recovery: the guest reports again. No turn-ended file has EVER existed.
+  printf 'working: back on deck\n' >> "$mount/x.status"
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the recovery status write: $(cat "$out")"
+  [ ! -e "$mount/x.turn-ended" ] || fail "fixture bug: this case must never produce a turn-end"
+  [ ! -e "$state/.sbx-stranded-alarmed-x" ] \
+    || fail "status progress must re-arm the alarm even with no turn-ended file at all"
+
+  # A later unanswered steer is a fresh episode and must alarm again.
+  touch -t 202001030000 "$mount/x.status"
+  touch -t 202001040000 "$state/.sbx-delivered-x"
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on the next stranding episode: $(cat "$out")"
+  [ "$(grep -c "sbx-stranded:x" "$state/.wake-queue")" = 2 ] \
+    || fail "a re-armed beacon should alarm on the next episode: $(cat "$state/.wake-queue")"
+
+  pass "status progress re-arms the alarm with no turn-end in the whole episode"
+}
+
 test_mount_write_surfaces_through_symlink
 test_second_mount_write_surfaces_again
 test_foreign_id_file_is_invisible
@@ -534,5 +617,7 @@ test_unacked_delivery_fires_stranding_alarm
 test_turnend_acknowledgement_silences_and_rearms
 test_status_only_acknowledgement_silences
 test_inguest_work_acknowledges_delivery
+test_acknowledgement_never_rearms_a_standing_alarm
+test_status_progress_rearms_without_any_turn_end
 
 echo "# all fm-watch-sbx-signals tests passed"
