@@ -171,6 +171,10 @@ test_claude_spawn_wires_signal_bridge() {
 
   assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
     "the launch command should have been delivered into the guest pane"
+  [ -e "$w/home/state/.sbx-delivered-smx" ] \
+    || fail "the literal-plus-composed-submit launch path must arm the delivery beacon"
+  [ -z "$(find "$w/home/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
+    || fail "the launch path should leave no unpublished delivery candidate"
 
   pass "spawn: claude sbx secondmate gets mount, symlinks, rewritten brief, and guest Stop hook"
 }

@@ -217,7 +217,8 @@ The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: af
 Retries exhausted stays the conservative `unknown`.
 **Presence means newly appeared, not merely visible**: the needle is the steer's first 24 chars (marker + a few payload chars), which a *previous* steer's rendered line in scrollback also matches - so the occurrence count is baselined from the full tmux history after the ready poll and before typing, and only a count above the baseline reads as our text (one extra capture exec per steer). Without this, a resume-time swallow behind a stale same-prefix line converts the designed retype into a no-op Enter loop and the steer is lost behind a clean exit (observed live, 5-secondmate soak: 1 of 5 concurrent resurrections).
 Every successful turn-submitting delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
-Literal typing and control-only keys such as Escape and C-c do not start a turn, so they neither arm the delivery alarm nor start a keep-alive; Enter does both because it submits the composed input.
+Literal typing and standalone special keys, including Enter, do not prove that a turn started, so they neither arm the delivery alarm nor start a keep-alive.
+Verified text submissions and spawn's explicit literal-plus-composed-submit path do both.
 The loop releases only when the id's `turn-ended` mount file has advanced past its delivery baseline (the original v1 condition) AND the guest shows no work: no tmux pane whose visible tail matches the busy regex (`FM_BUSY_REGEX`, the same busy idiom the watcher and the submit verify use), and no `*.status`/`*.turn-ended` file under the guest home's `state/` (an in-guest child worker's signals) touched within `FM_SBX_GUEST_ACTIVE_WINDOW` (default 120 s).
 Releasing on the secondmate's own turn-end alone re-opened the auto-stop trap one level down: an in-guest crewmate holds no host connection, so the VM died 45-100 s after the secondmate's turn ended and killed the mid-implementation worker (fork issue #12, proven three times 2026-07-23, the third taking an in-guest no-mistakes daemon and a live validation run with it).
 The busy-pane probe is the primary activity signal because worker status appends are sparse by contract (a mid-implementation worker may write nothing for half an hour) while a working TUI shows its busy tail continuously; the child-signal window is the secondary leg that bridges a worker's short between-turns gaps.
@@ -290,8 +291,10 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
   - *No-progress turn-ends*: `FM_SBX_NOPROGRESS_TURNS` (default 3; 0 disables) consecutive turn-ends with zero status-file progress. This is the guest that still runs its turn-end hook but cannot make progress: each bare turn-end already surfaces as a generic signal wake, and the beacon names the pattern. Any status progress resets the counter and re-arms. A turn-end that lands while the mount's `<id>.guest-active` breadcrumb is fresh (within `FM_SBX_GUEST_ACTIVE_WINDOW`) is recorded but **not counted**: supervision turns during a long in-guest pipeline are legitimately status-sparse, and counting them produced issue #13's false alarms.
   - *Unacknowledged delivery*: `FM_SBX_DELIVERY_ACK_SECS` (default 900; 0 disables) of complete silence after the host last delivered to the guest.
     **This arm exists because the counter above is structurally blind to the worst variant**: an agent that cannot process at all fires no turn-ends, so the counter it depends on never advances (evidence below).
-    Before a turn-submitting send injects input, it creates a host-written, content-free candidate; a successful send atomically promotes that candidate to `state/.sbx-delivered-<id>` without changing its pre-injection mtime.
-    A preparation failure refuses before input is sent.
+    Immediately before each potentially turn-submitting Enter, the send creates a host-written, content-free candidate.
+    A successful send atomically promotes the latest injected attempt's candidate to `state/.sbx-delivered-<id>` without changing its pre-injection mtime and discards earlier unpublished candidates.
+    If a later retry cannot be injected, the previous attempt's candidate remains the conservative delivery edge.
+    A preparation failure never injects that attempt's Enter; before any earlier attempt, verified submit reports the typed text as pending, while after an earlier attempt it retains that attempt's candidate as the conservative edge.
     A rare post-delivery promotion failure reports that the input was delivered but untracked and explicitly says not to resend.
     The arm alarms when no guest-side file is strictly newer than the delivery.
     Acknowledgement is any of three signals - the turn-ended beat, the status file, or the `<id>.guest-active` breadcrumb - so the beacon **never rests on turn-ends exclusively**.
@@ -342,11 +345,13 @@ Verified at the delivery boundary 2026-07-27 (this tree, `bash tests/fm-backend-
 
 ```
 ok - send_text_submit: text visible + busy pane -> submitted, typed once
+ok - send_text_submit: each Enter retry uses a fresh delivery candidate
+ok - send_text_submit: total failure preserves the previous delivery edge
 ok - send path: the delivery breadcrumb causally predates an immediate guest acknowledgement
 ok - send path: a beacon preparation failure refuses before delivery
 ok - send path: a post-delivery beacon failure reports untracked delivery without inviting resend
 ok - send path: failed injection preserves the previous delivery edge
-ok - send path: only turn-submitting input arms the delivery beacon
+ok - send path: only proven composed submission arms the delivery beacon
 ```
 
 The last two are the falsification check for the shared-marker rules, not decoration: with acknowledgement restored to clearing the marker, `acknowledged steers must not re-arm a standing alarm` fails, and with the status bookkeeping moved back below the turn-end gates, `status progress must re-arm the alarm even with no turn-ended file at all` fails.

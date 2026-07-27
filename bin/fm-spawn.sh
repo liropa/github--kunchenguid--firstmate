@@ -1155,7 +1155,10 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
-    sbx) fm_backend_sbx_send_key "$1" "$2" ;;
+    sbx)
+      [ "$2" = Enter ] || return 1
+      fm_backend_sbx_submit_composed "$1"
+      ;;
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then

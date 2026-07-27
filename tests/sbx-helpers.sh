@@ -30,10 +30,17 @@
 #                            what was typed; unset = the type is eaten (the
 #                            resume-time swallow)
 #   FM_FAKE_SBX_ENTER_BUSY   appends the default busy footer on Enter
+#   FM_FAKE_SBX_ENTER_BUSY_AFTER
+#                            first Enter number that appends the busy footer
 #   FM_FAKE_SBX_SEND_RC      non-zero makes tmux send-keys fail
+#   FM_FAKE_SBX_ENTER_RC     non-zero makes only Enter send-keys fail
 #   FM_FAKE_SBX_ACK_ON_ENTER file touched after a successful Enter send
+#   FM_FAKE_SBX_ACK_ON_ENTER_ONCE
+#                            touches the acknowledgement on the first Enter only
 #   FM_FAKE_SBX_EXPECT_PENDING_DIR
 #                            requires a pending delivery candidate on Enter
+#   FM_FAKE_SBX_REQUIRE_FRESH_PENDING
+#                            requires a different candidate for every Enter
 #   FM_FAKE_SBX_FG           what `exec ... tmux display-message` prints as the
 #                            pane's foreground process (default codex; set to
 #                            bash to simulate a resume that died back to the
@@ -157,6 +164,16 @@ case "$cmd" in
         ;;
       "tmux send-keys"*)
         [ "${FM_FAKE_SBX_SEND_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_SEND_RC}"
+        enter_count=0
+        case "$guest" in
+          *" Enter")
+            enter_count_file="${FM_FAKE_SBX_LOG:?FM_FAKE_SBX_LOG unset}.enter-count"
+            enter_count=$(cat "$enter_count_file" 2>/dev/null || echo 0)
+            enter_count=$((enter_count + 1))
+            printf '%s\n' "$enter_count" > "$enter_count_file"
+            [ "${FM_FAKE_SBX_ENTER_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_ENTER_RC}"
+            ;;
+        esac
         if [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
           case "$guest" in
             *" -l "*)
@@ -166,7 +183,10 @@ case "$cmd" in
               fi
               ;;
             *" Enter")
-              [ -n "${FM_FAKE_SBX_ENTER_BUSY:-}" ] && printf 'esc to interrupt\n' >> "$FM_FAKE_SBX_CAPTURE"
+              if [ -n "${FM_FAKE_SBX_ENTER_BUSY:-}" ] \
+                && [ "$enter_count" -ge "${FM_FAKE_SBX_ENTER_BUSY_AFTER:-1}" ]; then
+                printf 'esc to interrupt\n' >> "$FM_FAKE_SBX_CAPTURE"
+              fi
               ;;
           esac
         fi
@@ -174,15 +194,23 @@ case "$cmd" in
           *" Enter")
             if [ -n "${FM_FAKE_SBX_EXPECT_PENDING_DIR:-}" ]; then
               pending=
+              last_pending=$(cat "${FM_FAKE_SBX_LOG}.pending-last" 2>/dev/null || true)
               for candidate in "$FM_FAKE_SBX_EXPECT_PENDING_DIR"/.sbx-delivery-pending-*; do
-                if [ -e "$candidate" ]; then
+                if [ -e "$candidate" ] \
+                  && { [ -z "${FM_FAKE_SBX_REQUIRE_FRESH_PENDING:-}" ] \
+                    || [ "$candidate" != "$last_pending" ]; }; then
                   pending=$candidate
                   break
                 fi
               done
               [ -n "$pending" ] || exit 1
+              printf '%s\n' "$pending" > "${FM_FAKE_SBX_LOG}.pending-last"
             fi
-            [ -z "${FM_FAKE_SBX_ACK_ON_ENTER:-}" ] || touch "$FM_FAKE_SBX_ACK_ON_ENTER"
+            if [ -n "${FM_FAKE_SBX_ACK_ON_ENTER:-}" ] \
+              && { [ -z "${FM_FAKE_SBX_ACK_ON_ENTER_ONCE:-}" ] \
+                || [ "$enter_count" -eq 1 ]; }; then
+              touch "$FM_FAKE_SBX_ACK_ON_ENTER"
+            fi
             ;;
         esac
         exit 0
