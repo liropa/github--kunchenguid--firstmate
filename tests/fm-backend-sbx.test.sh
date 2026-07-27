@@ -720,6 +720,26 @@ test_submit_failure_preserves_previous_delivery_edge() {
   pass "send_text_submit: total failure preserves the previous delivery edge"
 }
 
+test_submit_retype_failure_preserves_previous_delivery_edge() {
+  local w fb out
+  w=$(new_sbx_world submit-retype-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf 'idle notice line\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_FAIL_ON=2)
+  [ "$out" = unknown ] || fail "a failed retype after an Enter should report unknown, got '$out'"
+  [ "$(cat "$w/sbx.log.type-count")" -eq 2 ] \
+    || fail "the fixture should fail the second type attempt"
+  [ "$(cat "$w/sbx.log.enter-count")" -eq 1 ] \
+    || fail "the retype failure should follow exactly one successful Enter"
+  [ -e "$w/state/.sbx-delivered-x" ] \
+    || fail "the earlier Enter's delivery edge must be published after a failed retype"
+  [ -z "$(find "$w/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
+    || fail "a failed retype should leave no unpublished delivery candidate"
+  pass "send_text_submit: failed retype preserves the earlier delivery edge"
+}
+
 test_submit_ignores_stale_prefix_line_in_scrollback() {
   local w fb out
   w=$(new_sbx_world submit-stale); fb=$(make_fake_sbx "$w")
@@ -1656,6 +1676,7 @@ test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed
 test_submit_refreshes_delivery_candidate_per_retry
 test_submit_failure_preserves_previous_delivery_edge
+test_submit_retype_failure_preserves_previous_delivery_edge
 test_submit_ignores_stale_prefix_line_in_scrollback
 test_submit_retypes_when_stale_prefix_goes_busy
 test_submit_counts_full_history_when_window_scrolls

@@ -29,6 +29,7 @@
 #                            the capture file - models a terminal that renders
 #                            what was typed; unset = the type is eaten (the
 #                            resume-time swallow)
+#   FM_FAKE_SBX_TYPE_FAIL_ON  literal send ordinal that returns non-zero
 #   FM_FAKE_SBX_ENTER_BUSY   appends the default busy footer on Enter
 #   FM_FAKE_SBX_ENTER_BUSY_AFTER
 #                            first Enter number that appends the busy footer
@@ -166,6 +167,13 @@ case "$cmd" in
         [ "${FM_FAKE_SBX_SEND_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_SEND_RC}"
         enter_count=0
         case "$guest" in
+          *" -l "*)
+            type_count_file="${FM_FAKE_SBX_LOG:?FM_FAKE_SBX_LOG unset}.type-count"
+            type_count=$(cat "$type_count_file" 2>/dev/null || echo 0)
+            type_count=$((type_count + 1))
+            printf '%s\n' "$type_count" > "$type_count_file"
+            [ "$type_count" != "${FM_FAKE_SBX_TYPE_FAIL_ON:-0}" ] || exit 1
+            ;;
           *" Enter")
             enter_count_file="${FM_FAKE_SBX_LOG:?FM_FAKE_SBX_LOG unset}.enter-count"
             enter_count=$(cat "$enter_count_file" 2>/dev/null || echo 0)

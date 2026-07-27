@@ -507,46 +507,10 @@ scan_signals() {
   return 0
 }
 
-# Beat-beacon bridge health for sbx secondmates (agent-dotfiles design doc
-# open question 6: the watcher's poll loop is the beat consumer). Only
-# bridge-backed secondmates have SYMLINKED signal files (fm-spawn.sh's sbx
-# branch), so [ -L ] scopes the sweep and every host-pane home skips it
-# untouched. Pure host stats - zero sbx CLI calls, preserving the
-# idle-supervision cost property (docs/sbx-backend.md).
-# Mount health: a signal symlink whose target DIRECTORY is gone means the
-# mount vanished - scan_signals' [ -e ] skip is silently blind to that
-# secondmate, so raise a captain-facing check wake. A dangling link whose
-# directory exists is a freshly provisioned secondmate that has not signaled
-# yet - quiescent by contract (tests/fm-watch-sbx-signals.test.sh).
-# Stranding has TWO arms because a count of events cannot measure their
-# absence, and the observed failures come in both shapes (fork issue #13).
-#   Arm 1, no-progress turn-ends: a guest TUI that still runs its turn-end
-#   hook but can no longer make progress fires a turn-end per steer while the
-#   status file never advances. After FM_SBX_NOPROGRESS_TURNS consecutive such
-#   turn-ends the beacon NAMES the pattern. A turn-end that lands while the
-#   mount's <id>.guest-active breadcrumb is fresh is recorded but NOT counted:
-#   verifiably live in-guest work (a busy child pane, advancing child signals)
-#   makes status-sparse supervision turns healthy, not stranding evidence.
-#   Arm 2, unacknowledged delivery: an agent that cannot process AT ALL fires
-#   no turn-ends, so arm 1's counter never advances - it is structurally blind
-#   to the worst variant (observed live: an auth-dead claude after a host OAuth
-#   rotation left the beat directory empty from creation, zero turn-ends). This
-#   arm measures SILENCE instead of events: the host touched .sbx-delivered-
-#   when it last spoke to the guest (bin/backends/sbx.sh), and NOTHING has come
-#   back since - no turn-end, no status line, no in-guest work breadcrumb - for
-#   FM_SBX_DELIVERY_ACK_SECS. Delivery is not processing evidence: a send lands
-#   in the pane whether or not the agent behind it can work.
-# Both arms share one wake key and one alarmed marker, so an episode raises
-# exactly one alarm however it was detected, and status progress re-arms both.
-# An sbx secondmate with no outstanding delivery is silent by construction:
-# an empty queue and a stopped VM are the healthy idle state, never a fault.
-# Mid-task stop: the keep-alive wrapper (bin/backends/sbx.sh) records a
-# .sbx-midtask-stop marker for a VM that stopped while in-guest work was
-# active - a stopped VM fires no turn-ends, so the stranding counter is
-# structurally blind to the most damaging sbx failure mode. The beacon
-# surfaces the marker as one named check wake and consumes it.
-# All tracking is marker files, so state survives the actionable exit each
-# turn-end causes.
+# Beat-beacon implementation for sbx secondmates. docs/sbx-backend.md
+# "Beat-beacon alarms" owns the alarm contract and verification evidence.
+# The symlink gate scopes the scan to bridge-backed secondmates, host stats
+# preserve zero-CLI idle supervision, and marker files survive actionable exits.
 scan_sbx_beacon() {
   local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m delivery del_m ackf acked
   for te in "$STATE"/*.turn-ended; do

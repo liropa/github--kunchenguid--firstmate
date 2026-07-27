@@ -316,6 +316,7 @@ It stated that for the auth-dead variant "every steer still fires the Stop hook,
 The 2026-07-23 night disproves that: during the dead-credential episode the signal-bridge beat and turn-ended mount files were **never touched at all** - the beat directory was empty from creation, so zero turn-ends were produced.
 An alarm counting turn-ends therefore could not see the very failure it was built for.
 Across three real stalls that night the beacon produced **two false alarms and zero true alarms**.
+The sbx version, harness version, exact observation commands, and raw output for that historical incident were not retained, so these figures are an operator incident record rather than reproducible live-host evidence.
 
 The three fault shapes share one symptom (a secondmate that stops making progress) but have different triggers and different masking conditions, which is why one counter was wrong in both directions:
 
