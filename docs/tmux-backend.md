@@ -170,6 +170,7 @@ Assuming reachable remains the correct fallback - an unproven backend must keep 
 
 ## Limitations
 
-None specific to tmux for the reference path itself - it is the fully verified reference backend.
-The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
-The transport probe cannot distinguish a denied socket from an absent server, and reports both as no route; see [Transport reachability](#transport-reachability).
+The reference path is fully verified, with two probe-specific limitations:
+
+- The agent-liveness probe cannot confidently classify `pi`'s generic `node` process name; see [Known gap: `pi` cannot be confidently classified](#known-gap-pi-cannot-be-confidently-classified).
+- The transport probe cannot distinguish a denied socket from an absent server, and reports both as no route; see [Transport reachability](#transport-reachability).
