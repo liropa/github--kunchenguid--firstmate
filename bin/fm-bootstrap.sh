@@ -493,7 +493,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out recorded_template
+  local meta id window harness backend target verdict out recorded_template recorded_agent
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -521,16 +521,23 @@ secondmate_liveness_sweep() {
         # herdr pane (found live 2026-07-20, HERDR_ENV=1) - a containment
         # downgrade, not a recovery. Explicit --backend wins over every
         # ambient source in fm-spawn.sh's resolution order, and the recorded
-        # sbx template rides along the same way. The HARNESS is deliberately
-        # NOT pinned here: respawns re-resolve it through
+        # sbx template rides along the same way, as does the recorded sbx
+        # AGENT FLAVOR - a flavor change needs a full VM destroy and
+        # recreate, so a respawn that silently reverted to the default map
+        # would strand the guest without the vendor credential its work needs
+        # (docs/sbx-backend.md "Agent flavor vs driver harness"). The HARNESS
+        # is deliberately NOT pinned here: respawns re-resolve it through
         # config/secondmate-harness -> config/crew-harness -> own
         # (fm-secondmate-harness.test.sh's durable-mode contract); an
         # sbx-unverified resolution is refused loudly before any sandbox is
-        # created.
+        # created, as is a re-resolved harness the recorded flavor cannot
+        # serve - a loud refusal beats a guest that 401s on first use.
         recorded_template=$(fm_meta_get "$meta" sbx_template)
+        recorded_agent=$(fm_meta_get "$meta" sbx_agent)
         set -- "$id" --secondmate
         set -- "$@" --backend "$backend"
         if out=$(FM_SPAWN_NO_GUARD=1 FM_SBX_TEMPLATE="${recorded_template:-}" \
+            FM_SBX_AGENT="${recorded_agent:-}" \
             "$FM_ROOT/bin/fm-spawn.sh" "$@" 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           :

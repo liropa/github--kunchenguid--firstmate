@@ -61,6 +61,7 @@ The lease survives with no live process and is never recycled by later `treehous
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 For sbx-backed secondmates, seed with an explicit non-`-` home path so `fm-home-seed.sh` creates a plain clone; `docs/sbx-backend.md` owns the clone-mode restriction.
+When such a secondmate must run one vendor's CLI as its driver while keeping another vendor's credentials usable in the same guest, pin the sandbox's agent flavor with `FM_SBX_AGENT` on the spawn; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#agent-flavor-vs-driver-harness-verified-2026-07-27) owns which flavors serve which drivers and why a wrong pairing is refused.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.

@@ -1011,6 +1011,15 @@ EOF
     # verified sbx launch+resume shape (claude|codex) BEFORE creating
     # anything, so meta can only ever record an in-VM harness the liveness
     # sweep's verified list accepts.
+    # The sandbox's AGENT FLAVOR is resolved here, first of everything: it
+    # decides which vendor credential the guest can resolve, it is chosen
+    # independently of the driver harness (FM_SBX_AGENT; bin/backends/sbx.sh),
+    # and a flavor that cannot serve this driver must refuse before any
+    # sandbox, signal directory, or guest state exists rather than produce a
+    # guest that 401s on its first authenticated call. create_task re-resolves
+    # the same pure function so a direct adapter caller is refused too; this
+    # call additionally supplies the value meta records below.
+    SBX_AGENT=$(fm_backend_sbx_agent_for_harness "$HARNESS") || exit 1
     # A projects-bearing home is refused before anything is created: its
     # projects/ sub-clones are independent gitignored repos that clone mode
     # structurally cannot carry into the VM, and a secondmate whose charter
@@ -1373,6 +1382,13 @@ META_WINDOW=$T
   fi
   if [ "$BACKEND" = sbx ]; then
     echo "sbx_signals_dir=$SIG_DIR"
+    # The RESOLVED agent flavor, always recorded: it is the only durable
+    # record of which vendor credential wiring a live guest actually has, and
+    # recording it only when pinned would force every reader to re-derive the
+    # default map. It is placement state in the strongest sense - changing a
+    # sandbox's flavor means destroying and recreating the VM - so the
+    # liveness sweep's respawn re-enters it from here.
+    echo "sbx_agent=$SBX_AGENT"
     # The template pin is placement state, like the backend itself: the
     # liveness sweep's respawn must reproduce the sandbox from the meta
     # alone (a session-start sweep has no FM_SBX_TEMPLATE in its env).

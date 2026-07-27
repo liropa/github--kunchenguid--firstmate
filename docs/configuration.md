@@ -58,14 +58,15 @@ Today that probe can classify tmux, herdr, and sbx secondmate endpoints as `aliv
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
-An sbx spawn additionally requires `sbx` and `jq`, refuses unsupported harnesses before creating a sandbox, and is experimental, secondmate-only, and documented in [`docs/sbx-backend.md`](sbx-backend.md).
+An sbx spawn additionally requires `sbx` and `jq`, refuses unsupported harnesses - and unsupported or unservable agent-flavor pairings - before creating a sandbox, and is experimental, secondmate-only, and documented in [`docs/sbx-backend.md`](sbx-backend.md).
 A backend spawn refusal from a missing dependency, version gate, unauthenticated socket, unsupported task kind, or unsupported harness is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-An sbx task additionally records `sbx_signals_dir=` and, when `FM_SBX_TEMPLATE` was set, `sbx_template=`, with `window=sbx:fm-<id>` naming the sandbox target.
+An sbx task additionally records `sbx_signals_dir=`, the resolved `sbx_agent=`, and, when `FM_SBX_TEMPLATE` was set, `sbx_template=`, with `window=sbx:fm-<id>` naming the sandbox target.
+`sbx_agent=` is the sandbox's agent flavor - which vendor credential the guest can resolve, chosen independently of the driver harness via `FM_SBX_AGENT` and always recorded so a respawn reproduces it (`docs/sbx-backend.md` "Agent flavor vs driver harness").
 An sbx task also carries `sbx_guest_synced=`, the guest clone's last verified HEAD, recorded only from the guest's own report and maintained by the tracked-file sync (`docs/sbx-backend.md` "Tracked-file sync"); its absence means the next sync verifies in-guest instead of trusting a cache.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.

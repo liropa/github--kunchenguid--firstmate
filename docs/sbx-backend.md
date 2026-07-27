@@ -29,6 +29,7 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-w
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
   Two verified templates as of 2026-07-20: **`adf-codex:v2`** (agent-dotfiles' `adf-codex:v1` + tmux 3.6, codex 0.142.5) for the codex harness, and **`adf-claude:v3`** (agent-dotfiles' `adf-claude:v2` + tmux 3.6, claude 2.1.195) for the claude harness.
+  The template image and the sandbox's agent flavor are independent choices ("Agent flavor vs driver harness" below).
   Both templates' apt lists were corrupt in the base image; the tmux install recipe is `sudo find /var/lib/apt/lists -type f -delete && apt-get update && apt-get install -y tmux && apt-get clean` inside a builder sandbox, then `sbx template save`.
 - Clone mode (`sbx create --clone`) clones the workspace repo into the VM **at the same absolute path**, mounts the host repo read-only at `/run/sandbox/source`, and carries only **committed** files (gitignored `data/`, `state/`, `config/` never arrive).
   Extra workspace mounts (the signal directory) are plain bind mounts at the same absolute path, read-write, with sub-millisecond guest-to-host visibility for both appends and mtime-only touches (Gate 0, agent-dotfiles design doc §10).
@@ -41,6 +42,51 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-w
   `--dangerously-bypass-approvals-and-sandbox` covers **neither** gate.
 - **A freshly resumed codex TUI eats first keystrokes nondeterministically**: stable-looking notices swallow typed text without a trace, while the identical keys land fine seconds later (observed twice).
   Pane stability cannot distinguish a parked notice from a ready composer, which is why the steer path verifies submission by reading the pane back (below).
+
+## Agent flavor vs driver harness (verified 2026-07-27)
+
+`sbx create <agent>` picks the sandbox's **agent flavor**, which decides which vendor credential sandboxd resolves for the guest.
+It does **not** decide which CLI the guest can run, and the two are **not symmetric**: a flavor can serve a driver it is not named after.
+Firstmate therefore chooses them separately - the task's harness picks the driver, `FM_SBX_AGENT` pins the flavor - because a claude driver that must also run codex in-guest (a no-mistakes adversarial review) is expressible only as a codex-flavor sandbox.
+
+Measured live 2026-07-27, both rows created from the same `docker.io/library/adf-codex:v4` template, guest codex 0.145.0:
+
+| `sbx create` agent | `claude` CLI in guest | `codex` CLI in guest |
+|---|---|---|
+| `claude` | works (the `CLAUDE_CODE_OAUTH_TOKEN` custom secret is present in the guest env) | **401 Unauthorized** |
+| `codex` | works (`claude --print --model claude-opus-5` returned live model output) | works (`gpt-5.6-sol` returned live model output) |
+
+The codex failure on a claude-flavor sandbox is exact, against `https://chatgpt.com/backend-api/codex`:
+
+```
+{"detail":"Could not parse your authentication token. Please try signing in again."}
+```
+
+Cause: the guest's `~/.codex/config.toml` carries `experimental_bearer_token = "oai-oat01-proxy-managed"`, a **placeholder** the sandboxd proxy resolves only for a codex-flavor sandbox - the same placeholder-not-credential posture as the Anthropic side ("Guest shell-profile env" below).
+The failure is therefore credential wiring, not a missing binary or a stale token, and no in-guest repair fixes it.
+
+Supporting facts from the same probes:
+
+- **The discriminating tell is at create time**: a codex-flavor create prints `Using stored OpenAI OAuth credentials`, and a claude-flavor create prints nothing.
+- **Only the ACTIVE agent's own config file is regenerated at create.** `[features] hooks = true` and the entire sandboxd proxy block bake intact into a claude-flavor sandbox built from a codex template; the template's other-agent config survives, only its credential resolution does not.
+- **sbx does not refuse a mismatched pairing.** `sbx create` with an agent the template was not built for warns and creates the sandbox anyway: `template "..." was built for the "codex" agent but you are using "claude"`.
+  Choosing the pairing deliberately is therefore firstmate's job, which is why the adapter refuses an unservable pairing before any VM exists.
+- **The launch and resume command templates need no change.** Guest codex is 0.145.0 (newer than this host's 0.142.5) and still carries `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, and `codex resume --last`.
+
+What the adapter does with that matrix:
+
+- `FM_SBX_AGENT` pins the flavor for a spawn, mirroring `FM_SBX_TEMPLATE`'s template pin.
+  Unset resolves to the driver harness's own flavor - the 1:1 map this replaced - so an existing sbx secondmate spawns byte-identically to before.
+  Template and flavor stay independent knobs: a template built for one agent can back a sandbox created with the other, at the cost above.
+- `fm_backend_sbx_harnesses_for_agent` encodes the matrix (flavor `claude` serves the `claude` driver; flavor `codex` serves both), and `fm_backend_sbx_agent_for_harness` refuses an unsupported flavor, or a flavor that cannot serve the requested driver, naming what that flavor does serve.
+- `bin/fm-spawn.sh` resolves the flavor first - before the projects check, before the signal directory exists - and records the RESOLVED value as `sbx_agent=` in the task's meta, always rather than only when pinned, so an operator reads a live guest's credential wiring straight off the record instead of re-deriving it.
+- The session-start liveness sweep re-enters `sbx_agent=` from meta on respawn, exactly as it re-enters `sbx_template=` (below).
+  This matters more than the template does: changing a sandbox's flavor requires destroying and recreating the VM, so an unattended respawn that silently reverted to the default map would strand the guest without the credential its work needs.
+  Because the sweep still re-resolves the harness through config, a harness change the recorded flavor cannot serve now refuses loudly at respawn instead of producing a guest that 401s on first use.
+  A **hand-run** `fm-spawn.sh <id> --secondmate` is the one path that does not re-enter it: like the template pin it carries, that spawn takes the flavor from its own environment, so read the id's recorded `sbx_agent=` and pass it back as `FM_SBX_AGENT` when re-provisioning a sandbox by hand.
+
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, and `tests/fm-secondmate-liveness.test.sh` for resolution, refusal, the meta record, and respawn re-entry.
+The credential matrix itself is the live measurement above; a codex-flavor sandbox driven by claude through firstmate's own spawn path has not yet been provisioned end to end.
 
 ## Agent liveness probe (`fm_backend_sbx_agent_alive`)
 
@@ -57,10 +103,10 @@ Probe order:
 
 The sweep's harness gate (`bin/fm-bootstrap.sh`) demotes `dead` to `unknown` for harnesses outside `claude|codex|opencode|pi|grok`; the sbx spawn branch only ever records `claude` or `codex` (see below), so sbx metas always pass that gate.
 
-The sweep's respawn re-enters the meta's **recorded** placement, not ambient detection: it passes `--backend` from the meta's `backend=` and `FM_SBX_TEMPLATE` from the meta's `sbx_template=`.
+The sweep's respawn re-enters the meta's **recorded** placement, not ambient detection: it passes `--backend` from the meta's `backend=`, `FM_SBX_TEMPLATE` from the meta's `sbx_template=`, and `FM_SBX_AGENT` from the meta's `sbx_agent=`.
 Without this, a dead sbx secondmate on a `HERDR_ENV=1` host was respawned into a host-side herdr pane - a silent containment downgrade, not a recovery (found live 2026-07-20 during the design's §10 item 4 pass, fixed same day).
-The harness is deliberately *not* pinned from meta - respawns re-resolve it through `config/secondmate-harness -> config/crew-harness -> own` (the durable-mode contract), and an sbx-unverified resolution is refused loudly before any sandbox is created.
-`bin/fm-spawn.sh` records `sbx_template=` in meta so the respawn can reproduce the sandbox from durable state alone (a session-start sweep has no `FM_SBX_TEMPLATE` in its env).
+The harness is deliberately *not* pinned from meta - respawns re-resolve it through `config/secondmate-harness -> config/crew-harness -> own` (the durable-mode contract), and an sbx-unverified resolution is refused loudly before any sandbox is created, as is a re-resolved harness the recorded agent flavor cannot serve ("Agent flavor vs driver harness" above).
+`bin/fm-spawn.sh` records `sbx_template=` and `sbx_agent=` in meta so the respawn can reproduce the sandbox from durable state alone (a session-start sweep has neither variable in its env).
 
 Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon for bridge-health alarms; full mid-session *death* detection (stale beat checked against `sbx` state) remains session-start-only (design doc open question 6, partially closed).
 
@@ -77,7 +123,7 @@ Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon
 5. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
 6. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
-7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend), including `sbx_template=` when `FM_SBX_TEMPLATE` was set.
+7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend), including the resolved `sbx_agent=` and `sbx_template=` when `FM_SBX_TEMPLATE` was set.
 8. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
 Supported harnesses: **claude and codex** (the intersection of the sweep's verified list, sbx's installable agents, and a verified turn-end + resume shape).
