@@ -108,11 +108,41 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # follows by default; -L keeps both arms explicit and identical.
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -L -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_mtime_precise() {
+    local raw sec frac
+    raw=$(stat -L -f '%m:%Fm' "$1" 2>/dev/null) || return 1
+    sec=${raw%%:*}
+    frac=${raw##*.}000000000
+    printf '%s:%s' "$sec" "${frac:0:9}"
+  }
   stat_sig()   { stat -L -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
 else
   stat_mtime() { stat -L -c %Y "$1" 2>/dev/null; }
+  stat_mtime_precise() {
+    local raw sec frac
+    raw=$(stat -L -c '%Y:%y' "$1" 2>/dev/null) || return 1
+    sec=${raw%%:*}
+    frac=${raw#*.}
+    frac=${frac%% *}000000000
+    printf '%s:%s' "$sec" "${frac:0:9}"
+  }
   stat_sig()   { stat -L -c '%s:%Y' "$1" 2>/dev/null; }
 fi
+
+mtime_after() {  # <candidate> <reference>
+  local candidate reference candidate_s candidate_ns reference_s reference_ns
+  candidate=$(stat_mtime_precise "$1") || return 1
+  reference=$(stat_mtime_precise "$2") || return 1
+  candidate_s=${candidate%%:*}
+  candidate_ns=${candidate#*:}
+  reference_s=${reference%%:*}
+  reference_ns=${reference#*:}
+  if [ "$candidate_s" -gt "$reference_s" ] 2>/dev/null; then
+    return 0
+  fi
+  [ "$candidate_s" = "$reference_s" ] || return 1
+  [ "1$candidate_ns" -gt "1$reference_ns" ] 2>/dev/null
+}
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -518,7 +548,7 @@ scan_signals() {
 # All tracking is marker files, so state survives the actionable exit each
 # turn-end causes.
 scan_sbx_beacon() {
-  local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m del_m ack_m ackf acked
+  local te id key tgt mdir marker reason te_sig sf_sig n stopmark why act_m delivery del_m ackf acked
   for te in "$STATE"/*.turn-ended; do
     [ -L "$te" ] || continue
     id=$(basename "$te" .turn-ended)
@@ -566,26 +596,28 @@ scan_sbx_beacon() {
     # Evaluated BEFORE every turn-end gate below, because the variant it
     # exists for produces no turn-ended file at all - anything gated on one
     # is blind to it by construction.
-    # Acknowledgement is any guest-side file that moved at or after the
+    # Acknowledgement is any guest-side file that moved after the
     # delivery: the turn-ended beat (a turn completed), the status file (the
     # agent reported), or the guest-active breadcrumb (the keep-alive saw
     # in-guest work). One rule, three signals, so the alarm never rests on
-    # turn-ends alone. Comparing mount mtimes against the host-written
-    # delivery mtime is stateless - no baseline bookkeeping to lose across a
-    # watcher restart - and trusts guest clocks no more than the breadcrumb
-    # freshness check below already does, with a far wider tolerance.
+    # turn-ends alone. The strict comparison preserves native filesystem
+    # nanosecond precision, so an older signal in the delivery's integer-mtime
+    # second cannot acknowledge it. Comparing mount mtimes
+    # against the host-written delivery mtime is stateless - no baseline
+    # bookkeeping to lose across a watcher restart - and trusts guest clocks
+    # no more than the breadcrumb freshness check below already does, with a
+    # far wider tolerance.
     # The [ -e ] gate is load-bearing for the same reason it is below: macOS
     # stat -L on a DANGLING link signs the link itself, so a guest that never
     # created a mount file would otherwise acknowledge every delivery with its
     # own spawn-time symlink - silently, and only on one platform.
+    delivery="$STATE/.sbx-delivered-$key"
     if [ "$FM_SBX_DELIVERY_ACK_SECS" -gt 0 ] 2>/dev/null \
-      && del_m=$(stat_mtime "$STATE/.sbx-delivered-$key") && [ -n "$del_m" ]; then
+      && del_m=$(stat_mtime "$delivery") && [ -n "$del_m" ]; then
       acked=0
       for ackf in "$te" "$STATE/$id.status" "$mdir/$id.guest-active"; do
         [ -e "$ackf" ] || continue
-        ack_m=$(stat_mtime "$ackf") || continue
-        [ -n "$ack_m" ] || continue
-        [ "$ack_m" -ge "$del_m" ] 2>/dev/null || continue
+        mtime_after "$ackf" "$delivery" || continue
         acked=1
         break
       done

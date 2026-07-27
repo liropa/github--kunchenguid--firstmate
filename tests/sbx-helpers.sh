@@ -30,6 +30,10 @@
 #                            what was typed; unset = the type is eaten (the
 #                            resume-time swallow)
 #   FM_FAKE_SBX_ENTER_BUSY   appends the default busy footer on Enter
+#   FM_FAKE_SBX_SEND_RC      non-zero makes tmux send-keys fail
+#   FM_FAKE_SBX_ACK_ON_ENTER file touched after a successful Enter send
+#   FM_FAKE_SBX_EXPECT_PENDING_DIR
+#                            requires a pending delivery candidate on Enter
 #   FM_FAKE_SBX_FG           what `exec ... tmux display-message` prints as the
 #                            pane's foreground process (default codex; set to
 #                            bash to simulate a resume that died back to the
@@ -152,6 +156,7 @@ case "$cmd" in
         exit 0
         ;;
       "tmux send-keys"*)
+        [ "${FM_FAKE_SBX_SEND_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_SEND_RC}"
         if [ -n "${FM_FAKE_SBX_CAPTURE:-}" ]; then
           case "$guest" in
             *" -l "*)
@@ -165,6 +170,21 @@ case "$cmd" in
               ;;
           esac
         fi
+        case "$guest" in
+          *" Enter")
+            if [ -n "${FM_FAKE_SBX_EXPECT_PENDING_DIR:-}" ]; then
+              pending=
+              for candidate in "$FM_FAKE_SBX_EXPECT_PENDING_DIR"/.sbx-delivery-pending-*; do
+                if [ -e "$candidate" ]; then
+                  pending=$candidate
+                  break
+                fi
+              done
+              [ -n "$pending" ] || exit 1
+            fi
+            [ -z "${FM_FAKE_SBX_ACK_ON_ENTER:-}" ] || touch "$FM_FAKE_SBX_ACK_ON_ENTER"
+            ;;
+        esac
         exit 0
         ;;
       "test -r "*)

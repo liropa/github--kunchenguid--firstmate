@@ -624,18 +624,24 @@ test_guest_profile_seed_skips_absent_or_unsafe_values() {
 # --- send_text_submit: verify-and-retry (resume-time notices eat keys) ------
 
 test_submit_confirms_busy_pane() {
-  local w fb out
+  local w fb out marker ack
   w=$(new_sbx_world submit-ok); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
+  marker="$w/state/.sbx-delivered-x"
+  ack="$w/ack"
   # The pane starts WITHOUT the text (presence is judged against a pre-type
   # baseline); the echo knob renders the type, Enter starts the busy footer.
   printf 'idle notice line\n' > "$w/pane.txt"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "> [marker] steer text and more words" 1 0 0' \
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
-    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1)
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1 \
+    FM_FAKE_SBX_EXPECT_PENDING_DIR="$w/state" \
+    FM_FAKE_SBX_ACK_ON_ENTER="$ack")
   [ "$out" = submitted ] || fail "a pane showing the text and the busy footer should confirm the submit, got '$out'"
   [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
     || fail "a confirmed submit must have typed the text exactly once"
+  [ -e "$marker" ] && [ -e "$ack" ] \
+    || fail "the confirmed submit must publish its pre-Enter delivery candidate"
   pass "send_text_submit: text visible + busy pane -> submitted, typed once"
 }
 
@@ -790,6 +796,104 @@ test_send_records_delivery_breadcrumb() {
   [ ! -s "$w/state/.sbx-delivered-x" ] \
     || fail "the breadcrumb must stay content-free: $(cat "$w/state/.sbx-delivered-x")"
   pass "send path: delivery records the beacon's content-free acknowledgement breadcrumb"
+}
+
+test_delivery_breadcrumb_predates_guest_acknowledgement() {
+  local w fb marker ack
+  w=$(new_sbx_world delivered-before-ack); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  marker="$w/state/.sbx-delivered-x"
+  ack="$w/ack"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    FM_FAKE_SBX_EXPECT_PENDING_DIR="$w/state" \
+    FM_FAKE_SBX_ACK_ON_ENTER="$ack" \
+    || fail "a steer with a simulated immediate acknowledgement should succeed"
+  [ -e "$marker" ] || fail "delivery should publish its breadcrumb"
+  [ -e "$ack" ] \
+    || fail "the delivery candidate must exist when Enter emits an acknowledgement"
+  pass "send path: the delivery breadcrumb causally predates an immediate guest acknowledgement"
+}
+
+test_delivery_beacon_prepare_failure_refuses_before_send() {
+  local w fb out
+  w=$(new_sbx_world delivered-prepare-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+    FM_STATE_OVERRIDE="$w/missing/state" FM_SBX_KEEPALIVE_MAX=0 2>&1 || true)
+  assert_contains "$out" "refusing to deliver untracked input" \
+    "a breadcrumb preparation failure should name the undelivered outcome"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys" \
+    "a delivery must not be attempted when its beacon cannot be prepared"
+  pass "send path: a beacon preparation failure refuses before delivery"
+}
+
+test_delivery_beacon_publish_failure_does_not_invite_resend() {
+  local w fb out rc
+  w=$(new_sbx_world delivered-publish-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+case "$last" in
+  *.sbx-delivered-x) exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/mv"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+      FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] \
+    || fail "a delivered-but-untracked send must not return a retryable transport failure"
+  assert_contains "$out" "input was delivered" \
+    "a publish failure should explicitly report that input was delivered"
+  assert_contains "$out" "do not resend" \
+    "a publish failure should explicitly prevent an unsafe duplicate resend"
+  [ "$(grep -c 'send-keys' "$w/sbx.log")" -eq 1 ] \
+    || fail "the delivered-but-untracked path should inject input exactly once"
+  pass "send path: a post-delivery beacon failure reports untracked delivery without inviting resend"
+}
+
+test_failed_delivery_preserves_previous_breadcrumb() {
+  local w fb marker reference
+  w=$(new_sbx_world delivered-send-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  marker="$w/state/.sbx-delivered-x"
+  reference="$w/previous-marker-time"
+  touch -t 202001010000 "$marker"
+  touch -r "$marker" "$reference"
+  if run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer"' \
+      FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+      FM_FAKE_SBX_SEND_RC=1 2>/dev/null; then
+    fail "a failed tmux injection should remain a failed delivery"
+  fi
+  [ ! "$marker" -nt "$reference" ] && [ ! "$reference" -nt "$marker" ] \
+    || fail "a failed delivery must restore the previous delivery edge unchanged"
+  [ -z "$(find "$w/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
+    || fail "a failed delivery should remove its unpublished candidate"
+  pass "send path: failed injection preserves the previous delivery edge"
+}
+
+test_control_input_does_not_arm_delivery_beacon() {
+  local w fb marker
+  w=$(new_sbx_world delivered-control); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  marker="$w/state/.sbx-delivered-x"
+  run_adapter "$fb" "$w" \
+    'fm_backend_sbx_send_literal sbx:fm-x "draft"; fm_backend_sbx_send_key sbx:fm-x Escape; fm_backend_sbx_send_key sbx:fm-x C-c' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "literal and control-only input should still reach the pane"
+  [ ! -e "$marker" ] \
+    || fail "literal typing, Escape, and C-c must not arm a turn-delivery alarm"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_key sbx:fm-x Enter' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "Enter should submit the composed input"
+  [ -e "$marker" ] || fail "Enter must arm the turn-delivery alarm"
+  pass "send path: only turn-submitting input arms the delivery beacon"
 }
 
 test_send_to_foreign_name_records_no_breadcrumb() {
@@ -1443,7 +1547,8 @@ test_teardown_clears_beacon_markers() {
   : > "$w/sbx.log"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
-           .sbx-midtask-stop-domain .sbx-delivered-domain; do
+           .sbx-midtask-stop-domain .sbx-delivered-domain \
+           .sbx-delivery-pending-domain-123-456; do
     : > "$w/home/state/$m"
   done
   set +e
@@ -1453,7 +1558,8 @@ test_teardown_clears_beacon_markers() {
   [ "$rc" -eq 0 ] || fail "clean-guest teardown should succeed: $out"
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
-           .sbx-midtask-stop-domain .sbx-delivered-domain; do
+           .sbx-midtask-stop-domain .sbx-delivered-domain \
+           .sbx-delivery-pending-domain-123-456; do
     [ ! -e "$w/home/state/$m" ] || fail "teardown should remove the beacon marker $m"
   done
   pass "teardown: the id's beat-beacon markers are removed with its state files"
@@ -1508,6 +1614,11 @@ test_submit_counts_full_history_when_window_scrolls
 test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
 test_send_records_delivery_breadcrumb
+test_delivery_breadcrumb_predates_guest_acknowledgement
+test_delivery_beacon_prepare_failure_refuses_before_send
+test_delivery_beacon_publish_failure_does_not_invite_resend
+test_failed_delivery_preserves_previous_breadcrumb
+test_control_input_does_not_arm_delivery_beacon
 test_send_to_foreign_name_records_no_breadcrumb
 test_keepalive_script_capped_verdicts
 test_keepalive_script_pins_busy_worker_across_turn_end
