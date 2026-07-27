@@ -348,6 +348,7 @@ Verified at the delivery boundary 2026-07-27 (this tree, `bash tests/fm-backend-
 ok - send_text_submit: text visible + busy pane -> submitted, typed once
 ok - send_text_submit: each Enter retry uses a fresh delivery candidate
 ok - send_text_submit: total failure preserves the previous delivery edge
+ok - send_text_submit: failed retype preserves the earlier delivery edge
 ok - send path: the delivery breadcrumb causally predates an immediate guest acknowledgement
 ok - send path: a beacon preparation failure refuses before delivery
 ok - send path: a post-delivery beacon failure reports untracked delivery without inviting resend
@@ -355,7 +356,7 @@ ok - send path: failed injection preserves the previous delivery edge
 ok - send path: only proven composed submission arms the delivery beacon
 ```
 
-The last two are the falsification check for the shared-marker rules, not decoration: with acknowledgement restored to clearing the marker, `acknowledged steers must not re-arm a standing alarm` fails, and with the status bookkeeping moved back below the turn-end gates, `status progress must re-arm the alarm even with no turn-ended file at all` fails.
+The last two beacon-level cases are the falsification check for the shared-marker rules, not decoration: with acknowledgement restored to clearing the marker, `acknowledged steers must not re-arm a standing alarm` fails, and with the status bookkeeping moved back below the turn-end gates, `status progress must re-arm the alarm even with no turn-ended file at all` fails.
 Both were confirmed failing against the reverted logic on 2026-07-27 before being accepted as passing.
 
 The auth-dead reproduction is a fixture, not a live rig: `state/x.turn-ended` is left dangling with the mount directory present (the observed "empty from creation" shape) and the delivery breadcrumb backdated past the window.
