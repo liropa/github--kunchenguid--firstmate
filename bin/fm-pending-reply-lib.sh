@@ -759,6 +759,13 @@ fm_pending_reply_recovery_message() {  # <record-path>
 # that fails there: the send cannot leave the host regardless of whether the
 # guest VM is running or stopped. Asking first is what keeps the single
 # recovery attempt from being spent on a send with no route.
+# Observing completion is NOT evidence that the send has a route, on any
+# backend. request_turn_completed_epoch is durable and never re-validated, and
+# the send additionally waits out grace_secs after delivery, so the guard
+# structurally separates the two by up to the full grace - long enough for the
+# transport to go away in between (docs/tmux-backend.md "Transport
+# reachability"). That is why this asks at send time rather than trusting the
+# observation that got the record here.
 # Cost discipline: the sbx probe costs ~10s when denied, so this is called ONCE
 # per record, after every eligibility gate has already passed - never per poll.
 # Idle supervision keeps its structurally-zero-CLI-calls property.

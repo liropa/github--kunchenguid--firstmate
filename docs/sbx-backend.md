@@ -204,6 +204,7 @@ unsandboxed: rc=0  {"sandboxes":[{"name":"fm-agent-dotfiles",...,"status":"stopp
 Denied the daemon socket, `sbx` concludes no daemon is running, tries to start its own, finds the real one's pid file, and gives up after ~10 s.
 The agent-dotfiles sandbox policy lists `sbx` in `excludedCommands`, but that exempts only **top-level** commands - `sbx` nested inside `bin/fm-*.sh` stays sandboxed, which is exactly how the watcher calls it.
 The same denial shape applies to the tmux backend's server socket (`/private/tmp/tmux-501/default`, `Operation not permitted`), so this is a general property of the sandboxed watcher context rather than an sbx quirk.
+tmux has its own probe for that reason; the reachability contract and the evidence that its recovery leg is genuinely reachable live in [tmux-backend.md](tmux-backend.md#transport-reachability).
 
 `fm_backend_sbx_transport_reachable` reports that route: a **confirmed absence is reachable** (the inventory answered; the target is simply gone), and only an unreadable inventory is unreachable.
 `ensure_stack` reports the two apart, because they need opposite operator responses - recreate the sandbox, versus re-issue the steer from a context that can reach the daemon.

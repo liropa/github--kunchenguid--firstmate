@@ -966,8 +966,11 @@ test_transport_reachable_tracks_route_not_power_state() {
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_LS_RC=1 2>/dev/null; then
     fail "an unreadable inventory must report the control plane as unreachable"
   fi
-  # The generic dispatcher must not hold back a backend with no probe.
-  run_adapter "$fb" "$w" 'fm_backend_transport_reachable tmux fm-x:0' \
+  # The generic dispatcher must not hold back a backend with no probe. This
+  # used to use tmux as the stand-in; tmux has its own probe now (fork issue
+  # #29), so it uses one of the backends that genuinely still assumes reachable.
+  # tests/fm-backend.test.sh owns the exhaustiveness guard over that set.
+  run_adapter "$fb" "$w" 'fm_backend_transport_reachable zellij fm-x:0' \
     FM_STATE_OVERRIDE="$w/state" \
     || fail "a backend without a reachability probe must default to reachable"
   pass "transport_reachable follows the caller's route, not the guest's power state"
