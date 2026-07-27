@@ -714,8 +714,8 @@ fm_backend_sbx_ensure_stack() {  # <target>
 #
 # It also publishes the host-side .sbx-delivered- breadcrumb the watcher's
 # stranding beacon uses as its acknowledgement clock (docs/sbx-backend.md
-# "Beat-beacon alarms"). A content-free candidate is created before input is
-# injected, then atomically promoted after delivery. A preparation failure
+# "Beat-beacon alarms"). A content-free candidate is created before a
+# potentially turn-submitting Enter, then atomically promoted after delivery. A preparation failure
 # refuses before delivery; a promotion failure reports delivered-but-untracked
 # without returning a send failure that could invite a duplicate resend.
 #
@@ -752,17 +752,22 @@ fm_backend_sbx_after_send() {  # <target> <pending>
 }
 
 fm_backend_sbx_send_key() {  # <target> <key> [expected-label]
-  local target=$1 key=$2 name pending=
+  local target=$1 key=$2 name
   fm_backend_sbx_ensure_stack "$target" || return 1
   name=$(fm_backend_sbx_name_of_target "$target")
-  if [ "$key" = Enter ]; then
-    pending=$(fm_backend_sbx_delivery_prepare "$target") || return 1
-  fi
-  if ! sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key"; then
+  sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" "$key"
+}
+
+fm_backend_sbx_submit_composed() {  # <target>
+  local target=$1 name pending
+  fm_backend_sbx_ensure_stack "$target" || return 1
+  name=$(fm_backend_sbx_name_of_target "$target")
+  pending=$(fm_backend_sbx_delivery_prepare "$target") || return 1
+  if ! sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter; then
     fm_backend_sbx_delivery_abort "$pending"
     return 1
   fi
-  [ "$key" != Enter ] || fm_backend_sbx_after_send "$target" "$pending"
+  fm_backend_sbx_after_send "$target" "$pending"
 }
 
 fm_backend_sbx_send_text_line() {  # <target> <text>
@@ -807,7 +812,7 @@ fm_backend_sbx_send_literal() {  # <target> <text>
 # composer text.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
-  local name pane_t probe base_pane pane tries typed base cur busy pending
+  local name pane_t probe base_pane pane tries typed base cur busy pending attempt_pending
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
   pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
@@ -824,8 +829,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
     || { printf 'send-failed'; return 1; }
   base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
-  pending=$(fm_backend_sbx_delivery_prepare "$target") \
-    || { printf 'send-failed'; return 1; }
+  pending=
   typed=0
   tries=0
   while [ "$tries" -le "$retries" ]; do
@@ -834,8 +838,27 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
         || { fm_backend_sbx_delivery_abort "$pending"; printf 'send-failed'; return 1; }
       typed=1
     fi
-    sbx exec "$name" -- tmux send-keys -t "$pane_t" Enter \
-      || { fm_backend_sbx_delivery_abort "$pending"; printf 'send-failed'; return 1; }
+    if ! attempt_pending=$(fm_backend_sbx_delivery_prepare "$target"); then
+      if [ -n "$pending" ]; then
+        fm_backend_sbx_after_send "$target" "$pending"
+        printf 'unknown'
+      else
+        printf 'pending'
+      fi
+      return 0
+    fi
+    if ! sbx exec "$name" -- tmux send-keys -t "$pane_t" Enter; then
+      fm_backend_sbx_delivery_abort "$attempt_pending"
+      if [ -n "$pending" ]; then
+        fm_backend_sbx_after_send "$target" "$pending"
+        printf 'unknown'
+      else
+        printf 'pending'
+      fi
+      return 0
+    fi
+    fm_backend_sbx_delivery_abort "$pending"
+    pending=$attempt_pending
     sleep "$settle"
     pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || pane=
     if [ -n "$pane" ]; then

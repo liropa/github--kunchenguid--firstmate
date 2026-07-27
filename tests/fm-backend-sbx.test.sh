@@ -679,6 +679,47 @@ test_submit_reenters_when_enter_swallowed() {
   pass "send_text_submit: swallowed Enter re-sends Enter only, text typed once"
 }
 
+test_submit_refreshes_delivery_candidate_per_retry() {
+  local w fb out
+  w=$(new_sbx_world submit-fresh-edge); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  printf 'idle notice line\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text still in composer" 2 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1 \
+    FM_FAKE_SBX_ENTER_BUSY_AFTER=2 FM_FAKE_SBX_EXPECT_PENDING_DIR="$w/state" \
+    FM_FAKE_SBX_REQUIRE_FRESH_PENDING=1 FM_FAKE_SBX_ACK_ON_ENTER="$w/old-ack" \
+    FM_FAKE_SBX_ACK_ON_ENTER_ONCE=1)
+  [ "$out" = submitted ] || fail "the second Enter should confirm the submit, got '$out'"
+  [ "$(cat "$w/sbx.log.enter-count")" -eq 2 ] \
+    || fail "the fixture should exercise exactly two Enter attempts"
+  [ -e "$w/old-ack" ] || fail "the first attempt should emit the older acknowledgement"
+  [ -e "$w/state/.sbx-delivered-x" ] || fail "the successful retry should publish its fresh delivery edge"
+  [ -z "$(find "$w/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
+    || fail "the successful retry should leave no unpublished delivery candidates"
+  pass "send_text_submit: each Enter retry uses a fresh delivery candidate"
+}
+
+test_submit_failure_preserves_previous_delivery_edge() {
+  local w fb out marker reference
+  w=$(new_sbx_world submit-enter-fail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  marker="$w/state/.sbx-delivered-x"
+  reference="$w/previous-marker-time"
+  touch -t 202001010000 "$marker"
+  touch -r "$marker" "$reference"
+  printf 'idle notice line\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text" 1 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_RC=1)
+  [ "$out" = pending ] || fail "a failed first Enter should report pending composer text, got '$out'"
+  [ ! "$marker" -nt "$reference" ] && [ ! "$reference" -nt "$marker" ] \
+    || fail "a totally failed submit must preserve the previous published delivery edge"
+  [ -z "$(find "$w/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
+    || fail "a totally failed submit should remove its unpublished candidate"
+  pass "send_text_submit: total failure preserves the previous delivery edge"
+}
+
 test_submit_ignores_stale_prefix_line_in_scrollback() {
   local w fb out
   w=$(new_sbx_world submit-stale); fb=$(make_fake_sbx "$w")
@@ -891,9 +932,14 @@ test_control_input_does_not_arm_delivery_beacon() {
     || fail "literal typing, Escape, and C-c must not arm a turn-delivery alarm"
   run_adapter "$fb" "$w" 'fm_backend_sbx_send_key sbx:fm-x Enter' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
-    || fail "Enter should submit the composed input"
-  [ -e "$marker" ] || fail "Enter must arm the turn-delivery alarm"
-  pass "send path: only turn-submitting input arms the delivery beacon"
+    || fail "standalone Enter should still reach the pane"
+  [ ! -e "$marker" ] || fail "standalone Enter must not arm a turn-delivery alarm"
+  run_adapter "$fb" "$w" \
+    'fm_backend_sbx_send_literal sbx:fm-x "launch"; fm_backend_sbx_submit_composed sbx:fm-x' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "the explicit composed-submit path should deliver the launch"
+  [ -e "$marker" ] || fail "the explicit composed-submit path must arm the turn-delivery alarm"
+  pass "send path: only proven composed submission arms the delivery beacon"
 }
 
 test_send_to_foreign_name_records_no_breadcrumb() {
@@ -1608,6 +1654,8 @@ test_guest_profile_seed_skips_absent_or_unsafe_values
 test_submit_confirms_busy_pane
 test_submit_retypes_when_text_swallowed
 test_submit_reenters_when_enter_swallowed
+test_submit_refreshes_delivery_candidate_per_retry
+test_submit_failure_preserves_previous_delivery_edge
 test_submit_ignores_stale_prefix_line_in_scrollback
 test_submit_retypes_when_stale_prefix_goes_busy
 test_submit_counts_full_history_when_window_scrolls
