@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-spawn-sbx.test.sh - bin/fm-spawn.sh's sbx secondmate branch: the
-# signal-bridge wiring that keeps fm-watch.sh's scan unchanged for VM-hosted
-# secondmates (agent-dotfiles design doc firstmate-sbx-secondmate-event-bridge.md
-# §5-§6; docs/sbx-backend.md).
+# signal-bridge wiring and composed launch submission that keep fm-watch.sh's
+# scan unchanged for VM-hosted secondmates (agent-dotfiles design doc
+# firstmate-sbx-secondmate-event-bridge.md §5-§6; docs/sbx-backend.md).
 #
 # The guarantees under test:
 #   - sbx is secondmate-only: ship/scout sbx spawns are refused before any
@@ -20,6 +20,8 @@
 #     status path rewritten to the mount file (the host symlink makes both
 #     names converge), and claude's Stop hook / codex's notify= hook touch the
 #     mount's turn-ended AND beat files.
+#   - Spawn's explicit literal-plus-composed-submit launch path arms the
+#     delivery beacon and keep-alive for the launch turn.
 #   - Meta records backend=sbx, window=sbx:fm-<id>, sbx_signals_dir=, and the
 #     actual in-VM harness.
 #   - The sandbox's AGENT FLAVOR (which vendor credential the guest resolves)
