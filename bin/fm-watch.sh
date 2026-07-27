@@ -193,8 +193,8 @@ TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # Consecutive turn-ends with zero status progress before an sbx secondmate is
-# alarmed as stranded (scan_sbx_beacon). 0 disables the stranding alarm; the
-# mount-health alarm is unconditional.
+# alarmed as stranded (scan_sbx_beacon). 0 disables only this no-progress arm;
+# the other beacon alarms remain enabled.
 FM_SBX_NOPROGRESS_TURNS=${FM_SBX_NOPROGRESS_TURNS:-3}
 # Silence (seconds) after the host last delivered to an sbx guest before the
 # beacon's second stranding arm alarms on an unacknowledged delivery

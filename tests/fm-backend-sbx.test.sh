@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-backend-sbx.test.sh - the sbx (Docker Sandboxes) backend adapter:
 # bin/backends/sbx.sh's state probe, the three-valued agent-liveness mapping,
-# state-gated capture, the steering resurrection sequence, and
-# bin/fm-bootstrap.sh's secondmate_liveness_sweep acting on sbx verdicts.
+# state-gated capture, steering resurrection, delivery-edge and keep-alive
+# contracts, control-input scope, and bin/fm-bootstrap.sh's
+# secondmate_liveness_sweep acting on sbx verdicts.
 #
 # The guarantees under test (agent-dotfiles design doc
 # firstmate-sbx-secondmate-event-bridge.md §7.3/§8; docs/sbx-backend.md):
@@ -20,6 +21,10 @@
 #   - The send path owns resurrection: a running-but-no-tmux guest (the
 #     post-auto-stop state) is rebuilt - tmux session at the recorded home,
 #     agent relaunched with its harness's RESUME command - before delivery.
+#   - Turn-submitting sends publish a pre-injection delivery edge and start a
+#     keep-alive; literal typing and control keys do neither.
+#   - Verified-submit retries preserve the conservative delivery edge, and
+#     keep-alives pin visible child work while classifying suspicious exits.
 #   - The session-start liveness sweep respawns an sbx secondmate only on
 #     confirmed-absent, leaves running/stopped untouched, and reports an
 #     inconclusive probe as skipped without acting.

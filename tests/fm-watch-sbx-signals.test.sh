@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # tests/fm-watch-sbx-signals.test.sh - the sbx signal bridge's consumer half:
-# bin/fm-watch.sh's scan_signals running UNCHANGED over the state/<id>.status
-# and state/<id>.turn-ended symlinks that fm-spawn.sh's sbx branch points at
-# the bind-mounted signal directory (agent-dotfiles design doc
+# bin/fm-watch.sh's unchanged scan_signals and sbx-specific scan_sbx_beacon
+# running over the state/<id>.status and state/<id>.turn-ended symlinks that
+# fm-spawn.sh's sbx branch points at the bind-mounted signal directory
+# (agent-dotfiles design doc
 # firstmate-sbx-secondmate-event-bridge.md §5, §12; docs/sbx-backend.md).
 #
 # The guarantees under test:
 #   - A guest write landing in the mount file is picked up through the
 #     state/ symlink and surfaced exactly like a native status write - no
 #     watcher edits, no new transport.
-#   - A DANGLING symlink (mount unavailable, sandbox gone) is quiescent: the
-#     watcher skips it without crashing, exiting, or enqueuing anything -
-#     liveness, not the scan, is the authority on dead-vs-idle.
+#   - A dangling signal link whose target directory still exists is a
+#     quiescent fresh spawn; a missing target directory raises the beacon's
+#     durable mount-health alarm.
 #   - The symlink set is the id allowlist: a file a guest invents for ANOTHER
 #     id inside its mount directory is invisible to the scan (no symlink ->
 #     no wake), so a compromised guest cannot signal as a different crew.
+#   - The beacon names keeper-observed mid-task stops and joins no-progress
+#     turn-ends with unacknowledged deliveries under one stranding marker.
+#   - Delivery acknowledgement accepts only strictly newer turn-end, status,
+#     or guest-active signals; status progress alone re-arms a standing alarm.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -200,10 +205,10 @@ test_mount_alarm_fires_once_and_rearms() {
 }
 
 test_no_progress_turns_fire_stranding_alarm() {
-  # The beat-beacon's second consumer: a stranded guest TUI (observed live: an
-  # auth-dead claude after a host OAuth rotation) keeps firing its turn-end
-  # hook on every steer while the status file never progresses. Each bare
-  # turn-end surfaces as a generic signal wake, but nothing NAMES the pattern.
+  # docs/sbx-backend.md "Beat-beacon alarms" owns the alarm contract and
+  # incident evidence. This first stranding arm names a generic pattern that
+  # bare turn-end wakes alone do not: repeated turn-ends without status
+  # progress.
   # After FM_SBX_NOPROGRESS_TURNS consecutive turn-ends with zero status
   # progress the beacon must raise one named check wake.
   local dir state mount out pid i
@@ -399,10 +404,10 @@ test_unacked_delivery_fires_stranding_alarm() {
 }
 
 test_turnend_acknowledgement_silences_and_rearms() {
-  # The acknowledgement rule, first signal: a turn end at or after the delivery
-  # proves the guest processed it, so the arm stays silent however old the
-  # delivery gets - and a LATER unacknowledged delivery alarms again, so one
-  # recovered episode never disarms the next.
+  # The acknowledgement rule, first signal: a turn end strictly newer than the
+  # delivery proves the guest processed it, so the arm stays silent however
+  # old the delivery gets. A LATER unacknowledged delivery alarms again, so
+  # one recovered episode never disarms the next.
   local dir state mount out pid
   dir=$(make_case acked-turnend); state="$dir/state"; out="$dir/watch.out"
   mount="$dir/mount"
