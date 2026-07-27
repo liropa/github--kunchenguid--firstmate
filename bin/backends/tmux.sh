@@ -54,6 +54,27 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_transport_reachable: 0 when THIS process context can reach
+# the tmux server, 1 when it demonstrably cannot. Answers the generic contract
+# in bin/fm-backend.sh's fm_backend_transport_reachable, and mirrors the sbx
+# probe's shape (bin/backends/sbx.sh): every tmux steer primitive above -
+# send-keys, display-message, capture-pane - is a client connection to the
+# server socket, so a context that cannot open that socket cannot deliver no
+# matter how healthy the target window is.
+# A CONFIRMED-ABSENT window is still REACHABLE, exactly as a confirmed-absent
+# sandbox is: the server answered, and the send path's own missing-target
+# handling owns that case rather than this probe.
+# list-sessions is the cheapest read that proves the server answered, and -
+# unlike most tmux subcommands - it never starts a server, so this stays a
+# passive probe with no side effect on a host with no fleet running.
+# rc 1 therefore covers both a denied socket (the sandboxed watcher) and no
+# server at all. Neither can carry a send, and the caller's one-shot delivery
+# must stay unspent for both: a respawned endpoint can still receive the
+# recovery the guard is holding, which a spent attempt could never be given.
+fm_backend_tmux_transport_reachable() {
+  tmux list-sessions >/dev/null 2>&1
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;

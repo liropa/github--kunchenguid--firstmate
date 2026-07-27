@@ -589,15 +589,33 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # It exists because an unroutable caller must not spend a one-shot delivery on a
 # send that cannot leave the host - see fm-pending-reply-lib.sh's recovery leg,
 # which defers instead of burning its single recovery attempt.
-# Backends that steer through a host daemon socket can answer this; the default
-# is REACHABLE, so a backend without a probe keeps attempting exactly as before
-# and no unproven backend is newly held back. Probes may be expensive (sbx's
-# costs ~10s when denied), so callers must only ask when about to steer.
+# Backends that steer through a host daemon or server socket can answer this.
+# Probes may be expensive (sbx's costs ~10s when denied; tmux's is one cheap
+# socket read), so callers must only ask when about to steer.
+#
+# EVERY backend in FM_BACKEND_KNOWN gets an explicit arm, including the ones
+# with no probe. Assuming reachable is the right FALLBACK - an unproven backend
+# must keep attempting exactly as before rather than be newly held back - but it
+# is the wrong thing to leave IMPLIED: a bare catch-all reads as "handled" while
+# silently answering for backends nobody has examined, which is how the tmux gap
+# survived the sbx work (fork issue #29). Naming them keeps the remaining gap
+# visible here, and tests/fm-backend.test.sh asserts the list stays exhaustive so
+# a new backend cannot inherit an unexamined answer.
 fm_backend_transport_reachable() {  # <backend> <target>
   local backend=$1 target=${2-}
   fm_backend_source "$backend" || return 0
   case "$backend" in
     sbx) fm_backend_sbx_transport_reachable "$(fm_backend_sbx_name_of_target "$target")" ;;
+    tmux) fm_backend_tmux_transport_reachable ;;
+    # Unknown, assumed reachable. Each of these steers through a control plane
+    # that could answer this (herdr's and zellij's servers, Orca's and cmux's
+    # control sockets), but none has a probe VERIFIED against a denied context
+    # the way sbx's and tmux's are, and docs/*-backend.md records measured
+    # behavior only. Until then they attempt and report a real delivery failure.
+    # docs/tmux-backend.md "Transport reachability" owns this open gap.
+    herdr|zellij|orca|cmux) return 0 ;;
+    # Not in FM_BACKEND_KNOWN: fm_backend_source already rejected it above, so
+    # this is unreachable in practice and stays permissive for safety.
     *) return 0 ;;
   esac
 }

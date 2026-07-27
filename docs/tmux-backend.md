@@ -124,7 +124,52 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Transport reachability
+
+`fm_backend_tmux_transport_reachable` (`bin/backends/tmux.sh`) answers the generic probe in `bin/fm-backend.sh`: can THIS process context reach the tmux server at all?
+It exists so `bin/fm-pending-reply-lib.sh`'s recovery leg defers an unroutable send instead of spending the record's single recovery attempt on it and then recording a delivery failure for a message that never went on the wire (fork issue #29, the tmux instance of the sbx defect in fork issue #27).
+
+Every tmux steer primitive is a client connection to the server socket, so the probe reads that socket and nothing else.
+Verified on this host 2026-07-27, tmux 3.7b, against a private socket (`tmux -L fmprobe-<pid>`):
+
+```
+no server yet:            rc=1  error connecting to /private/tmp/tmux-501/fmprobe-9019 (No such file or directory)
+server up, one session:   rc=0  probe: 1 windows (created Mon Jul 27 01:29:38 2026)
+server up, ABSENT window: rc=0  (capture-pane -t nosuch:0 -> "can't find session: nosuch")
+after kill-server:        rc=1  no server running on /private/tmp/tmux-501/fmprobe-9019
+sandboxed watcher socket: rc=1  error connecting to /private/tmp/tmux-501/default (Operation not permitted)
+```
+
+`list-sessions` never started a server (the socket did not reappear after `kill-server`), so the probe stays passive.
+A confirmed-absent *window* is REACHABLE - the server answered - matching the sbx contract in [sbx-backend.md](sbx-backend.md); the send path's own missing-target handling owns that case.
+`rc=1` deliberately covers both a denied socket and no server at all: neither can carry a send, and both must leave the one recovery unspent, because a respawned endpoint can still receive a held recovery but never a spent one.
+
+### Why the recovery leg is reachable here (2026-07-27)
+
+The sbx work assumed this gap was latent on tmux, on the reasoning that a context denied the tmux socket also cannot observe turn completion, so the recovery leg is never entered.
+That masking does hold **within a single poll**, but not across polls, and the recovery leg is reachable without any sandbox-posture change or watcher restart:
+
+- `request_turn_completed_epoch` is durable in the record and is never re-validated; `fm_pending_reply_send_recovery` reads that persisted field, not the current observation.
+- A `busy` -> `idle` pane transition sets it as soon as it is seen, but the send additionally waits for `now - delivered_epoch >= grace_secs` (120 s by default).
+
+So the guard **structurally** separates observing completion from attempting the send by up to the full grace, and the transport only has to become unreachable inside that window.
+Reproduced end to end in one process, one record, real send path, stubbed tmux server (`tests/fm-pending-reply.test.sh`, `test_tmux_transport_loss_after_completion_defers_recovery_unspent`):
+pane busy at T+10 s, pane idle at T+20 s (completion persisted, send correctly held), tmux server gone at T+200 s.
+Before the probe, that sequence spent the attempt and published `blocked: pending-reply-recovery-delivery-failed:` - a delivery claim for a message that never left the host, which also reads to an operator as a sick secondmate rather than a missing route.
+
+### Open gap: the other backends still assume reachable
+
+`fm_backend_transport_reachable` now answers explicitly for every backend in `FM_BACKEND_KNOWN`, but only `sbx` and `tmux` have a real probe.
+Each of the four steers through a control plane that could answer the same question, and each returns "unknown, assumed reachable" until a probe is verified against a denied context on real infrastructure:
+
+- `orca` steers through `orca terminal send --json` and `cmux` through its `workspace list --json` control socket, so both have an obvious cheap read to probe with; they need verification on real infrastructure, not new design.
+- `herdr` and `zellij` need actual design work first, because their readiness helpers (`fm_backend_herdr_server_ensure`, `fm_backend_zellij_server_ensure`) **start** the server as a side effect, and a reachability probe must stay passive the way `tmux list-sessions` and `sbx ls` do.
+
+Until then a recovery on those backends spends its one attempt and reports a real delivery failure, exactly as before this change.
+Assuming reachable remains the correct fallback - an unproven backend must keep attempting rather than be newly held back - but it is recorded here rather than left implied in the code, because a silent catch-all is what let the tmux gap survive the sbx work.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend.
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+The transport probe cannot distinguish a denied socket from an absent server, and reports both as no route; see [Transport reachability](#transport-reachability).

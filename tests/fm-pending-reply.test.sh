@@ -730,8 +730,9 @@ test_unknown_backend_state_uses_capture_fallback() {
       state="$home/state"
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
-      export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
+      # shellcheck disable=SC2030,SC2031
+      export FM_PENDING_REPLY_GRACE_SECS=10
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10000
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
@@ -1399,6 +1400,138 @@ test_unreachable_transport_defers_recovery_unspent() {
   pass "unreachable transport defers the recovery unspent and escalates once"
 }
 
+# The tmux instance of the same defect (fork issue #29), driven through the
+# SCANNER rather than fm_pending_reply_tick_one. The sbx coverage above reaches
+# the recovery leg by calling tick_one with a hand-set completion, which walks
+# past the scanner's phase filter and its observation path - so it could not
+# have seen this: on tmux the record only arrives at the recovery leg THROUGH
+# that observation path.
+#
+# The sbx work assumed tmux was masked here, reasoning that a context denied the
+# tmux socket also cannot observe turn completion. That holds within a single
+# poll but not across polls, and no sandbox change or watcher restart is needed:
+# request_turn_completed_epoch is durable and never re-validated, while the send
+# additionally waits out grace_secs, so the guard structurally separates
+# observing completion from attempting the send by up to the full grace.
+# One process, one record, real send path, a tmux server that dies inside that
+# window (docs/tmux-backend.md "Transport reachability").
+test_tmux_transport_loss_after_completion_defers_recovery_unspent() {
+  (
+    local home state fb corr rec status_file saved_path
+    home=$(setup_parent tmux-defer)
+    state="$home/state"
+    status_file="$state/hibit.status"
+    fb="$home/fakebin"
+    mkdir -p "$home/sm/state" "$fb"
+    # A fake tmux whose SERVER liveness and pane content are both controllable.
+    # Server down fails every subcommand, exactly as a denied or absent socket
+    # does - so the send could not have landed either.
+    cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ ! -f "$FAKE_TMUX_SERVER_UP" ]; then
+  echo "error connecting to /private/tmp/tmux-501/default (Operation not permitted)" >&2
+  exit 1
+fi
+case "${1:-}" in
+  capture-pane)
+    if [ -f "$FAKE_TMUX_PANE_BUSY" ]; then printf 'Working... (esc to interrupt)\n'
+    else printf 'a quiet idle pane\n'; fi
+    exit 0 ;;
+  display-message) printf 'fakepane\n'; exit 0 ;;
+esac
+exit 0
+SH
+    chmod +x "$fb/tmux"
+    # These fixture overrides are intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FAKE_TMUX_SERVER_UP="$home/server-up"
+    # shellcheck disable=SC2030,SC2031
+    export FAKE_TMUX_PANE_BUSY="$home/pane-busy"
+    # The real 120 s grace is the whole point: it is what holds the send back
+    # while completion is already recorded. The suite-wide 0 would collapse the
+    # two into one tick and hide the window.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=120
+    # No FM_PENDING_REPLY_SEND_HOOK on purpose: the hook short-circuits the
+    # deliverability gate, which is exactly what must run here.
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "firstmate:fm-hibit"
+    printf 'backend=tmux\n' >> "$state/hibit.meta"
+    saved_path=$PATH
+    PATH="$fb:$saved_path"
+
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=1000
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "tmux transport lost mid-grace")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+
+    # T+10s: server up, secondmate mid-turn.
+    : > "$FAKE_TMUX_SERVER_UP"
+    : > "$FAKE_TMUX_PANE_BUSY"
+    export FM_PENDING_REPLY_NOW=1010
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
+      || fail "a busy pane should be recorded as the turn being seen busy"
+
+    # T+20s: turn ends. Completion is PERSISTED, but grace still holds the send.
+    rm -f "$FAKE_TMUX_PANE_BUSY"
+    export FM_PENDING_REPLY_NOW=1020
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" = 1020 ] \
+      || fail "a busy->idle transition should persist completion immediately"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "the send must wait out grace, got $(phase_of "$state" "$corr")"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+      || fail "no recovery may be attempted before grace elapses"
+
+    # T+200s: grace elapsed, but the tmux server died inside the window.
+    rm -f "$FAKE_TMUX_SERVER_UP"
+    export FM_PENDING_REPLY_NOW=1200
+    fm_pending_reply_tick "$state"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+      || fail "an unroutable recovery must not spend the record's one attempt"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" ] \
+      || fail "no send left the host, so no delivery outcome may be recorded"
+    [ -n "$(fm_pending_reply_get "$rec" recovery_deferred_epoch)" ] \
+      || fail "the deferral must be recorded durably"
+    [ -n "$(fm_pending_reply_get "$rec" recovery_defer_reason)" ] \
+      || fail "the deferral must record why there was no route"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "a deferred recovery must still escalate, got $(phase_of "$state" "$corr")"
+    [ "$(grep -c 'pending-reply-recovery-undeliverable:' "$status_file")" = 1 ] \
+      || fail "the missing route must be escalated exactly once"
+    if grep -q 'pending-reply-recovery-delivery-' "$status_file"; then
+      fail "a message that never went on the wire must never be reported as a failed DELIVERY"
+    fi
+
+    # Standing condition: later polls must not re-probe into a second escalation.
+    export FM_PENDING_REPLY_NOW=1300
+    fm_pending_reply_tick "$state"
+    [ "$(grep -c 'pending-reply-recovery-undeliverable:' "$status_file")" = 1 ] \
+      || fail "the undeliverable escalation must stay one-shot"
+
+    # The common shape is a meta with NO backend= field at all: fm-spawn omits
+    # it for the default backend, and fm_backend_of_meta resolves that to tmux.
+    # The probe must cover that shape too, not just an explicit backend=tmux.
+    fm_write_secondmate_meta "$state/dflt.meta" "$home/sm" "firstmate:fm-dflt"
+    grep -q '^backend=' "$state/dflt.meta" \
+      && fail "fixture should exercise the implicit default, not an explicit backend"
+    if fm_pending_reply_transport_deliverable "$state" dflt; then
+      fail "a default-backend (implicit tmux) task must use the tmux probe too"
+    fi
+
+    # The reply the guard was waiting for still wins, transport or no transport.
+    printf 'done [corr=%s]: answered after the route came back\n' "$corr" >> "$status_file"
+    export FM_PENDING_REPLY_NOW=1400
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "a late correlated reply must still resolve a deferred tmux record"
+    PATH=$saved_path
+  ) || fail "tmux transport-loss deferral regression failed"
+  pass "tmux: transport lost between completion and send defers the recovery unspent, never a false delivery failure"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1432,5 +1565,6 @@ test_symlinked_parent_status_resolves_after_first_scan
 test_psless_recovery_sends_and_escalates_once
 test_sbx_transport_reachability_matrix
 test_unreachable_transport_defers_recovery_unspent
+test_tmux_transport_loss_after_completion_defers_recovery_unspent
 
 printf 'ok - all pending-reply tests passed\n'

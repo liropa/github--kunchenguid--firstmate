@@ -464,6 +464,70 @@ test_backend_validate_refuses_unknown() {
   pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
 }
 
+# The tmux transport probe (bin/backends/tmux.sh) asks whether THIS context can
+# reach the tmux SERVER, never whether the target window is healthy. Verified
+# against real tmux 3.7b in docs/tmux-backend.md "Transport reachability"; this
+# pins the contract with a fake tmux so CI covers it without a real server.
+test_transport_reachable_tmux_probe() {
+  local dir fb saved_path
+  dir="$TMP_ROOT/tmux-reach-$RANDOM"
+  fb="$dir/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = list-sessions ]; then
+  if [ -f "$FAKE_TMUX_SERVER_UP" ]; then
+    printf 'firstmate: 3 windows (created Mon Jul 27 01:29:38 2026)\n'
+    exit 0
+  fi
+  # Real wording for both no-route shapes; rc is what the probe reads.
+  echo "error connecting to /private/tmp/tmux-501/default (Operation not permitted)" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  export FAKE_TMUX_SERVER_UP="$dir/server-up"
+  saved_path=$PATH
+  PATH="$fb:$saved_path"
+
+  : > "$FAKE_TMUX_SERVER_UP"
+  fm_backend_transport_reachable tmux 'firstmate:fm-hibit' \
+    || fail "a live tmux server must read as reachable"
+  # A window that does not exist is a TARGET problem, not a route problem: the
+  # server still answered, so the send path's own absent handling owns it.
+  fm_backend_transport_reachable tmux 'firstmate:fm-gone' \
+    || fail "a confirmed-absent window must still read as reachable"
+  fm_backend_transport_reachable tmux '' \
+    || fail "an empty target must not make the server unreachable"
+
+  rm -f "$FAKE_TMUX_SERVER_UP"
+  if fm_backend_transport_reachable tmux 'firstmate:fm-hibit'; then
+    fail "a denied or absent tmux server must read as UNreachable"
+  fi
+
+  PATH=$saved_path
+  unset FAKE_TMUX_SERVER_UP
+  pass "tmux transport probe: server answers = reachable (even for an absent window), no server = not reachable"
+}
+
+# fm_backend_transport_reachable must answer EXPLICITLY for every known backend.
+# Assuming reachable is the right fallback, but a bare catch-all answering for
+# backends nobody examined is how the tmux gap survived the sbx work (fork issue
+# #29). A new backend must not silently inherit an unexamined answer.
+test_transport_reachable_answers_every_known_backend() {
+  local body b
+  body=$(awk '/^fm_backend_transport_reachable\(\)/,/^}/' "$ROOT/bin/fm-backend.sh")
+  [ -n "$body" ] || fail "could not extract fm_backend_transport_reachable from bin/fm-backend.sh"
+  for b in $FM_BACKEND_KNOWN; do
+    printf '%s\n' "$body" \
+      | grep -Eq "^[[:space:]]*([a-z-]+\|)*${b}(\|[a-z-]+)*\)" \
+      || fail "backend '$b' has no explicit fm_backend_transport_reachable arm (add a probe, or an explicit assume-reachable arm and a docs note)"
+  done
+  pass "fm_backend_transport_reachable names every known backend explicitly ($FM_BACKEND_KNOWN)"
+}
+
 test_backend_source_shell_portable() {
   local out status
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
@@ -1084,6 +1148,8 @@ test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
+test_transport_reachable_tmux_probe
+test_transport_reachable_answers_every_known_backend
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
