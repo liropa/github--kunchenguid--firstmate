@@ -320,6 +320,7 @@ Its header owns the encoding, delimiter, length, reversibility, and signal-signa
 Until 2026-07-27 the key was `printf '%s' "$id" | tr '.' '_'`, which is not injective: ids `a.b` and `a_b` both produced `a_b` and therefore shared one file in every family.
 That let one task's delivery breadcrumb arm or silence the other's unacknowledged-delivery alarm, surfaced one task's `.sbx-midtask-stop-` as a named alarm against the other, and let either task's teardown delete the other's live beacons.
 `bin/fm-state-key-migrate.sh` renames pre-existing markers directly from the locked `bin/fm-session-start.sh` path; standalone bootstrap deliberately does not run the sweep.
+The earlier acceptance-criterion wording that placed marker-key migration in `bin/fm-bootstrap.sh`'s mutating sweeps is superseded intent, written before the captain chose this session-start-only structure; the direct session-start invocation is deliberate, not implementation drift.
 It resolves a legacy name only against task ids or signal filenames the home can enumerate from `state/`, reports rather than picks when a name maps to more than one live owner, and never discards marker state.
 That errs toward under-reporting: an unmigrated marker reads as absent and each affected mechanism recovers on its next natural event, whereas a misattributed marker can alarm against a healthy secondmate and latch the marker that suppresses the real alarm.
 
