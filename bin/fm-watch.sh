@@ -935,7 +935,9 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-if [ -e "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ] \
+if [ ! -d "$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE" ] \
+  || [ -L "$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE" ] \
+  || [ -e "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ] \
   || [ -L "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ]; then
   echo "watcher: marker-key migration is unresolved; refusing to read per-task markers" >&2
   exit 1

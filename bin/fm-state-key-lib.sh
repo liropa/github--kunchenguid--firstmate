@@ -163,3 +163,8 @@ FM_STATE_SEEN_PREFIX=.seen-
 # remains visible under a current marker name.
 # shellcheck disable=SC2034  # consumed by the scripts that source this library
 FM_STATE_KEY_MIGRATION_BLOCK=.state-key-migration-blocked
+
+# Watchers require this directory as positive proof that marker-key migration
+# completed before supervision was armed.
+# shellcheck disable=SC2034  # consumed by the scripts that source this library
+FM_STATE_KEY_MIGRATION_COMPLETE=.state-key-migration-v1
