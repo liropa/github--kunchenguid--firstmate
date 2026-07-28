@@ -309,6 +309,64 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
 
 Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`, `.sbx-delivered-`, plus transient `.sbx-delivery-pending-` candidates), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm, and a leftover delivery marker would raise one for a delivery the replacement never received).
 
+### Marker naming (`bin/fm-state-key-lib.sh`)
+
+Every marker above is `<prefix><key>`, and `bin/fm-state-key-lib.sh` is the single owner of that key for the producer (this adapter), the consumer (`bin/fm-watch.sh`), and the cleanup (`bin/fm-teardown.sh`).
+The key escapes every byte outside `[A-Za-z0-9-]` as `_` plus two hex digits, so it is injective, decodes back to the exact id, stays one dot-free path segment, and is bounded at three times the id.
+A bare-slug id encodes to itself, so an ordinary home's marker names are unchanged.
+The transient candidate is `.sbx-delivery-pending-<key>.<pid>.<random>`: the `.` is the delimiter precisely because an encoded key can never contain one, so teardown's `<key>.*` glob reaches this task's candidates and no neighbouring id's.
+The same owner names the signal scan's `.seen-*` signatures, which are not sbx-specific but carried the identical defect; there the key encodes a whole `<id>.status` / `<id>.turn-ended` basename rather than a bare id.
+
+Until 2026-07-27 the key was `printf '%s' "$id" | tr '.' '_'`, which is not injective: ids `a.b` and `a_b` both produced `a_b` and therefore shared one file in every family.
+That let one task's delivery breadcrumb arm or silence the other's unacknowledged-delivery alarm, surfaced one task's `.sbx-midtask-stop-` as a named alarm against the other, and let either task's teardown delete the other's live beacons.
+`bin/fm-state-key-migrate.sh` renames pre-existing markers at session start (a `bin/fm-bootstrap.sh` mutating sweep, so only under the session lock).
+It resolves a legacy name only against the ids the home can enumerate from `state/`, reports rather than picks when a name maps to more than one live id, and never deletes.
+That errs toward under-reporting: an unmigrated marker reads as absent, and every one of these beacons re-arms on its own within a cycle, whereas a misattributed marker can alarm against a healthy secondmate and latch the marker that suppresses the real alarm.
+
+#### Verification (2026-07-27, macOS 26.5.2 arm64, GNU bash 3.2.57(1)-release, ShellCheck 0.11.0)
+
+Behavior-level, against the real scripts with a faked `sbx` CLI - the same harness the rest of this backend's suites use:
+
+```
+$ bash tests/fm-state-key.test.sh | tail -1
+# fm-state-key.test.sh: all assertions passed
+$ bash tests/fm-watch-sbx-signals.test.sh | tail -1
+# all fm-watch-sbx-signals tests passed
+$ bash tests/fm-backend-sbx.test.sh | tail -1
+# all fm-backend-sbx tests passed
+$ bash tests/fm-spawn-sbx.test.sh | tail -1
+# all fm-spawn-sbx tests passed
+$ bin/fm-lint.sh; echo "exit=$?"
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+exit=0
+```
+
+`tests/fm-state-key.test.sh` covers the `a.b` / `a_b` collision directly (it fails against the superseded fold), round-trip reversibility, the path-segment and length properties, migration idempotency across three consecutive runs, and the migration's refusal to resolve an ambiguous legacy name.
+`tests/fm-backend-sbx.test.sh` proves the producer half - two steers to fold-colliding ids publish separate `.sbx-delivered-` breadcrumbs - and that teardown of one id no longer reaches a neighbouring id's in-flight candidate.
+`tests/fm-watch-sbx-signals.test.sh` proves the consumer half through the real watcher: a `.sbx-midtask-stop-` written for `a.b` alarms as `sbx-midtask-stop:a.b` and never as `a_b`.
+
+The migration was also run against a scratch replica of this home's real `state/` **filenames** (76 entries copied as empty files; contents and the live home itself untouched), which holds one live sbx secondmate plus the `.seen-*` markers of long-retired tasks:
+
+```
+$ bin/fm-state-key-migrate.sh --state "$replica"
+BOOTSTRAP_INFO: migrated 2 state marker name(s) to the reversible key encoding
+$ bin/fm-state-key-migrate.sh --state "$replica"; echo "exit=$?"
+exit=0
+$ diff before.txt after.txt
+32,33c32,33
+< .seen-agent-dotfiles_status
+< .seen-agent-dotfiles_turn-ended
+---
+> .seen-agent-dotfiles_2estatus
+> .seen-agent-dotfiles_2eturn-ended
+```
+
+That is the expected shape: the live secondmate's id is a bare slug, so its `.sbx-beat-status-`, `.sbx-beat-te-`, and `.sbx-delivered-` markers were already current and were never moved - the acknowledgement clock stays exactly where it was - only the two signal signatures were renamed, the retired tasks' orphan signatures were left alone silently, nothing was ambiguous, and the second run was a no-op.
+
+**Outstanding**: not exercised against a real sandbox.
+No live VM was provisioned for this change, so whether `sbx` accepts a sandbox name containing `.` (`fm-a.b`) is unverified, and the migration has not been observed running against a live secondmate's beacon files.
+The behavior above is host-side file naming only, which is why the faked-CLI suites cover it; the live gap is narrow but real and should be closed the next time a real sbx secondmate is provisioned.
+
 ### Stranding evidence and what each arm covers (2026-07-23 incident, corrected 2026-07-27)
 
 The original stranding rationale in this document was **wrong on a load-bearing point**.

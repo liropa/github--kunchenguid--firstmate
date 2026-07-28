@@ -316,7 +316,7 @@ test_provably_working_signal_absorbed() {
   fi
   [ ! -s "$out" ] || fail "provably-working signal printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "provably-working signal enqueued a durable wake record"
-  [ -s "$state/.seen-task_status" ] || fail "provably-working signal did not advance its .seen-* suppressor"
+  [ -s "$(seen_path "$state" "task.status")" ] || fail "provably-working signal did not advance its .seen-* suppressor"
   [ -e "$state/.last-watcher-beat" ] || fail "watcher beacon was not touched while absorbing"
   reap "$pid"
   pass "a no-verb signal whose crew is provably working is absorbed (no exit, no queue, suppressor advanced, beacon present)"
@@ -378,7 +378,7 @@ test_working_note_not_working_surfaced() {
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the surfaced working: signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced working: note failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
-  [ -s "$state/.seen-task_status" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
+  [ -s "$(seen_path "$state" "task.status")" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
 
@@ -408,7 +408,7 @@ test_terminal_stale_surfaced() {
   printf 'finished, awaiting review' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
   printf 'done: PR https://example.test/pr/3\n' > "$state/done.status"
-  sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$state/.seen-done_status"
+  sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$(seen_path "$state" "done.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "finished, awaiting review")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -444,7 +444,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   # this line never gets superseded by a newer status-log entry while the
   # pipeline itself runs.
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
-  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$(seen_path "$state" "validating.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -497,7 +497,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   # Non-terminal status, and prime .seen-* so the signal scan does not pre-empt
   # the stale path.
   printf 'working: still compiling\n' > "$state/quiet.status"
-  sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$state/.seen-quiet_status"
+  sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$(seen_path "$state" "quiet.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -552,7 +552,7 @@ test_nonterminal_stale_not_working_surfaced() {
   # Non-terminal status (the crew never wrote a captain-relevant verb), .seen-*
   # primed so the signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
-  sig=$(seen_sig "$state/stopped.status"); printf '%s' "$sig" > "$state/.seen-stopped_status"
+  sig=$(seen_sig "$state/stopped.status"); printf '%s' "$sig" > "$(seen_path "$state" "stopped.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -594,7 +594,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   # A DECLARED pause (not captain-relevant), .seen-* primed so the signal scan does
   # not pre-empt the stale path.
   printf 'paused: holding for the upstream tool release\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -625,7 +625,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
   : > "$out"
   printf 'idle, holding for upstream (token 2)' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -662,7 +662,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle bare shell after agent exit")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -694,7 +694,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle bare shell after captain-held transfer")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -714,7 +714,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf 'idle external-decision gate\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
   printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "gate.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle external-decision gate")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -764,7 +764,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "secondmate-held.status")"
   key=$(printf '%s' "$window" | tr '.:/' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -790,7 +790,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   printf 'idle while the parent supervises\n' > "$capture_file"
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-working.meta"
   printf 'working: the parent supervises this secondmate\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "secondmate-working.status")"
   key=$(printf '%s' "$window" | tr '.:/' '___')
   pane_hash=$(hash_text "idle while the parent supervises")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -812,7 +812,7 @@ test_secondmate_unpause_clears_pause_tracking() {
   out="$dir/watch.out"; statusf="$state/secondmate-resumed.status"; window="test:fm-secondmate-resumed"
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
   printf 'working: upstream landed\n' > "$statusf"
-  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-resumed_status"
+  printf '%s' "$(seen_sig "$statusf")" > "$(seen_path "$state" "secondmate-resumed.status")"
   key=${window//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -839,7 +839,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/transition.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/transition.status"
-  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
+  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$(seen_path "$state" "transition.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -866,7 +866,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   reap "$pid"
 
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
-  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
+  sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$(seen_path "$state" "transition.status")"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -895,7 +895,7 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-recheck.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/pause-recheck.status"
-  sig=$(seen_sig "$state/pause-recheck.status"); printf '%s' "$sig" > "$state/.seen-pause-recheck_status"
+  sig=$(seen_sig "$state/pause-recheck.status"); printf '%s' "$sig" > "$(seen_path "$state" "pause-recheck.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -925,7 +925,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-working.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/paused-working.status"
-  sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
+  sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$(seen_path "$state" "paused-working.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -977,7 +977,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedged.meta"
   printf 'working: still monitoring ci\n' > "$state/wedged.status"
-  sig=$(seen_sig "$state/wedged.status"); printf '%s' "$sig" > "$state/.seen-wedged_status"
+  sig=$(seen_sig "$state/wedged.status"); printf '%s' "$sig" > "$(seen_path "$state" "wedged.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -1030,7 +1030,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedged-reset.meta"
   printf 'working: still monitoring ci\n' > "$state/wedged-reset.status"
-  sig=$(seen_sig "$state/wedged-reset.status"); printf '%s' "$sig" > "$state/.seen-wedged-reset_status"
+  sig=$(seen_sig "$state/wedged-reset.status"); printf '%s' "$sig" > "$(seen_path "$state" "wedged-reset.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -1063,7 +1063,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   printf 'idle building output' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet-timer.meta"
   printf 'working: still compiling\n' > "$state/quiet-timer.status"
-  sig=$(seen_sig "$state/quiet-timer.status"); printf '%s' "$sig" > "$state/.seen-quiet-timer_status"
+  sig=$(seen_sig "$state/quiet-timer.status"); printf '%s' "$sig" > "$(seen_path "$state" "quiet-timer.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -1168,7 +1168,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
   # fleet-scan backstop must catch it and wake firstmate.
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
-  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$(seen_path "$state" "miss.status")"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
@@ -1249,7 +1249,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "afk-held.status")"
   date '+%s' > "$state/.afk"
   key=$(printf '%s' "$window" | tr '.:/' '___')
 

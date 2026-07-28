@@ -7,6 +7,18 @@
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$ROOT/bin/fm-state-key-lib.sh"
+
+# seen_path <state-dir> <signal filename>: where the watcher keeps that signal
+# file's size:mtime signature. Named through the production single owner
+# (bin/fm-state-key-lib.sh) rather than a literal, so a suite that primes a
+# .seen-* marker to suppress the per-poll signal scan cannot drift from the
+# scan's own naming.
+seen_path() {  # <state-dir> <signal filename>
+  printf '%s/%s%s' "$1" "$FM_STATE_SEEN_PREFIX" "$(fm_state_key_encode "$2")"
+}
+
 # fm-wake-drain.sh now calls fm-guard.sh to assert watcher liveness on every
 # drain. fm-guard.sh's first check warns when the firstmate PRIMARY checkout
 # (FM_ROOT) sits on a feature branch; with no override FM_ROOT resolves to the

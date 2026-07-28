@@ -117,7 +117,7 @@ test_stale_enqueue_before_suppressor() {
   # stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
   if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stale_status"
+  printf '%s' "$sig" > "$(seen_path "$state" "stale.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -150,7 +150,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
   if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  printf '%s' "$sig" > "$(seen_path "$state" "stopped.status")"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"

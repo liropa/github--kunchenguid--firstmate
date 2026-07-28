@@ -96,6 +96,12 @@ if [ -z "${FM_INHERITABLE_CONFIG:-}" ] || [ -z "${FM_SHARED_CAPTAIN_REL:-}" ]; t
   . "$(dirname "${BASH_SOURCE[0]}")/../fm-config-inherit-lib.sh"
 fi
 
+# Every host-side marker this adapter writes is named through the shared key
+# encoding, so fm-watch.sh's beacon and fm-teardown.sh's cleanup read back
+# exactly what was written. bin/fm-state-key-lib.sh owns that contract.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../fm-state-key-lib.sh"
+
 fm_backend_sbx_state_dir() {
   printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 }
@@ -556,7 +562,7 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
   turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
   script=$(fm_backend_sbx_keepalive_script)
   busy=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
-  key=$(printf '%s' "$id" | tr '.' '_')
+  key=$(fm_state_key_encode "$id")
   marker="$(fm_backend_sbx_state_dir)/.sbx-midtask-stop-$key"
   (
     trap '' HUP
@@ -724,8 +730,11 @@ fm_backend_sbx_ensure_stack() {  # <target>
 fm_backend_sbx_delivery_prepare() {  # <target>
   local target=$1 id key pending
   id=$(fm_backend_sbx_task_of_target "$target") || return 0
-  key=$(printf '%s' "$id" | tr '.' '_')
-  pending="$(fm_backend_sbx_state_dir)/.sbx-delivery-pending-$key-${BASHPID:-$$}-$RANDOM"
+  key=$(fm_state_key_encode "$id")
+  # `.` separates the key from the nonce because an encoded key never contains
+  # one, so teardown's "<key>." glob reaches this task's candidates and no
+  # other task's (bin/fm-state-key-lib.sh).
+  pending="$(fm_backend_sbx_state_dir)/$FM_STATE_SBX_PENDING_PREFIX$key.${BASHPID:-$$}.$RANDOM"
   if ! : > "$pending"; then
     echo "error: cannot arm the sbx delivery beacon for $id; refusing to deliver untracked input" >&2
     return 1
@@ -740,7 +749,7 @@ fm_backend_sbx_delivery_abort() {  # <pending>
 fm_backend_sbx_after_send() {  # <target> <pending>
   local target=$1 pending=${2:-} id key home
   id=$(fm_backend_sbx_task_of_target "$target") || return 0
-  key=$(printf '%s' "$id" | tr '.' '_')
+  key=$(fm_state_key_encode "$id")
   if [ -n "$pending" ] \
     && ! mv -f -- "$pending" "$(fm_backend_sbx_state_dir)/.sbx-delivered-$key"; then
     rm -f -- "$pending" 2>/dev/null || true
