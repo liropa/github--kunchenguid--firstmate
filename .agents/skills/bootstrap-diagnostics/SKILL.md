@@ -46,7 +46,13 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `STATE_KEY_MIGRATION: state/<file> could name more than one live task (<ids>); left untouched until those names no longer collide` - a per-task marker file written under the superseded key fold cannot be attributed to one task, because the listed ids all folded to the same name.
   The sweep never guesses, so that marker is now invisible to the watcher and behaves as absent: the affected secondmate's delivery breadcrumb stays quiet until the next steer republishes it, and its counters rebuild.
   No repair is needed for the beacons themselves; the line clears once the colliding ids no longer coexist in this home, so retire or rename one of them when convenient rather than hand-renaming state files.
-- Any other `STATE_KEY_MIGRATION:` line names a marker the sweep left in place because its target name already existed or the rename failed.
+- `STATE_KEY_MIGRATION: state/<file> could be current for <id> or legacy for <id>; moved aside as state/<preserved-file>` - a filename crossed the old and new schemes, so the sweep preserved it under the inert destination it names rather than attributing it to either task.
+  Inspect the preserved destination when investigating its contents; no consumer reads it.
+- `STATE_KEY_MIGRATION: watcher exclusion could not be acquired; marker migration did not run` - supervision is already active or its lock is uncertain, so bootstrap left every marker untouched.
+  Let the current watcher finish or stop it through the normal supervision protocol, then rerun session start.
+- A `STATE_KEY_MIGRATION:` line saying watcher blocking could not be established, a cross-scheme marker could not be moved aside, or the block could not be cleared leaves supervision disabled for that home.
+  Inspect the named state path and rerun session start after repairing it; `bin/fm-watch.sh` refuses to read per-task markers while the block remains.
+- Any other marker-specific `STATE_KEY_MIGRATION:` line names a marker the sweep left in place because its target name already existed or the rename failed.
   Inspect the named path before touching it; the same absent-not-wrong behavior applies, so nothing is at risk while it stands.
   `bin/fm-state-key-lib.sh`'s `fm_state_key_decode` reads a current-scheme name back to its owner when you need to tell the two files apart.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation could not run; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.

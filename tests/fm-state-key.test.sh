@@ -239,17 +239,19 @@ STATE=$(new_state raced-conflict)
 printf 'legacy\n' > "$STATE/.sbx-delivered-a_b"
 FAKEBIN="$TMP_ROOT/raced-conflict/fakebin"
 mkdir -p "$FAKEBIN"
-cat > "$FAKEBIN/mv" <<'SH'
+cat > "$FAKEBIN/ln" <<'SH'
 #!/usr/bin/env bash
 set -u
 destination=
 for argument in "$@"; do
   destination=$argument
 done
-printf 'racer\n' > "$destination"
-exec /bin/mv "$@"
+case "$*" in
+  *".sbx-delivered-a_b"*) printf 'racer\n' > "$destination" ;;
+esac
+exec /bin/ln "$@"
 SH
-chmod +x "$FAKEBIN/mv"
+chmod +x "$FAKEBIN/ln"
 OUT=$(PATH="$FAKEBIN:$PATH" migrate "$STATE")
 [ "$(cat "$STATE/.sbx-delivered-$(fm_state_key_encode 'a.b')")" = racer ] \
   || fail "the sweep overwrote a destination created during the rename"
@@ -257,6 +259,51 @@ OUT=$(PATH="$FAKEBIN:$PATH" migrate "$STATE")
   || fail "the legacy marker disappeared after a raced destination conflict"
 assert_contains "$OUT" "already exists" "the raced destination conflict was not reported"
 pass "migration atomically refuses a destination created during the rename"
+
+STATE=$(new_state active-watcher)
+: > "$STATE/a.b.meta"
+printf 'legacy\n' > "$STATE/.sbx-delivered-a_b"
+mkdir "$STATE/.watch.lock"
+printf '%s\n' "$$" > "$STATE/.watch.lock/pid"
+STATUS=0
+OUT=$(migrate "$STATE") || STATUS=$?
+expect_code 1 "$STATUS" "migration must refuse an active watcher"
+[ "$(cat "$STATE/.sbx-delivered-a_b")" = legacy ] \
+  || fail "migration changed marker state while the watcher lock was held"
+assert_contains "$OUT" "watcher exclusion could not be acquired" \
+  "active watcher refusal was not reported"
+pass "migration cannot run while watcher supervision is active"
+
+STATE=$(new_state quarantine-failure)
+: > "$STATE/a.b.meta"
+: > "$STATE/a_2eb.meta"
+printf 'ambiguous\n' > "$STATE/.sbx-delivered-a_2eb"
+FAKEBIN="$TMP_ROOT/quarantine-failure/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/ln" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *".sbx-delivered-a_2eb"*) exit 1 ;;
+esac
+exec /bin/ln "$@"
+SH
+chmod +x "$FAKEBIN/ln"
+STATUS=0
+OUT=$(PATH="$FAKEBIN:$PATH" migrate "$STATE") || STATUS=$?
+expect_code 1 "$STATUS" "migration must fail when a cross-scheme marker cannot be moved aside"
+[ -e "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ] \
+  || fail "failed cross-scheme quarantine did not persist a watcher block"
+[ "$(cat "$STATE/.sbx-delivered-a_2eb")" = ambiguous ] \
+  || fail "failed cross-scheme quarantine did not preserve the marker"
+assert_contains "$OUT" "could not be moved aside" "quarantine failure was not reported"
+WATCH_OUT="$TMP_ROOT/quarantine-failure/watch.out"
+WATCH_STATUS=0
+FM_HOME="${STATE%/state}" FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-watch.sh" \
+  > "$WATCH_OUT" 2>&1 || WATCH_STATUS=$?
+expect_code 1 "$WATCH_STATUS" "watcher must refuse unresolved marker migration"
+assert_contains "$(cat "$WATCH_OUT")" "marker-key migration is unresolved" \
+  "watcher did not explain its unresolved-migration refusal"
+pass "failed cross-scheme quarantine blocks marker consumers"
 
 # --- migration: the signal-scan signatures -----------------------------------
 
@@ -324,5 +371,30 @@ FM_HOME="${STATE%/state}" FM_STATE_OVERRIDE="$STATE" FM_PROJECTS_OVERRIDE="${STA
 [ ! -e "$STATE/.sbx-delivered-$(fm_state_key_encode 'a.b')" ] \
   || fail "standalone bootstrap produced a current marker without owning the session lock"
 pass "standalone bootstrap cannot migrate marker state without the session lock"
+
+STATE=$(new_state locked-bootstrap-active-watcher)
+: > "$STATE/a.b.meta"
+: > "$STATE/.sbx-delivered-a_b"
+printf '%s\n' "$$" > "$STATE/.lock"
+mkdir "$STATE/.watch.lock"
+printf '%s\n' "$$" > "$STATE/.watch.lock/pid"
+FAKEBIN="$TMP_ROOT/locked-bootstrap-active-watcher/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/ps" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+chmod +x "$FAKEBIN/ps"
+OUT=$(CLAUDE_PID="$$" PATH="$FAKEBIN:$PATH" FM_HOME="${STATE%/state}" \
+  FM_STATE_OVERRIDE="$STATE" FM_PROJECTS_OVERRIDE="${STATE%/state}/projects" \
+  FM_CONFIG_OVERRIDE="${STATE%/state}/config" FM_DATA_OVERRIDE="${STATE%/state}/data" \
+  "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+[ -e "$STATE/.sbx-delivered-a_b" ] \
+  || fail "lock-owning standalone bootstrap migrated while supervision was active"
+[ ! -e "$STATE/.sbx-delivered-$(fm_state_key_encode 'a.b')" ] \
+  || fail "lock-owning standalone bootstrap published a marker during supervision"
+assert_contains "$OUT" "watcher exclusion could not be acquired" \
+  "lock-owning standalone bootstrap did not report active supervision"
+pass "lock ownership alone cannot migrate while supervision is active"
 
 echo "# fm-state-key.test.sh: all assertions passed"

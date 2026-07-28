@@ -312,10 +312,7 @@ Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`
 ### Marker naming (`bin/fm-state-key-lib.sh`)
 
 Every marker above is `<prefix><key>`, and `bin/fm-state-key-lib.sh` is the single owner of that key for the producer (this adapter), the consumer (`bin/fm-watch.sh`), and the cleanup (`bin/fm-teardown.sh`).
-The key escapes every byte outside `[A-Za-z0-9-]` as `_` plus two hex digits, so it is injective, decodes back to the exact id, stays one dot-free path segment, and is bounded at three times the id.
-A bare-slug id encodes to itself, so an ordinary home's marker names are unchanged.
-The transient candidate is `.sbx-delivery-pending-<key>.<pid>.<random>`: the `.` is the delimiter precisely because an encoded key can never contain one, so teardown's `<key>.*` glob reaches this task's candidates and no neighbouring id's.
-The same owner names the signal scan's `.seen-*` signatures, which are not sbx-specific but carried the identical defect; there the key encodes a whole `<id>.status` / `<id>.turn-ended` basename rather than a bare id.
+Its header owns the encoding, delimiter, length, reversibility, and signal-signature rules in full.
 
 Until 2026-07-27 the key was `printf '%s' "$id" | tr '.' '_'`, which is not injective: ids `a.b` and `a_b` both produced `a_b` and therefore shared one file in every family.
 That let one task's delivery breadcrumb arm or silence the other's unacknowledged-delivery alarm, surfaced one task's `.sbx-midtask-stop-` as a named alarm against the other, and let either task's teardown delete the other's live beacons.

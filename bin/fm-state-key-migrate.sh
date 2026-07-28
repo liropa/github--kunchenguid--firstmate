@@ -87,6 +87,9 @@ fi
 
 TAB=$'\t'
 RENAMED=0
+UNSAFE=0
+WATCH_LOCK="$STATE/.watch.lock"
+BLOCK_PATH="$STATE/$FM_STATE_KEY_MIGRATION_BLOCK"
 
 report() {  # <detail>
   echo "STATE_KEY_MIGRATION: $1"
@@ -94,11 +97,12 @@ report() {  # <detail>
 
 move_no_clobber() {  # <source> <destination>
   local source=$1 destination=$2
-  mv -n -- "$source" "$destination" || return 2
-  if [ -e "$source" ] || [ -L "$source" ]; then
-    return 1
+  if ln -P -- "$source" "$destination" 2>/dev/null; then
+    rm -f -- "$source" || return 2
+    return 0
   fi
   [ -e "$destination" ] || [ -L "$destination" ] || return 2
+  return 1
 }
 
 move_aside() {  # <path>
@@ -121,6 +125,30 @@ move_aside() {  # <path>
     esac
   done
 }
+
+ensure_consumer_blocked() {
+  if [ -e "$BLOCK_PATH" ] || [ -L "$BLOCK_PATH" ]; then
+    [ -d "$BLOCK_PATH" ] && [ ! -L "$BLOCK_PATH" ]
+    return
+  fi
+  mkdir -- "$BLOCK_PATH"
+}
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+WATCH_LOCK_HELD=0
+migration_cleanup() {
+  [ "$WATCH_LOCK_HELD" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
+}
+trap migration_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  report "watcher exclusion could not be acquired; marker migration did not run"
+  exit 1
+fi
+WATCH_LOCK_HELD=1
 
 # --- the namespaces this home can enumerate ---------------------------------
 #
@@ -215,11 +243,17 @@ $owners
 EOF
       [ "$count" -gt 0 ] || continue
 
+      if ! ensure_consumer_blocked; then
+        report "state/$base could be current for $current_owner or legacy for $joined and watcher blocking could not be established"
+        UNSAFE=1
+        continue
+      fi
       if moved=$(move_aside "$f"); then
         report "state/$base could be current for $current_owner or legacy for $joined; moved aside as state/$moved"
         continue
       fi
       report "state/$base could be current for $current_owner or legacy for $joined and could not be moved aside"
+      UNSAFE=1
       continue
     fi
 
@@ -278,7 +312,17 @@ done < <(fm_state_sbx_marker_prefixes)
 
 migrate_family "$FM_STATE_SEEN_PREFIX" "$CURRENT_SIGNALS" "$LEGACY_SIGNALS"
 
+if [ "$UNSAFE" -eq 0 ] && { [ -e "$BLOCK_PATH" ] || [ -L "$BLOCK_PATH" ]; }; then
+  if [ -d "$BLOCK_PATH" ] && [ ! -L "$BLOCK_PATH" ] && rmdir -- "$BLOCK_PATH"; then
+    :
+  else
+    report "state/$FM_STATE_KEY_MIGRATION_BLOCK could not be cleared; watcher remains blocked"
+    UNSAFE=1
+  fi
+fi
+
 if [ "$RENAMED" -gt 0 ]; then
   echo "BOOTSTRAP_INFO: migrated $RENAMED state marker name(s) to the reversible key encoding"
 fi
+[ "$UNSAFE" -eq 0 ] || exit 1
 exit 0
