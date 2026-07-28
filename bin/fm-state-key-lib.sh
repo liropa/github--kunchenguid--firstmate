@@ -52,8 +52,9 @@
 #   - A task id that is already a bare slug (letters, digits and hyphens - the
 #     shape fm-spawn.sh's callers actually use) encodes to itself, so the common
 #     case is byte-identical to the pre-migration name and needs no migration.
-#     Window/target strings always carry a `:`, so their keys always change; see
-#     fm_state_watch_target_prefixes for why that needs no migration either.
+#     Colon-bearing tmux and herdr targets always change, while a bare orca
+#     terminal id may remain byte-identical; see fm_state_watch_target_prefixes
+#     for why neither case needs migration.
 #
 # Production code only ever ENCODES. fm_state_key_decode is the reversibility
 # half of the contract: the tests hold the round-trip property against it, and

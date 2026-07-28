@@ -448,8 +448,9 @@ pass "a legacy target name CAN equal a current target name, so the target guard 
 # copies of the window fold is what motivated adopting it here, so guard the
 # property directly rather than trusting review to catch a seventh.
 
-# Code only: this library's legacy helpers reproduce the superseded folds for
-# recognition and ownership checks, and comments cannot name a file.
+# Shell code only: the fold is a shell idiom, and the five non-shell scripts
+# under bin/ contain no marker-key logic. This library's legacy helpers
+# reproduce the superseded folds for recognition and ownership checks.
 LEFTOVER=$(
   while IFS= read -r SCRIPT; do
     awk -v file="$SCRIPT" -v legacy_lib="$ROOT/bin/fm-state-key-lib.sh" '
@@ -475,9 +476,9 @@ LEFTOVER=$(
   done < <(find "$ROOT/bin" -type f -name '*.sh' -print)
 )
 [ -z "$LEFTOVER" ] \
-  || fail "bin/ must not re-derive the window key; use fm_state_key_encode:
+  || fail "shell scripts under bin/ must not re-derive the window key; use fm_state_key_encode:
 $LEFTOVER"
-pass "no script under bin/ re-derives the window/target key fold"
+pass "no shell script under bin/ re-derives the window/target key fold"
 
 # Teardown removes the families this list names, so a family the watcher writes
 # but the list omits leaks forever. Assert the list covers every marker family

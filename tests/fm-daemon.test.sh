@@ -189,12 +189,12 @@ test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
   state="$dir/state"
-  win="sess:fm-held-w10-signal"
-  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
-  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
-  key=$(fm_state_key_encode "held-w10-signal")
+  win="sess:fm-held_w10_signal"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held_w10_signal.meta"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held_w10_signal.status"
+  key=$(fm_state_key_encode "held_w10_signal")
   date +%s > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held_w10_signal.status" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
