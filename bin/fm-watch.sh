@@ -935,6 +935,11 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+if [ -e "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ] \
+  || [ -L "$STATE/$FM_STATE_KEY_MIGRATION_BLOCK" ]; then
+  echo "watcher: marker-key migration is unresolved; refusing to read per-task markers" >&2
+  exit 1
+fi
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
