@@ -507,7 +507,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     task=$(basename "$f"); task=${task%.status}
-    win=$(window_for_task "$task" "$state" 2>/dev/null || true)
+    win=$(window_for_task "$(_stale_key "$task")" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
     reconcile_pause_tracking "$win" "$state" "$last"
   done
