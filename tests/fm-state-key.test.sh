@@ -37,7 +37,11 @@ migrate() {  # <state>: run the sweep, print its combined output
 }
 
 mtime_of() {  # <file>
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
+  local mtime
+  mtime=$(stat -f %m "$1" 2>/dev/null) \
+    || mtime=$(stat -c %Y "$1") \
+    || return 1
+  printf '%s\n' "$mtime"
 }
 
 # --- the collision this change exists to fix --------------------------------
