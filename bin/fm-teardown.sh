@@ -112,9 +112,9 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# The single owner of the marker-file key and of the beat-beacon family list, so
-# this cleanup removes exactly the names the sbx adapter wrote and the watcher
-# reads (bin/fm-state-key-lib.sh).
+# The single owner of the marker-file keys and family lists, so this cleanup
+# removes exactly the names their producers write and the watcher reads
+# (bin/fm-state-key-lib.sh).
 # shellcheck source=bin/fm-state-key-lib.sh
 . "$SCRIPT_DIR/fm-state-key-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then

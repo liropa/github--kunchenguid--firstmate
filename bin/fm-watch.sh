@@ -81,9 +81,10 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# The single owner of the key that names this watcher's per-task marker files
-# (.seen-* signatures and the sbx beat beacons), shared with the sbx adapter
-# that writes those beacons and the teardown that removes them.
+# The single owner of every encoded key that names this watcher's marker files:
+# signal-keyed .seen-* signatures, task-keyed sbx/.hb-surfaced-* markers, and
+# window-keyed stale/hash/count/pause families. It is shared with their
+# producers and with teardown, so naming and cleanup cannot drift.
 # shellcheck source=bin/fm-state-key-lib.sh
 . "$SCRIPT_DIR/fm-state-key-lib.sh"
 
