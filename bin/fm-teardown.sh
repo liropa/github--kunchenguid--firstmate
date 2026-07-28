@@ -1219,19 +1219,38 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+_beacon_key=$(fm_state_key_encode "$ID")
+_beacon_ambiguous=0
+for _beacon_evidence in "$STATE"/*.meta "$STATE"/*.status "$STATE"/*.turn-ended; do
+  [ -e "$_beacon_evidence" ] || [ -L "$_beacon_evidence" ] || continue
+  _beacon_owner=${_beacon_evidence##*/}
+  case $_beacon_owner in
+    *.meta) _beacon_owner=${_beacon_owner%.meta} ;;
+    *.status) _beacon_owner=${_beacon_owner%.status} ;;
+    *.turn-ended) _beacon_owner=${_beacon_owner%.turn-ended} ;;
+    *) continue ;;
+  esac
+  [ "$_beacon_owner" != "$ID" ] || continue
+  if [ "$(fm_state_key_legacy "$_beacon_owner")" = "$_beacon_key" ]; then
+    _beacon_ambiguous=1
+    break
+  fi
+done
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 # Beat-beacon markers (fm-watch.sh scan_sbx_beacon). A leftover
 # .sbx-stranded-alarmed marker would suppress the stranding alarm for a
 # re-provisioned same-id secondmate, and a leftover .sbx-delivered marker would
 # alarm one as unacknowledged for a delivery made to the retired secondmate it
 # replaced. The family list and the key both come from fm-state-key-lib.sh, so
-# this can neither miss a family the watcher reads nor, through the `<key>.`
-# delimiter on the transient candidates, reach another task's files.
-_beacon_key=$(fm_state_key_encode "$ID")
-while IFS= read -r _beacon_prefix; do
-  [ -n "$_beacon_prefix" ] || continue
-  rm -f "$STATE/$_beacon_prefix$_beacon_key"
-done < <(fm_state_sbx_marker_prefixes)
+# this can neither miss a family the watcher reads nor remove a durable path
+# that could still be another live task's legacy marker; the `<key>.` delimiter
+# on transient candidates cannot reach another task's files.
+if [ "$_beacon_ambiguous" -eq 0 ]; then
+  while IFS= read -r _beacon_prefix; do
+    [ -n "$_beacon_prefix" ] || continue
+    rm -f "$STATE/$_beacon_prefix$_beacon_key"
+  done < <(fm_state_sbx_marker_prefixes)
+fi
 rm -f "$STATE/$FM_STATE_SBX_PENDING_PREFIX$_beacon_key."*
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

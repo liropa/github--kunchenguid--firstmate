@@ -316,7 +316,7 @@ Its header owns the encoding, delimiter, length, reversibility, and signal-signa
 
 Until 2026-07-27 the key was `printf '%s' "$id" | tr '.' '_'`, which is not injective: ids `a.b` and `a_b` both produced `a_b` and therefore shared one file in every family.
 That let one task's delivery breadcrumb arm or silence the other's unacknowledged-delivery alarm, surfaced one task's `.sbx-midtask-stop-` as a named alarm against the other, and let either task's teardown delete the other's live beacons.
-`bin/fm-state-key-migrate.sh` renames pre-existing markers at session start (a `bin/fm-bootstrap.sh` mutating sweep, so only under the session lock).
+`bin/fm-state-key-migrate.sh` renames pre-existing markers directly from the locked `bin/fm-session-start.sh` path; standalone bootstrap deliberately does not run the sweep.
 It resolves a legacy name only against the ids the home can enumerate from `state/`, reports rather than picks when a name maps to more than one live id, and never deletes.
 That errs toward under-reporting: an unmigrated marker reads as absent, and every one of these beacons re-arms on its own within a cycle, whereas a misattributed marker can alarm against a healthy secondmate and latch the marker that suppresses the real alarm.
 
@@ -337,6 +337,27 @@ $ bin/fm-lint.sh; echo "exit=$?"
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 exit=0
 ```
+
+Operand-terminator and atomic no-replace verification (2026-07-28, macOS 26.5.2 build 25F84, stock `/bin` utilities):
+
+```
+$ printf 'source\n' > SRC
+$ /bin/ln -P -- SRC DST; echo "exit=$?"
+exit=0
+$ /bin/ln -P -- SRC DST; echo "exit=$?"
+ln: DST: File exists
+exit=1
+$ /bin/rm -f -- PATH; echo "exit=$?"
+exit=0
+$ /bin/mkdir -- PATH; echo "exit=$?"
+exit=0
+$ /bin/rmdir -- PATH; echo "exit=$?"
+exit=0
+$ /bin/mv -- SRC DST; echo "exit=$?"
+exit=0
+```
+
+The first `ln` created the link and the repeated command refused to replace it, confirming that the stock implementation both accepts `--` and supplies the atomic no-replace primitive the migration uses.
 
 `tests/fm-state-key.test.sh` covers the `a.b` / `a_b` collision directly (it fails against the superseded fold), round-trip reversibility, the path-segment and length properties, migration idempotency across three consecutive runs, and the migration's refusal to resolve an ambiguous legacy name.
 `tests/fm-backend-sbx.test.sh` proves the producer half - two steers to fold-colliding ids publish separate `.sbx-delivered-` breadcrumbs - and that teardown of one id no longer reaches a neighbouring id's in-flight candidate.

@@ -11,7 +11,6 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
-#                 "STATE_KEY_MIGRATION: <marker name left unmigrated>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>",
@@ -78,19 +77,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, state-key migration, secondmate_sync,
-#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
+#          x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line above; the TANGLE line switches
 #          to advisory-only wording with no checkout command. Used by
 #          fm-session-start.sh's read-only path when the lock is refused, so no
 #          unverified session race-mutates PR-check artifacts, per-task marker
 #          names, secondmate homes, X-mode artifacts, project clones, or repair
 #          instructions.
-#          State-key migration additionally verifies that the invoking session
-#          owns state/.lock, so standalone bootstrap cannot race supervision.
-#          Unset/0 (the default) runs every sweep exactly as before - this flag
-#          is purely additive.
+#          Marker-key migration is session-start-only and is not owned by this
+#          standalone command. Unset/0 (the default) runs all five sweeps.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -881,15 +878,11 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# This is the first mutating sweep at a locked session boundary. It pauses an
-# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
-# before any tool detection or later bootstrap mutation can leave old artifacts
-# runnable. Detect-only sessions never touch state.
+# The PR-check migration pauses an identity-matched watcher, holds its lock, and
+# neutralizes legacy checks before later bootstrap mutation can leave old
+# artifacts runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
-  if "$SCRIPT_DIR/fm-lock.sh" owns >/dev/null 2>&1; then
-    "$SCRIPT_DIR/fm-state-key-migrate.sh" || true
-  fi
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then

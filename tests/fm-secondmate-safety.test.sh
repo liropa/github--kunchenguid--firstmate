@@ -1992,7 +1992,7 @@ EOF
 test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
-  mkdir -p "$home/state/.state-key-migration-v1"
+  mkdir -p "$home/state"
   window="firstmate:fm-domain"
   cat > "$home/state/domain.meta" <<EOF
 window=$window
