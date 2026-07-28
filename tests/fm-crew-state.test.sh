@@ -25,6 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) false-`failed` regression set: a superseded run must never be attributed
+#       to a live one, and an unreadable status read is unknown, never failed.
+#       See that section's own header, below, for the two channels it pins.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -62,20 +65,33 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
 case "${1:-}" in
   axi)
     shift
     case "${1:-}" in
       status)
         shift
+        # Unreadable-read modes. FM_FAKE_AXI_HANG makes the call outlive the
+        # helper's bound so a REAL timeout kill is exercised (optionally after
+        # FM_FAKE_AXI_PARTIAL, reproducing the partial TOON a killed CLI leaves
+        # on stdout); FM_FAKE_AXI_STATUS_RC reproduces a CLI error exit, which
+        # the real binary pairs with an `error: "..."` payload on STDOUT.
+        if [ "${FM_FAKE_AXI_HANG:-0}" = 1 ]; then
+          [ -n "${FM_FAKE_AXI_PARTIAL:-}" ] && printf '%s\n' "$FM_FAKE_AXI_PARTIAL"
+          while :; do :; done
+        fi
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi
+        exit "${FM_FAKE_AXI_STATUS_RC:-0}" ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        exit "${FM_FAKE_CI_LOGS_RC:-0}" ;;
     esac
     ;;
   runs)
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
+    exit "${FM_FAKE_RUNS_RC:-0}" ;;
 esac
 exit 0
 SH
@@ -162,8 +178,29 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_AXI_HANG=0
+  FM_FAKE_AXI_PARTIAL=""
+  FM_FAKE_AXI_STATUS_RC=0
+  FM_FAKE_RUNS_RC=0
+  FM_FAKE_CI_LOGS_RC=0
+  FM_FAKE_NM_CALLS=/dev/null
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_AXI_HANG FM_FAKE_AXI_PARTIAL FM_FAKE_AXI_STATUS_RC FM_FAKE_RUNS_RC FM_FAKE_CI_LOGS_RC
+  export FM_FAKE_NM_CALLS
+}
+
+# Number of fake `no-mistakes` invocations recorded for the current case. Used to
+# prove the coarse runs-list fallback was NOT entered (1 call = the primary
+# `axi status` read only).
+nm_call_count() {  # <case-dir>
+  awk 'END { print NR + 0 }' "$1/nm.calls" 2>/dev/null || echo 0
+}
+# Point the shared fake's call log at this case dir and start it empty.
+count_nm_calls() {  # <case-dir>
+  FM_FAKE_NM_CALLS="$1/nm.calls"
+  export FM_FAKE_NM_CALLS
+  : > "$FM_FAKE_NM_CALLS"
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -280,6 +317,19 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: cancelled
 EOF
 }
 
@@ -1232,6 +1282,312 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# (l) FALSE-`failed` REGRESSION SET.
+#
+# A healthy run mid-`lint` was reported as `state: failed · source: run-step ·
+# run failed`, which under AGENTS.md section 7 reads to firstmate as authority
+# to tear the work down. Two independent channels produced it, and both are
+# pinned here:
+#
+#   1. ATTRIBUTION. nm_runs_status_for_branch rejected the newest (live) row for
+#      the branch on the ordinary code-identity rule, then `continue`d to an
+#      OLDER superseded row - an earlier failed attempt on the same branch -
+#      and reported its status word as current.
+#   2. UNREADABLE READ. Every nm_run branch ended `|| true`, so a timeout, a
+#      crash, and a real empty answer were indistinguishable. A timed-out call
+#      leaves PARTIAL TOON (branch, no head) and a CLI error leaves an
+#      `error: "..."` payload, both on stdout; each parsed as "answered but
+#      attribution missed" and dropped into channel 1's fallback.
+#
+# The counterfactuals are pinned as tests too, so the causal claim stays
+# falsifiable: an empty read ALONE never reaches the fallback (one call, no
+# `failed`), and a stale row is NECESSARY - without one the fallback is empty.
+# A genuinely failed or cancelled run must keep reporting `failed`, and the live
+# pane must keep answering through an unreadable read.
+
+# The exact reproduction. The newest row is rejected for the most ordinary
+# reason there is - its recorded head is an ancestor of the worktree tip, which
+# is what the pipeline's own rebase step or any later commit produces - and the
+# older FAILED row still binds to HEAD.
+test_superseded_failed_row_not_attributed_to_live_run() {
+  reset_fakes
+  local d old new out
+  d=$(new_case superseded-failed-row)
+  make_repo_on_branch "$d/wt" fm/feat-super
+  old=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'work after the earlier failed attempt'
+  new=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/super.meta" "window=fm:fm-super" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\n' > "$d/state/super.status"
+  # Repo-wide answer belongs to another crew, so the coarse fallback runs.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-super ${old:0:8}  2026-07-27 12:00
+  failed     fm/feat-super ${new:0:8}  2026-07-27 10:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" super)
+  assert_not_contains "$out" "state: failed" "a superseded failed row must never be reported as the live run"
+  assert_not_contains "$out" "run failed" "the superseded run's status word must not leak into the detail"
+  assert_not_contains "$out" "source: run-step" "a rejected newest row means no attributable run at all"
+  pass "superseded failed row on the same branch is not attributed to a live run"
+}
+
+test_superseded_cancelled_row_not_attributed_to_live_run() {
+  reset_fakes
+  local d old new out
+  d=$(new_case superseded-cancelled-row)
+  make_repo_on_branch "$d/wt" fm/feat-supercan
+  old=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'work after the earlier cancelled attempt'
+  new=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/supercan.meta" "window=fm:fm-supercan" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-supercan ${old:0:8}  2026-07-27 12:00
+  cancelled  fm/feat-supercan ${new:0:8}  2026-07-27 10:00
+EOF
+)"
+  out=$(run_crew_state "$d" supercan)
+  assert_not_contains "$out" "state: failed" "a superseded cancelled row must not be reported as the live run"
+  assert_not_contains "$out" "run cancelled" "the superseded cancelled word must not leak into the detail"
+  pass "superseded cancelled row on the same branch is not attributed to a live run"
+}
+
+# The brief's headline shape, on the path the incident's own worktree took: a
+# healthy run reported for THIS branch by `axi status`, with an earlier failed
+# attempt still sitting in the runs list. The live run wins outright.
+test_healthy_run_with_superseded_failed_row_reads_working() {
+  reset_fakes
+  local d out
+  d=$(new_case healthy-with-stale-failed)
+  make_repo_on_branch "$d/wt" fm/feat-healthy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/healthy.meta" "window=fm:fm-healthy" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-healthy)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-healthy ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 12:00
+  failed     fm/feat-healthy ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 10:00
+EOF
+)"
+  out=$(run_crew_state "$d" healthy)
+  assert_contains "$out" "state: working" "a healthy run outranks an earlier failed attempt on the same branch"
+  assert_contains "$out" "source: run-step" "the healthy run remains run-step sourced"
+  assert_not_contains "$out" "state: failed" "the earlier failed attempt must not surface"
+  pass "healthy running run with a superseded failed run on the same branch reads working"
+}
+
+# Counterfactual (a): an empty read ALONE is not sufficient. The coarse fallback
+# is nested behind a non-empty primary read, so it is never even consulted - one
+# no-mistakes call, and no `failed` however stale the runs list is.
+test_empty_status_read_never_reaches_the_stale_fallback() {
+  reset_fakes
+  local d out calls
+  d=$(new_case empty-read)
+  make_repo_on_branch "$d/wt" fm/feat-empty
+  make_fakebin "$d" >/dev/null
+  count_nm_calls "$d"
+  fm_write_meta "$d/state/empty.meta" "window=fm:fm-empty" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-empty ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 10:00"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" empty)
+  assert_not_contains "$out" "state: failed" "an empty status read must not produce a failure verdict"
+  assert_contains "$out" "state: unknown" "an empty read with no other source is unknown"
+  calls=$(nm_call_count "$d")
+  [ "$calls" -eq 1 ] || fail "empty read consulted the stale runs list ($calls calls)"
+  pass "empty status read never reaches the stale runs-list fallback"
+}
+
+# Counterfactual (b): the stale row is NECESSARY. Same rejected newest row, but
+# with nothing older behind it, the fallback yields nothing at all.
+test_rejected_newest_row_without_stale_row_is_unknown() {
+  reset_fakes
+  local d old out
+  d=$(new_case rejected-only)
+  make_repo_on_branch "$d/wt" fm/feat-only
+  old=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'later work'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/only.meta" "window=fm:fm-only" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-only ${old:0:8}  2026-07-27 12:00"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" only)
+  assert_contains "$out" "state: unknown" "a rejected newest row with nothing behind it is unknown"
+  assert_not_contains "$out" "source: run-step" "a rejected row must not be attributed"
+  pass "a rejected newest row with no stale row behind it reports unknown"
+}
+
+# Channel 2, the real thing: the call outlives its bound and is killed. The
+# stale failed row and a stale `failed:` log line are both present and both must
+# be ignored - an unreadable read teaches us nothing about this crew's run.
+test_timed_out_status_read_is_unknown_not_failed() {
+  reset_fakes
+  local d out calls
+  d=$(new_case timed-out-read)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-unknown
+  make_fakebin "$d" >/dev/null
+  count_nm_calls "$d"
+  fm_write_meta "$d/state/tmo.meta" "window=fm:fm-tmo" "worktree=$d/wt" "kind=ship"
+  printf 'failed: an earlier attempt blew up\n' > "$d/state/tmo.status"
+  FM_FAKE_AXI_HANG=1
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-timeout-unknown ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 10:00"
+  FM_FAKE_BUSY=0
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" tmo)
+  assert_contains "$out" "state: unknown" "a timed-out status read is unknown"
+  assert_contains "$out" "source: none" "an unreadable read has no state source"
+  assert_contains "$out" "unreadable" "the detail names the read as unreadable"
+  assert_not_contains "$out" "state: failed" "a timed-out read must never degrade into failed"
+  assert_not_contains "$out" "source: status-log" "a stale failed: event must not stand in for an unread run"
+  calls=$(nm_call_count "$d")
+  [ "$calls" -eq 1 ] || fail "timed-out read consulted the stale runs list ($calls calls)"
+  pass "timed-out status read reports unknown, never failed"
+}
+
+# The pane is an INDEPENDENT live signal, so it must keep answering through an
+# unreadable read - this is what a healthy crew on a long lint actually looks
+# like, and it must not regress to unknown.
+test_timed_out_status_read_with_busy_pane_stays_working() {
+  reset_fakes
+  local d out
+  d=$(new_case timed-out-busy)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-busy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/tmobusy.meta" "window=fm:fm-tmobusy" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HANG=1
+  FM_FAKE_BUSY=1
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" tmobusy)
+  assert_contains "$out" "state: working" "a busy pane still answers through an unreadable read"
+  assert_contains "$out" "source: pane" "the live pane remains a valid source"
+  pass "timed-out status read with a busy pane still reads working from the pane"
+}
+
+# A killed call leaves PARTIAL TOON: enough for branch, cut before head. That
+# parses as a branch match whose head-binding fails, which is exactly the shape
+# that used to fall into the stale fallback.
+test_truncated_status_read_is_unknown_not_failed() {
+  reset_fakes
+  local d out calls
+  d=$(new_case truncated-read)
+  make_repo_on_branch "$d/wt" fm/feat-trunc
+  make_fakebin "$d" >/dev/null
+  count_nm_calls "$d"
+  fm_write_meta "$d/state/trunc.meta" "window=fm:fm-trunc" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HANG=1
+  FM_FAKE_AXI_PARTIAL='run:
+  id: "01RUN"
+  branch: fm/feat-trunc
+  status: running'
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-trunc ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 10:00"
+  FM_FAKE_BUSY=0
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" trunc)
+  assert_contains "$out" "state: unknown" "a truncated status read is unknown"
+  assert_contains "$out" "unreadable" "a truncated read is reported as unreadable"
+  assert_not_contains "$out" "state: failed" "partial TOON must never degrade into failed"
+  calls=$(nm_call_count "$d")
+  [ "$calls" -eq 1 ] || fail "truncated read consulted the stale runs list ($calls calls)"
+  pass "truncated status read reports unknown, never failed"
+}
+
+# A CLI error exits nonzero and puts `error: "..."` on STDOUT (verified against
+# the installed binary). Non-empty, no branch field - the other route into the
+# stale fallback.
+test_cli_error_status_read_is_unknown_not_failed() {
+  reset_fakes
+  local d out calls
+  d=$(new_case cli-error-read)
+  make_repo_on_branch "$d/wt" fm/feat-clierr
+  make_fakebin "$d" >/dev/null
+  count_nm_calls "$d"
+  fm_write_meta "$d/state/clierr.meta" "window=fm:fm-clierr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS='error: "run \"01ZZZ\" not found"'
+  FM_FAKE_AXI_STATUS_RC=1
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-clierr ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 10:00"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" clierr)
+  assert_contains "$out" "state: unknown" "a CLI-error status read is unknown"
+  assert_contains "$out" "unreadable" "a CLI-error read is reported as unreadable"
+  assert_not_contains "$out" "state: failed" "a CLI error must never degrade into failed"
+  calls=$(nm_call_count "$d")
+  [ "$calls" -eq 1 ] || fail "CLI-error read consulted the stale runs list ($calls calls)"
+  pass "CLI-error status read reports unknown, never failed"
+}
+
+# Preserved behavior: a genuinely failed or cancelled run still reports failed
+# through BOTH the full and the coarse path. The fix narrows attribution; it
+# must not blunt the verdict when attribution is sound.
+test_terminal_cancelled() {
+  reset_fakes
+  local d out
+  d=$(new_case cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cancel
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cancel.meta" "window=fm:fm-cancel" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel)"
+  out=$(run_crew_state "$d" cancel)
+  assert_contains "$out" "state: failed" "a cancelled run still reports failed"
+  assert_contains "$out" "source: run-step" "cancelled -> run-step source"
+  assert_contains "$out" "run cancelled" "cancelled keeps its own detail"
+  pass "terminal cancelled run is authoritative"
+}
+
+test_coarse_genuine_failed_still_reports_failed() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-genuine-failed)
+  make_repo_on_branch "$d/wt" fm/feat-genfail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/genfail.meta" "window=fm:fm-genfail" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # The NEWEST row for this branch is the failed one, and it binds to HEAD.
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-genfail ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 12:00"
+  out=$(run_crew_state "$d" genfail)
+  assert_contains "$out" "state: failed" "a genuinely failed newest row still reports failed"
+  assert_contains "$out" "source: run-step" "coarse failed -> run-step source"
+  assert_contains "$out" "run failed" "coarse failed keeps its detail"
+  pass "coarse path still reports a genuinely failed run"
+}
+
+test_coarse_genuine_cancelled_still_reports_failed() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-genuine-cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-gencan
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gencan.meta" "window=fm:fm-gencan" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-gencan ${FM_FAKE_RUN_HEAD:0:8}  2026-07-27 12:00"
+  out=$(run_crew_state "$d" gencan)
+  assert_contains "$out" "state: failed" "a genuinely cancelled newest row still reports failed"
+  assert_contains "$out" "run cancelled" "coarse cancelled keeps its detail"
+  pass "coarse path still reports a genuinely cancelled run"
+}
+
+# Same unreadable-is-not-an-answer rule on the ci-log read. A truncated tail can
+# end at an earlier green marker with the later red one simply never written,
+# which would read a still-failing run as checks-green done.
+test_unreadable_ci_log_does_not_read_as_green() {
+  reset_fakes
+  local d out
+  d=$(new_case unreadable-ci-log)
+  make_repo_on_branch "$d/wt" fm/feat-cilogerr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cilogerr.meta" "window=fm:fm-cilogerr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cilogerr)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_CI_LOGS_RC=1
+  out=$(run_crew_state "$d" cilogerr)
+  assert_contains "$out" "state: working" "an unreadable ci log leaves the run working"
+  assert_not_contains "$out" "state: done" "an unreadable ci log must not read as checks-green done"
+  assert_not_contains "$out" "checks green" "an unreadable ci log must not claim checks green"
+  pass "unreadable ci log read does not resolve to checks-green done"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1279,5 +1635,18 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_superseded_failed_row_not_attributed_to_live_run
+test_superseded_cancelled_row_not_attributed_to_live_run
+test_healthy_run_with_superseded_failed_row_reads_working
+test_empty_status_read_never_reaches_the_stale_fallback
+test_rejected_newest_row_without_stale_row_is_unknown
+test_timed_out_status_read_is_unknown_not_failed
+test_timed_out_status_read_with_busy_pane_stays_working
+test_truncated_status_read_is_unknown_not_failed
+test_cli_error_status_read_is_unknown_not_failed
+test_terminal_cancelled
+test_coarse_genuine_failed_still_reports_failed
+test_coarse_genuine_cancelled_still_reports_failed
+test_unreadable_ci_log_does_not_read_as_green
 
 echo "all fm-crew-state tests passed"
