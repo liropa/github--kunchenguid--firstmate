@@ -270,7 +270,7 @@ test_status_progress_resets_stranding_counter() {
 
 test_midtask_stop_marker_fires_named_alarm() {
   # The mid-task-stop consumer (fork issue #12): the keep-alive wrapper
-  # (bin/backends/sbx.sh) records state/.sbx-midtask-stop-<id> when the VM
+  # (bin/backends/sbx.sh) records state/.sbx-midtask-stop-<key> when the VM
   # stopped while in-guest work was active. A stopped VM fires no turn-ends,
   # so the stranding counter is structurally blind to this failure - the
   # beacon must surface the marker as ONE named check wake and consume it.

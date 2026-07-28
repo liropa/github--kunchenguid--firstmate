@@ -285,14 +285,14 @@ All six original codex-rig gaps and the containment-downgrade bug are fixed in t
 
 Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-backed secondmates have them, so host-pane homes skip untouched) with pure host stats - zero sbx CLI calls, preserving the idle-supervision cost property. Three captain-facing alarms, all durable `check` wakes:
 
-- **Mount health** (`sbx-mount:<id>`): the symlink's target *directory* gone means the mount vanished and the scan's `[ -e ]` skip has silently blinded the watcher to this secondmate. One alarm per outage (a `.sbx-mount-alarmed-<id>` marker suppresses repeats across watcher restarts); the mount returning clears the marker and re-arms. A dangling link whose directory *exists* is a fresh spawn that has not signaled - quiescent, no alarm.
+- **Mount health** (`sbx-mount:<id>`): the symlink's target *directory* gone means the mount vanished and the scan's `[ -e ]` skip has silently blinded the watcher to this secondmate. One alarm per outage (a `.sbx-mount-alarmed-<key>` marker suppresses repeats across watcher restarts); the mount returning clears the marker and re-arms. A dangling link whose directory *exists* is a fresh spawn that has not signaled - quiescent, no alarm.
 - **Mid-task stop** (`sbx-midtask-stop:<id>`): surfaces the keep-alive wrapper's `state/.sbx-midtask-stop-` marker (above) - a VM that stopped while in-guest work was under way. A stopped VM fires no turn-ends, so the stranding counter is structurally blind to exactly this failure (fork issues #12/#13: three real mid-work stops on 2026-07-23 produced zero alarms). The wake carries the wrapper's recorded reason and is consumed with its marker; a recurrence re-records, and no turn-end is required first (a VM stopped before its first turn-end still alarms).
 - **Stranding** (`sbx-stranded:<id>`): two arms, because a count of events cannot measure their absence, and the observed failures come in both shapes. Both raise the same wake key and share one `.sbx-stranded-alarmed-` marker, so an episode alarms exactly once however it was detected, and status progress re-arms both - acknowledgement silences the delivery it answers but never clears the marker, or a guest that answers every steer without progressing would re-alarm on each one.
   - *No-progress turn-ends*: `FM_SBX_NOPROGRESS_TURNS` (default 3; 0 disables) consecutive turn-ends with zero status-file progress. This is the guest that still runs its turn-end hook but cannot make progress: each bare turn-end already surfaces as a generic signal wake, and the beacon names the pattern. Any status progress resets the counter and re-arms. A turn-end that lands while the mount's `<id>.guest-active` breadcrumb is fresh (within `FM_SBX_GUEST_ACTIVE_WINDOW`) is recorded but **not counted**: supervision turns during a long in-guest pipeline are legitimately status-sparse, and counting them produced issue #13's false alarms.
   - *Unacknowledged delivery*: `FM_SBX_DELIVERY_ACK_SECS` (default 900; 0 disables) of complete silence after the host last delivered to the guest.
     **This arm exists because the counter above is structurally blind to the worst variant**: an agent that cannot process at all fires no turn-ends, so the counter it depends on never advances (evidence below).
     Immediately before each potentially turn-submitting Enter, the send creates a host-written, content-free candidate.
-    A successful send atomically promotes the latest injected attempt's candidate to `state/.sbx-delivered-<id>` without changing its pre-injection mtime and discards earlier unpublished candidates.
+    A successful send atomically promotes the latest injected attempt's candidate to `state/.sbx-delivered-<key>` without changing its pre-injection mtime and discards earlier unpublished candidates.
     If a later retry cannot be injected, the previous attempt's candidate remains the conservative delivery edge.
     A preparation failure never injects that attempt's Enter; before any earlier attempt, verified submit reports the typed text as pending, while after an earlier attempt it retains that attempt's candidate as the conservative edge.
     A rare post-delivery promotion failure reports that the input was delivered but untracked and explicitly says not to resend.
@@ -311,14 +311,15 @@ Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`
 
 ### Marker naming (`bin/fm-state-key-lib.sh`)
 
-Every marker above is `<prefix><key>`, and `bin/fm-state-key-lib.sh` is the single owner of that key for the producer (this adapter), the consumer (`bin/fm-watch.sh`), and the cleanup (`bin/fm-teardown.sh`).
+Every durable marker above is `<prefix><key>`; transient delivery candidates append the delimiter and nonce owned by `bin/fm-state-key-lib.sh`.
+That library is the single owner of the key for the producer (this adapter), the consumer (`bin/fm-watch.sh`), and the cleanup (`bin/fm-teardown.sh`).
 Its header owns the encoding, delimiter, length, reversibility, and signal-signature rules in full.
 
 Until 2026-07-27 the key was `printf '%s' "$id" | tr '.' '_'`, which is not injective: ids `a.b` and `a_b` both produced `a_b` and therefore shared one file in every family.
 That let one task's delivery breadcrumb arm or silence the other's unacknowledged-delivery alarm, surfaced one task's `.sbx-midtask-stop-` as a named alarm against the other, and let either task's teardown delete the other's live beacons.
 `bin/fm-state-key-migrate.sh` renames pre-existing markers directly from the locked `bin/fm-session-start.sh` path; standalone bootstrap deliberately does not run the sweep.
-It resolves a legacy name only against the ids the home can enumerate from `state/`, reports rather than picks when a name maps to more than one live id, and never deletes.
-That errs toward under-reporting: an unmigrated marker reads as absent, and every one of these beacons re-arms on its own within a cycle, whereas a misattributed marker can alarm against a healthy secondmate and latch the marker that suppresses the real alarm.
+It resolves a legacy name only against task ids or signal filenames the home can enumerate from `state/`, reports rather than picks when a name maps to more than one live owner, and never discards marker state.
+That errs toward under-reporting: an unmigrated marker reads as absent and each affected mechanism recovers on its next natural event, whereas a misattributed marker can alarm against a healthy secondmate and latch the marker that suppresses the real alarm.
 
 #### Verification (2026-07-27, macOS 26.5.2 arm64, GNU bash 3.2.57(1)-release, ShellCheck 0.11.0)
 

@@ -83,9 +83,8 @@
 #          printing every read-only detect line above; the TANGLE line switches
 #          to advisory-only wording with no checkout command. Used by
 #          fm-session-start.sh's read-only path when the lock is refused, so no
-#          unverified session race-mutates PR-check artifacts, per-task marker
-#          names, secondmate homes, X-mode artifacts, project clones, or repair
-#          instructions.
+#          unverified session race-mutates PR-check artifacts, secondmate homes,
+#          X-mode artifacts, project clones, or repair instructions.
 #          Marker-key migration is session-start-only and is not owned by this
 #          standalone command. Unset/0 (the default) runs all five sweeps.
 #        fm-bootstrap.sh install <tool>...

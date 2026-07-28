@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, STATE_KEY_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, STATE_KEY_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of its diagnostics.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -43,16 +43,16 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Resume the emitted supervision protocol after finishing the session-start wake handling.
 - Any other `PR_CHECK_MIGRATION:` refusal means migration did not complete safely, whether because watcher exclusion, a private path, a diagnostic, quarantine validation, or marker publication could not be proved.
   Keep each affected poll unavailable, inspect the named private state path, and do not bypass the migration or execute a quarantined artifact; a completed safe-scan marker allows unrelated authenticated polls to continue while private repair remains pending.
-- `STATE_KEY_MIGRATION: state/<file> could name more than one live task (<ids>); left untouched until those names no longer collide` - a per-task marker file written under the superseded key fold cannot be attributed to one task, because the listed ids all folded to the same name.
-  The sweep never guesses, so that marker is now invisible to the watcher and behaves as absent: the affected secondmate's delivery breadcrumb stays quiet until the next steer republishes it, and its counters rebuild.
-  No repair is needed for the beacons themselves; the line clears once the colliding ids no longer coexist in this home, so retire or rename one of them when convenient rather than hand-renaming state files.
-- `STATE_KEY_MIGRATION: state/<file> could be current for <id> or legacy for <id>; moved aside as state/<preserved-file>` - a filename crossed the old and new schemes, so the sweep preserved it under the inert destination it names rather than attributing it to either task.
+- `STATE_KEY_MIGRATION: state/<file> could name more than one live task (<owners>); left untouched until those names no longer collide` - a marker file written under the superseded key fold cannot be attributed to one owner, because the listed task ids or signal filenames all folded to the same name.
+  The sweep never guesses, so that marker is now invisible to the watcher and behaves as absent: a signal signature costs one duplicate wake, a delivery breadcrumb stays quiet until the next steer republishes it, and counters rebuild.
+  No repair is needed for the marker itself; the line clears once the colliding task ids no longer coexist in this home, so let one retire through the normal lifecycle rather than hand-renaming state files.
+- `STATE_KEY_MIGRATION: state/<file> could be current for <owner> or legacy for <owner>; moved aside as state/<preserved-file>` - a filename crossed the old and new schemes, so the sweep preserved it under the inert destination it names rather than attributing it to either owner.
   Inspect the preserved destination when investigating its contents; no consumer reads it.
-- `STATE_KEY_MIGRATION: state/<file> could be current for <id> or legacy for <id> and could not be moved aside` - the ambiguous filename could not be made inert, so session start stopped before bootstrap or supervision instructions.
+- `STATE_KEY_MIGRATION: state/<file> could be current for <owner> or legacy for <owner> and could not be moved aside` - the ambiguous filename could not be made inert, so session start stopped before bootstrap or supervision instructions.
   Inspect the named path, fix the filesystem failure, and rerun session start; never hand-attribute or rename the marker.
 - Any other marker-specific `STATE_KEY_MIGRATION:` line names a marker the sweep left in place because its target name already existed or the rename failed.
   Inspect the named path before touching it; do not hand-attribute a current/legacy overlap that could not be moved aside.
-  `bin/fm-state-key-lib.sh`'s `fm_state_key_decode` reads a current-scheme name back to its owner when you need to tell the two files apart.
+  `bin/fm-state-key-lib.sh`'s `fm_state_key_decode` reads a current-scheme key portion back to its owner when you need to tell the two files apart.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation could not run; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>` - the same honesty for an sbx-backed secondmate's in-VM clone, which no host-home fast-forward reaches (`docs/sbx-backend.md` "Tracked-file sync" owns the mechanism): a running-VM skip clears itself at the guest's next restart, while a dirty or diverged guest deserves the same inspection as a host home with that reason; a completed guest sync is the no-action `BOOTSTRAP_INFO: secondmate <id> guest: updated <a>..<b>` fact.
   If the reason says the home is not writable from this session, the home could not create its inheritance lock artifacts at all; retrying bootstrap from the same sandbox will not help until that filesystem access is fixed.
