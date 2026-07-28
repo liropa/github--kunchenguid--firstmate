@@ -810,6 +810,7 @@ EOF
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
   [ -e "$home/state/.sbx-delivered-a_2eb" ] || fail "locked session start did not run marker-key migration"
   [ ! -e "$home/state/.sbx-delivered-a_b" ] || fail "locked session start left the legacy marker name behind"
+  [ -d "$home/state/$FM_STATE_KEY_MIGRATION_COMPLETE" ] || fail "locked session start did not publish marker migration completion"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }

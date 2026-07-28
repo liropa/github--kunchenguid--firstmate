@@ -272,6 +272,8 @@ expect_code 1 "$STATUS" "migration must refuse an active watcher"
   || fail "migration changed marker state while the watcher lock was held"
 assert_contains "$OUT" "watcher exclusion could not be acquired" \
   "active watcher refusal was not reported"
+[ ! -e "$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE" ] \
+  || fail "failed watcher exclusion published migration completion"
 pass "migration cannot run while watcher supervision is active"
 
 STATE=$(new_state quarantine-failure)
@@ -304,6 +306,16 @@ expect_code 1 "$WATCH_STATUS" "watcher must refuse unresolved marker migration"
 assert_contains "$(cat "$WATCH_OUT")" "marker-key migration is unresolved" \
   "watcher did not explain its unresolved-migration refusal"
 pass "failed cross-scheme quarantine blocks marker consumers"
+
+STATE=$(new_state missing-completion)
+WATCH_OUT="$TMP_ROOT/missing-completion/watch.out"
+WATCH_STATUS=0
+FM_HOME="${STATE%/state}" FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-watch.sh" \
+  > "$WATCH_OUT" 2>&1 || WATCH_STATUS=$?
+expect_code 1 "$WATCH_STATUS" "watcher must require positive marker migration completion"
+assert_contains "$(cat "$WATCH_OUT")" "marker-key migration is unresolved" \
+  "watcher did not explain its missing-completion refusal"
+pass "watcher refuses to consume markers without migration completion"
 
 # --- migration: the signal-scan signatures -----------------------------------
 
@@ -344,6 +356,8 @@ OUT=$(migrate "$TMP_ROOT/nonexistent-home/state")
 STATE=$(new_state empty)
 OUT=$(migrate "$STATE")
 [ -z "$OUT" ] || fail "an empty state dir should be silent, printed: $OUT"
+[ -d "$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE" ] \
+  || fail "an empty state migration did not publish completion"
 pass "migration is a silent no-op for a home with no state yet"
 
 INVALID="$TMP_ROOT/invalid-state"
@@ -359,6 +373,15 @@ OUT=$(migrate "$BROKEN") || STATUS=$?
 expect_code 1 "$STATUS" "migration must reject a broken state symlink"
 assert_contains "$OUT" "state path is not a directory" "the broken state symlink was not explained"
 pass "migration rejects existing unusable state paths"
+
+STATE=$(new_state invalid-completion)
+: > "$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE"
+STATUS=0
+OUT=$(migrate "$STATE") || STATUS=$?
+expect_code 1 "$STATUS" "migration must reject an invalid completion marker"
+assert_contains "$OUT" "is invalid; watcher remains blocked" \
+  "invalid migration completion was not reported"
+pass "migration publishes only valid completion proof"
 
 STATE=$(new_state unlocked-bootstrap)
 : > "$STATE/a.b.meta"

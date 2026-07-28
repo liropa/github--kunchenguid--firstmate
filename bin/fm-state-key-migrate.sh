@@ -43,7 +43,8 @@
 # Usage: fm-state-key-migrate.sh [--state <dir>]
 #   Prints one STATE_KEY_MIGRATION: line per name it refused to resolve, one
 #   BOOTSTRAP_INFO: line when it renamed anything, and nothing at all when the
-#   home is already current. Exit 0 unless state/ itself is unusable.
+#   home is already current. Exit 1 when state, watcher exclusion, or safe
+#   completion cannot be proved; exit 2 for invalid arguments.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +91,7 @@ RENAMED=0
 UNSAFE=0
 WATCH_LOCK="$STATE/.watch.lock"
 BLOCK_PATH="$STATE/$FM_STATE_KEY_MIGRATION_BLOCK"
+COMPLETE_PATH="$STATE/$FM_STATE_KEY_MIGRATION_COMPLETE"
 
 report() {  # <detail>
   echo "STATE_KEY_MIGRATION: $1"
@@ -97,8 +99,8 @@ report() {  # <detail>
 
 move_no_clobber() {  # <source> <destination>
   local source=$1 destination=$2
-  if ln -P -- "$source" "$destination" 2>/dev/null; then
-    rm -f -- "$source" || return 2
+  if ln -P "$source" "$destination" 2>/dev/null; then
+    rm -f "$source" || return 2
     return 0
   fi
   [ -e "$destination" ] || [ -L "$destination" ] || return 2
@@ -131,7 +133,7 @@ ensure_consumer_blocked() {
     [ -d "$BLOCK_PATH" ] && [ ! -L "$BLOCK_PATH" ]
     return
   fi
-  mkdir -- "$BLOCK_PATH"
+  mkdir "$BLOCK_PATH"
 }
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -313,10 +315,22 @@ done < <(fm_state_sbx_marker_prefixes)
 migrate_family "$FM_STATE_SEEN_PREFIX" "$CURRENT_SIGNALS" "$LEGACY_SIGNALS"
 
 if [ "$UNSAFE" -eq 0 ] && { [ -e "$BLOCK_PATH" ] || [ -L "$BLOCK_PATH" ]; }; then
-  if [ -d "$BLOCK_PATH" ] && [ ! -L "$BLOCK_PATH" ] && rmdir -- "$BLOCK_PATH"; then
+  if [ -d "$BLOCK_PATH" ] && [ ! -L "$BLOCK_PATH" ] && rmdir "$BLOCK_PATH"; then
     :
   else
     report "state/$FM_STATE_KEY_MIGRATION_BLOCK could not be cleared; watcher remains blocked"
+    UNSAFE=1
+  fi
+fi
+
+if [ "$UNSAFE" -eq 0 ]; then
+  if [ -e "$COMPLETE_PATH" ] || [ -L "$COMPLETE_PATH" ]; then
+    if [ ! -d "$COMPLETE_PATH" ] || [ -L "$COMPLETE_PATH" ]; then
+      report "state/$FM_STATE_KEY_MIGRATION_COMPLETE is invalid; watcher remains blocked"
+      UNSAFE=1
+    fi
+  elif ! mkdir "$COMPLETE_PATH"; then
+    report "state/$FM_STATE_KEY_MIGRATION_COMPLETE could not be published; watcher remains blocked"
     UNSAFE=1
   fi
 fi

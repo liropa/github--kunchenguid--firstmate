@@ -50,8 +50,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Inspect the preserved destination when investigating its contents; no consumer reads it.
 - `STATE_KEY_MIGRATION: watcher exclusion could not be acquired; marker migration did not run` - supervision is already active or its lock is uncertain, so bootstrap left every marker untouched.
   Let the current watcher finish or stop it through the normal supervision protocol, then rerun session start.
-- A `STATE_KEY_MIGRATION:` line saying watcher blocking could not be established, a cross-scheme marker could not be moved aside, or the block could not be cleared leaves supervision disabled for that home.
-  Inspect the named state path and rerun session start after repairing it; `bin/fm-watch.sh` refuses to read per-task markers while the block remains.
+- A `STATE_KEY_MIGRATION:` line saying watcher blocking could not be established, a cross-scheme marker could not be moved aside, the block could not be cleared, or migration completion was invalid or could not be published leaves supervision disabled for that home.
+  Inspect the named state path and rerun session start after repairing it; `bin/fm-watch.sh` refuses to read per-task markers until valid completion is present and the block is absent.
 - Any other marker-specific `STATE_KEY_MIGRATION:` line names a marker the sweep left in place because its target name already existed or the rename failed.
   Inspect the named path before touching it; the same absent-not-wrong behavior applies, so nothing is at risk while it stands.
   `bin/fm-state-key-lib.sh`'s `fm_state_key_decode` reads a current-scheme name back to its owner when you need to tell the two files apart.
