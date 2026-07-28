@@ -1567,35 +1567,37 @@ test_unlanded_work_dispatcher_routes() {
 
 # --- teardown integration: real fm-teardown.sh over an sbx secondmate --------
 
-# new_teardown_world <name>: a parent firstmate home with one sbx secondmate
-# (id `domain`) whose plain-clone home is a sibling dir, and NO host-side child
+# new_teardown_world <name> [id]: a parent firstmate home with one sbx secondmate
+# whose plain-clone home is a sibling dir, and NO host-side child
 # metas - so fm-teardown.sh's host in-flight check passes and the in-guest
 # landed-work probe is the gate under test.
-new_teardown_world() {  # <name>
-  local name=$1 w home subhome
+new_teardown_world() {  # <name> [id]
+  local name=$1 id=${2:-domain} w home subhome
   w=$(new_sbx_world "$name")
   home="$w/home"; subhome="$w/subhome"
   mkdir -p "$home/state" "$home/data" "$subhome/state"
   touch "$home/state/.last-watcher-beat"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' \
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf -- '- %s - design domain (home: %s; scope: design domain; projects: alpha; added 2026-06-22)\n' "$id" "$subhome" \
     > "$home/data/secondmates.md"
-  fm_write_meta "$home/state/domain.meta" \
-    "window=sbx:fm-domain" "worktree=$subhome" "project=$subhome" \
+  fm_write_meta "$home/state/$id.meta" \
+    "window=sbx:fm-$id" "worktree=$subhome" "project=$subhome" \
     "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "backend=sbx" "home=$subhome" "projects=alpha" "sbx_signals_dir=$w/signals/domain"
+    "backend=sbx" "home=$subhome" "projects=alpha" "sbx_signals_dir=$w/signals/$id"
+  printf '%s\n' "$id" > "$w/teardown-id"
   printf '%s\n' "$w"
 }
 
 # run_teardown_sbx <world> <fakebin> <extra-args> [env k=v...]: run the real
-# fm-teardown.sh over the world's `domain` secondmate, fake sbx first in PATH.
+# fm-teardown.sh over the world's secondmate, fake sbx first in PATH.
 run_teardown_sbx() {  # <world> <fakebin> <extra> [env k=v...]
-  local w=$1 fb=$2 extra=$3
+  local w=$1 fb=$2 extra=$3 id
+  id=$(cat "$w/teardown-id")
   shift 3
   PATH="$fb:$PATH" FM_HOME="$w/home" \
     FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
     FM_SBX_SIGNALS_ROOT="$w/signals" \
-    env "$@" "$ROOT/bin/fm-teardown.sh" domain "$extra" 2>&1
+    env "$@" "$ROOT/bin/fm-teardown.sh" "$id" "$extra" 2>&1
 }
 
 test_teardown_refuses_unlanded_guest() {
@@ -1670,6 +1672,30 @@ test_teardown_clears_beacon_markers() {
   [ -e "$w/home/state/.sbx-delivery-pending-domain-two.123.457" ] \
     || fail "teardown of domain must not reach domain-two's in-flight delivery candidate"
   pass "teardown: the id's beat-beacon markers are removed with its state files, and no neighbour id's are"
+}
+
+test_teardown_preserves_cross_scheme_marker() {
+  local w fb out rc m
+  w=$(new_teardown_world teardown-ambiguous a.b); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-a.b running > "$w/ls.json"
+  : > "$w/sbx.log"
+  : > "$w/home/state/a_2eb.status"
+  for m in .sbx-beat-te-a_2eb .sbx-beat-status-a_2eb .sbx-noprogress-a_2eb \
+           .sbx-stranded-alarmed-a_2eb .sbx-mount-alarmed-a_2eb \
+           .sbx-midtask-stop-a_2eb .sbx-delivered-a_2eb; do
+    : > "$w/home/state/$m"
+  done
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "cross-scheme teardown should succeed while preserving ambiguous markers: $out"
+  for m in .sbx-beat-te-a_2eb .sbx-beat-status-a_2eb .sbx-noprogress-a_2eb \
+           .sbx-stranded-alarmed-a_2eb .sbx-mount-alarmed-a_2eb \
+           .sbx-midtask-stop-a_2eb .sbx-delivered-a_2eb; do
+    [ -e "$w/home/state/$m" ] || fail "teardown removed another live task's possible legacy marker $m"
+  done
+  pass "teardown: cross-scheme marker paths are preserved for another live task"
 }
 
 test_teardown_force_skips_guest_probe() {
@@ -1758,6 +1784,7 @@ test_unlanded_work_dispatcher_routes
 test_teardown_refuses_unlanded_guest
 test_teardown_allows_clean_guest
 test_teardown_clears_beacon_markers
+test_teardown_preserves_cross_scheme_marker
 test_teardown_force_skips_guest_probe
 
 echo "# all fm-backend-sbx tests passed"

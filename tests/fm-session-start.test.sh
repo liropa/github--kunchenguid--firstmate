@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's six mutating sweeps, verified by their
+#     skipped (including the six locked mutating steps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
@@ -15,9 +15,9 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
-#   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
-#     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
-#     does not reimplement their logic
+#   - composition: the script invokes the real fm-lock.sh,
+#     fm-state-key-migrate.sh, fm-bootstrap.sh, and fm-wake-drain.sh (their real,
+#     distinctive output appears verbatim), it does not reimplement their logic
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -810,9 +810,43 @@ EOF
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
   [ -e "$home/state/.sbx-delivered-a_2eb" ] || fail "locked session start did not run marker-key migration"
   [ ! -e "$home/state/.sbx-delivered-a_b" ] || fail "locked session start left the legacy marker name behind"
-  [ -d "$home/state/$FM_STATE_KEY_MIGRATION_COMPLETE" ] || fail "locked session start did not publish marker migration completion"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
+}
+
+test_marker_migration_failure_stops_session_start() {
+  local rec root home fakebin out rc
+  rec=$(new_world migration-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  rm -f "$fakebin/node"
+  : > "$home/state/a.b.meta"
+  : > "$home/state/a_2eb.status"
+  printf 'ambiguous\n' > "$home/state/.sbx-delivered-a_2eb"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *".sbx-delivered-a_2eb"*) exit 1 ;;
+esac
+exec /bin/ln "$@"
+SH
+  chmod +x "$fakebin/ln"
+
+  set +e
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "session start must stop when a cross-scheme marker cannot be made inert"
+  assert_contains "$out" "could not be moved aside" "session start did not relay the marker migration failure"
+  assert_not_contains "$out" "MISSING: node" "bootstrap ran after marker migration failed"
+  [ "$(cat "$home/state/.sbx-delivered-a_2eb")" = ambiguous ] \
+    || fail "failed session-start migration did not preserve the ambiguous marker"
+
+  pass "session start stops before bootstrap when marker migration cannot make a marker inert"
 }
 
 # --- fleet-state digest: compact backlog rendering --------------------------
@@ -1131,6 +1165,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_marker_migration_failure_stops_session_start
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback

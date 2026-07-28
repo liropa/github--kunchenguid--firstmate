@@ -158,13 +158,3 @@ FM_STATE_SBX_PENDING_PREFIX=.sbx-delivery-pending-
 # lossy no longer share one signature file.
 # shellcheck disable=SC2034  # consumed by the scripts that source this library
 FM_STATE_SEEN_PREFIX=.seen-
-
-# Marker-key migration blocks watcher startup while a cross-scheme overlap
-# remains visible under a current marker name.
-# shellcheck disable=SC2034  # consumed by the scripts that source this library
-FM_STATE_KEY_MIGRATION_BLOCK=.state-key-migration-blocked
-
-# Watchers require this directory as positive proof that marker-key migration
-# completed before supervision was armed.
-# shellcheck disable=SC2034  # consumed by the scripts that source this library
-FM_STATE_KEY_MIGRATION_COMPLETE=.state-key-migration-v1

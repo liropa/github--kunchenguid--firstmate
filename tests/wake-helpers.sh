@@ -75,7 +75,7 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state/$FM_STATE_KEY_MIGRATION_COMPLETE" "$fakebin"
+  mkdir -p "$dir/state" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

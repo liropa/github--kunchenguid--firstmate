@@ -12,7 +12,7 @@ metadata:
 # bootstrap-diagnostics
 
 Handle each printed line as below, before dispatching work that depends on it.
-The line formats themselves are owned by `bin/fm-bootstrap.sh`'s header; this playbook owns the response to actionable lines.
+The line formats themselves are owned by the emitting script headers; this playbook owns the response to actionable lines.
 The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install - never install anything the captain has not approved in this session - and no work is dispatched until the tools it needs are present and GitHub auth is good.
 When any diagnostic needs captain attention, report the plain consequence and requested action using `AGENTS.md` section 9's captain-facing translation contract; do not name the diagnostic label unless the captain needs to paste it into a command or issue.
 
@@ -48,12 +48,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
   No repair is needed for the beacons themselves; the line clears once the colliding ids no longer coexist in this home, so retire or rename one of them when convenient rather than hand-renaming state files.
 - `STATE_KEY_MIGRATION: state/<file> could be current for <id> or legacy for <id>; moved aside as state/<preserved-file>` - a filename crossed the old and new schemes, so the sweep preserved it under the inert destination it names rather than attributing it to either task.
   Inspect the preserved destination when investigating its contents; no consumer reads it.
-- `STATE_KEY_MIGRATION: watcher exclusion could not be acquired; marker migration did not run` - supervision is already active or its lock is uncertain, so bootstrap left every marker untouched.
-  Let the current watcher finish or stop it through the normal supervision protocol, then rerun session start.
-- A `STATE_KEY_MIGRATION:` line saying watcher blocking could not be established, a cross-scheme marker could not be moved aside, the block could not be cleared, or migration completion was invalid or could not be published leaves supervision disabled for that home.
-  Inspect the named state path and rerun session start after repairing it; `bin/fm-watch.sh` refuses to read per-task markers until valid completion is present and the block is absent.
+- `STATE_KEY_MIGRATION: state/<file> could be current for <id> or legacy for <id> and could not be moved aside` - the ambiguous filename could not be made inert, so session start stopped before bootstrap or supervision instructions.
+  Inspect the named path, fix the filesystem failure, and rerun session start; never hand-attribute or rename the marker.
 - Any other marker-specific `STATE_KEY_MIGRATION:` line names a marker the sweep left in place because its target name already existed or the rename failed.
-  Inspect the named path before touching it; the same absent-not-wrong behavior applies, so nothing is at risk while it stands.
+  Inspect the named path before touching it; do not hand-attribute a current/legacy overlap that could not be moved aside.
   `bin/fm-state-key-lib.sh`'s `fm_state_key_decode` reads a current-scheme name back to its owner when you need to tell the two files apart.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation could not run; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>` - the same honesty for an sbx-backed secondmate's in-VM clone, which no host-home fast-forward reaches (`docs/sbx-backend.md` "Tracked-file sync" owns the mechanism): a running-VM skip clears itself at the guest's next restart, while a dirty or diverged guest deserves the same inspection as a host home with that reason; a completed guest sync is the no-action `BOOTSTRAP_INFO: secondmate <id> guest: updated <a>..<b>` fact.
