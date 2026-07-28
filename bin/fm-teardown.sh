@@ -34,6 +34,12 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# The same pass removes the task's supervision markers: the sbx beat beacons, the
+# signal-scan .seen- signatures, and the per-pane stale/hash/count/pause families
+# the watcher keys by window target. Family lists and keys come from
+# bin/fm-state-key-lib.sh. Where a superseded key fold means a name could still
+# be another LIVE task's marker, that family is left in place - leaking a file
+# beats deleting a live task's suppressor or beacon.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -269,6 +275,87 @@ remove_pr_poll_artifacts() {
       rmdir "$quarantine" 2>/dev/null || true
     fi
   fi
+}
+
+# --- marker cleanup ownership guards -----------------------------------------
+#
+# Marker names are "<prefix><key>" (bin/fm-state-key-lib.sh). Homes updated
+# across a key-scheme change still hold markers under a superseded fold, and a
+# superseded fold is ambiguous BY CONSTRUCTION, so a name this task would remove
+# under the current scheme can also be another LIVE owner's legacy name. Removing
+# that is strictly worse than leaking a file: it destroys a live suppressor or
+# beacon. Every family below is therefore removed only after proving no other
+# live owner folds onto the same key.
+
+# Every live task id in <state> except <id>. "Live" is the same evidence
+# bin/fm-state-key-migrate.sh resolves legacy names against: a meta, a status, or
+# a turn-ended file still present in state/.
+other_task_ids() {  # <state> <id>
+  local state=$1 id=$2 f owner
+  for f in "$state"/*.meta "$state"/*.status "$state"/*.turn-ended; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    owner=${f##*/}
+    case $owner in
+      *.meta) owner=${owner%.meta} ;;
+      *.status) owner=${owner%.status} ;;
+      *.turn-ended) owner=${owner%.turn-ended} ;;
+      *) continue ;;
+    esac
+    [ "$owner" != "$id" ] || continue
+    printf '%s\n' "$owner"
+  done
+}
+
+# Every recorded window/target string for live tasks other than <id>. Read
+# through fm_backend_target_of_meta so an orca task contributes the terminal id
+# the watcher actually keys its markers by, not the unused window= field.
+#
+# A meta with no recorded target makes fm_backend_target_of_meta return
+# non-zero, and this runs under `set -e` inside a process substitution, so both
+# it and the empty case are absorbed explicitly. Letting either escape would
+# kill the subshell mid-scan and silently SHORTEN the candidate list, which
+# reads as "no other owner" - the guard would then approve exactly the deletion
+# it exists to prevent.
+other_task_targets() {  # <state> <id>
+  local state=$1 id=$2 meta owner target
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    owner=${meta##*/}
+    owner=${owner%.meta}
+    [ "$owner" != "$id" ] || continue
+    target=$(fm_backend_target_of_meta "$meta") || target=
+    if [ -n "$target" ]; then
+      printf '%s\n' "$target"
+    fi
+  done
+}
+
+# True when any candidate owner name on stdin folds onto <key> under the
+# superseded scheme <id|target>, meaning a marker at <key> cannot be attributed
+# to this task alone.
+marker_key_ambiguous() {  # <key> <id|target>   (candidate owner names on stdin)
+  local key=$1 scheme=$2 name folded
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ "$scheme" = target ]; then
+      folded=$(fm_state_key_legacy_target "$name")
+    else
+      folded=$(fm_state_key_legacy "$name")
+    fi
+    if [ "$folded" = "$key" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Remove "<prefix><key>" for every prefix on stdin, one prefix per line.
+remove_marker_family() {  # <state> <key>   (prefixes on stdin)
+  local state=$1 key=$2 prefix
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    rm -f "$state/$prefix$key"
+  done
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -1219,23 +1306,20 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+# Every marker key this task owns, and whether another live owner could still be
+# hiding behind the same name under a superseded fold. Computed BEFORE the state
+# files below are removed, because this task's own evidence must not be counted
+# and the other owners' evidence must still be readable.
 _beacon_key=$(fm_state_key_encode "$ID")
+_target_key=$(fm_state_key_encode "$T")
 _beacon_ambiguous=0
-for _beacon_evidence in "$STATE"/*.meta "$STATE"/*.status "$STATE"/*.turn-ended; do
-  [ -e "$_beacon_evidence" ] || [ -L "$_beacon_evidence" ] || continue
-  _beacon_owner=${_beacon_evidence##*/}
-  case $_beacon_owner in
-    *.meta) _beacon_owner=${_beacon_owner%.meta} ;;
-    *.status) _beacon_owner=${_beacon_owner%.status} ;;
-    *.turn-ended) _beacon_owner=${_beacon_owner%.turn-ended} ;;
-    *) continue ;;
-  esac
-  [ "$_beacon_owner" != "$ID" ] || continue
-  if [ "$(fm_state_key_legacy "$_beacon_owner")" = "$_beacon_key" ]; then
-    _beacon_ambiguous=1
-    break
-  fi
-done
+_target_ambiguous=0
+if marker_key_ambiguous "$_beacon_key" id < <(other_task_ids "$STATE" "$ID"); then
+  _beacon_ambiguous=1
+fi
+if marker_key_ambiguous "$_target_key" target < <(other_task_targets "$STATE" "$ID"); then
+  _target_ambiguous=1
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 # Beat-beacon markers (fm-watch.sh scan_sbx_beacon). A leftover
 # .sbx-stranded-alarmed marker would suppress the stranding alarm for a
@@ -1246,12 +1330,27 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.
 # that could still be another live task's legacy marker; the `<key>.` delimiter
 # on transient candidates cannot reach another task's files.
 if [ "$_beacon_ambiguous" -eq 0 ]; then
-  while IFS= read -r _beacon_prefix; do
-    [ -n "$_beacon_prefix" ] || continue
-    rm -f "$STATE/$_beacon_prefix$_beacon_key"
-  done < <(fm_state_sbx_marker_prefixes)
+  remove_marker_family "$STATE" "$_beacon_key" < <(fm_state_sbx_marker_prefixes)
+  remove_marker_family "$STATE" "$_beacon_key" < <(fm_state_watch_task_prefixes)
 fi
 rm -f "$STATE/$FM_STATE_SBX_PENDING_PREFIX$_beacon_key."*
+# Watcher signal signatures (.seen-, one per signal file) and the per-pane stale,
+# hash, count and pause families. Both outlived the task before: nothing else
+# removes them, so every torn-down task left its markers behind for the life of
+# the home.
+#
+# The .seen- family needs no ambiguity proof, unlike every other family here. Its
+# key encodes a whole signal BASENAME, so a legacy name always ends "_status" or
+# "_turn-ended" (the superseded fold turned the `.` into `_`) while a current one
+# always ends "_2estatus" or "_2eturn-ended". The two sets are disjoint by
+# construction, so a current name can never also be another live task's legacy
+# name. tests/fm-state-key.test.sh pins that property.
+for _signal_name in "$ID.status" "$ID.turn-ended"; do
+  rm -f "$STATE/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode "$_signal_name")"
+done
+if [ -n "$T" ] && [ "$_target_ambiguous" -eq 0 ]; then
+  remove_marker_family "$STATE" "$_target_key" < <(fm_state_watch_target_prefixes)
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

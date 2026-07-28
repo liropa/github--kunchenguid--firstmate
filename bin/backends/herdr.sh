@@ -73,6 +73,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# The single owner of the marker-file key (bin/fm-state-key-lib.sh). This
+# adapter's escalation dedupe marker is keyed by the same window/target string
+# as the watcher's own .stale-* families, so it must use that encoder rather
+# than re-deriving one.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-state-key-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -1990,10 +1997,10 @@ fm_backend_herdr_event_reader_cmd() {
 
 # fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
 # <window> ("<session>:<pane_id>"), keyed identically to the watcher's
-# .stale-<key> (tr ':/.' '___'), under <state_dir>.
+# .stale-<key> through bin/fm-state-key-lib.sh, under <state_dir>.
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   local state=$1 window=$2 key
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(fm_state_key_encode "$window")
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 

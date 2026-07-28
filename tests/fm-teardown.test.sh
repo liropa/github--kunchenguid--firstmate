@@ -53,6 +53,11 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# Marker names under test are built through the production single owner rather
+# than literals, so this suite cannot drift from the key teardown removes.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$ROOT/bin/fm-state-key-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -1254,13 +1259,172 @@ test_herdr_teardown_clears_escalation_marker() {
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
-  marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+  marker="$case_dir/state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
   : > "$marker"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
+}
+
+# --- watcher marker cleanup ---------------------------------------------------
+#
+# Before this, teardown removed only the sbx beacon families. The signal-scan
+# .seen- signatures and the per-pane stale/hash/count/pause families outlived
+# every task that ever ran, so a home accumulated them for its whole life.
+
+# Seed one marker per family the watcher keys by <target>, plus both .seen-
+# signatures, for a task whose window is <target>. Echoes nothing; paths are
+# rebuilt by the assertions from the same owner the production code uses.
+seed_watcher_markers() {  # <state-dir> <task-id> <target>
+  local state=$1 id=$2 target=$3 prefix
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    : > "$state/$prefix$(fm_state_key_encode "$target")"
+  done < <(fm_state_watch_target_prefixes)
+  : > "$state/.hb-surfaced-$(fm_state_key_encode "$id")"
+  : > "$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode "$id.status")"
+  : > "$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode "$id.turn-ended")"
+}
+
+test_teardown_removes_watcher_markers() {
+  local case_dir state target prefix leftover
+  case_dir=$(make_case watcher-marker-cleanup)
+  state="$case_dir/state"
+  target=fmtest:fm-task-x1-w1
+  write_meta "$case_dir" local-only ship
+  sed -i.bak "s/^window=.*/window=$target/" "$state/task-x1.meta"
+  rm -f "$state/task-x1.meta.bak"
+  seed_watcher_markers "$state" task-x1 "$target"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "watcher-marker-cleanup: forced teardown failed"
+
+  leftover=
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    [ ! -e "$state/$prefix$(fm_state_key_encode "$target")" ] \
+      || leftover="$leftover $prefix"
+  done < <(fm_state_watch_target_prefixes)
+  [ -z "$leftover" ] \
+    || fail "watcher-marker-cleanup: teardown left window-keyed families behind:$leftover"
+  [ ! -e "$state/.hb-surfaced-$(fm_state_key_encode task-x1)" ] \
+    || fail "watcher-marker-cleanup: teardown left the heartbeat surfaced marker behind"
+  [ ! -e "$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode 'task-x1.status')" ] \
+    || fail "watcher-marker-cleanup: teardown left the status signal signature behind"
+  [ ! -e "$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode 'task-x1.turn-ended')" ] \
+    || fail "watcher-marker-cleanup: teardown left the turn-ended signal signature behind"
+  pass "teardown removes the signal signatures and per-pane marker families it owns"
+}
+
+# The safety half. A home carried across the key-scheme change still holds
+# markers under the superseded fold, and that fold is ambiguous by construction:
+# live target `fmtest:3afm-other` folds to `fmtest_3afm-other`, which is exactly
+# the CURRENT key of `fmtest:fm-other`. Removing it would delete a live pane's
+# stale suppressor, which is strictly worse than leaking a file.
+test_teardown_keeps_ambiguous_watcher_markers() {
+  local case_dir state target other_target prefix removed
+  case_dir=$(make_case watcher-marker-ambiguity)
+  state="$case_dir/state"
+  target='fmtest:fm-other'
+  other_target='fmtest:3afm-other'
+  write_meta "$case_dir" local-only ship
+  sed -i.bak "s/^window=.*/window=$target/" "$state/task-x1.meta"
+  rm -f "$state/task-x1.meta.bak"
+  seed_watcher_markers "$state" task-x1 "$target"
+  # A second LIVE task whose legacy target fold lands on task-x1's current key.
+  fm_write_meta "$state/task-x2.meta" \
+    "window=$other_target" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  [ "$(fm_state_key_legacy_target "$other_target")" = "$(fm_state_key_encode "$target")" ] \
+    || fail "watcher-marker-ambiguity: fixture no longer sets up a cross-scheme collision"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "watcher-marker-ambiguity: forced teardown failed"
+
+  removed=
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    [ -e "$state/$prefix$(fm_state_key_encode "$target")" ] \
+      || removed="$removed $prefix"
+  done < <(fm_state_watch_target_prefixes)
+  [ -z "$removed" ] \
+    || fail "watcher-marker-ambiguity: teardown removed markers that could belong to a live pane:$removed"
+  pass "teardown leaves a window-keyed marker that could still be another live pane's legacy name"
+}
+
+# The candidate scan runs under `set -e` inside a process substitution, so a meta
+# it cannot read a target from must not abort it. If it did, every task AFTER the
+# unreadable one would go unseen and the guard would approve a deletion it exists
+# to prevent. Order the fixture so the targetless meta is scanned first.
+test_teardown_ambiguity_survives_a_targetless_meta() {
+  local case_dir state target prefix removed
+  case_dir=$(make_case watcher-marker-targetless-neighbour)
+  state="$case_dir/state"
+  target='fmtest:fm-other'
+  write_meta "$case_dir" local-only ship
+  sed -i.bak "s/^window=.*/window=$target/" "$state/task-x1.meta"
+  rm -f "$state/task-x1.meta.bak"
+  seed_watcher_markers "$state" task-x1 "$target"
+  # Sorts before task-x2 in the glob, and carries no window= at all.
+  fm_write_meta "$state/task-aaa.meta" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  # The colliding neighbour the guard must still reach.
+  fm_write_meta "$state/task-x2.meta" \
+    "window=fmtest:3afm-other" \
+    "worktree=$case_dir/wt3" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "watcher-marker-targetless-neighbour: forced teardown failed"
+
+  removed=
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    [ -e "$state/$prefix$(fm_state_key_encode "$target")" ] \
+      || removed="$removed $prefix"
+  done < <(fm_state_watch_target_prefixes)
+  [ -z "$removed" ] \
+    || fail "watcher-marker-targetless-neighbour: a meta with no target hid the colliding neighbour:$removed"
+  pass "a live task with no recorded target does not blind the marker ambiguity guard"
+}
+
+# The .seen- family carries no such guard, because its two name-sets are disjoint
+# by construction. tests/fm-state-key.test.sh pins that property; this case pins
+# the consequence teardown depends on - a live neighbour's signature survives.
+test_teardown_keeps_other_tasks_seen_markers() {
+  local case_dir state other
+  case_dir=$(make_case seen-marker-neighbour)
+  state="$case_dir/state"
+  write_meta "$case_dir" local-only ship
+  seed_watcher_markers "$state" task-x1 fmtest:fm-task-x1-w1
+  fm_write_meta "$state/task-x2.meta" \
+    "window=fmtest:fm-task-x2-w1" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  other="$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode 'task-x2.status')"
+  : > "$other"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "seen-marker-neighbour: forced teardown failed"
+
+  [ -e "$other" ] \
+    || fail "seen-marker-neighbour: teardown removed another live task's signal signature"
+  [ ! -e "$state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode 'task-x1.status')" ] \
+    || fail "seen-marker-neighbour: teardown kept its own signal signature"
+  pass "teardown removes only its own .seen- signatures, never a live neighbour's"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1380,6 +1544,10 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_teardown_removes_watcher_markers
+test_teardown_keeps_ambiguous_watcher_markers
+test_teardown_ambiguity_survives_a_targetless_meta
+test_teardown_keeps_other_tasks_seen_markers
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows

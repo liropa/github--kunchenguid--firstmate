@@ -168,6 +168,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
+# The single owner of the marker-file key. This daemon keys its own
+# .subsuper-* markers by task id AND reconstructs the always-on watcher's
+# window-keyed .stale-/.paused-* names to clear them, so both must come from the
+# same encoder as bin/fm-watch.sh or the two supervisors desynchronize.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$FM_DAEMON_DIR/fm-state-key-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -418,7 +425,7 @@ classify_unknown() {  # <reason>
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
 
-_stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
+_stale_key() { fm_state_key_encode "$1"; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker

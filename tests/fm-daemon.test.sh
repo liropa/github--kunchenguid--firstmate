@@ -133,7 +133,7 @@ test_stale_transient_self_records_marker() {
   stale_marker_record "sess:fm-qux-w4" "$state"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-qux-w4" "$state")
   case "$out" in self\|*) ;; *) fail "transient stale did not self-handle: $out" ;; esac
-  key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
+  key=$(fm_state_key_encode "$(window_to_task "sess:fm-qux-w4")")
   [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
   pass "transient stale self-handles and records a persistence marker"
 }
@@ -176,7 +176,7 @@ test_handle_wake_paused_records_pause_marker() {
   state="$dir/state"
   win="sess:fm-held-w10"
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10.status"
-  key=$(printf '%s' "held-w10" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w10")
   date +%s > "$state/.subsuper-stale-$key"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker not recorded by handle_wake"
@@ -192,7 +192,7 @@ test_handle_wake_paused_signal_records_pause_marker() {
   win="sess:fm-held-w10-signal"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-signal.meta"
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
-  key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w10-signal")
   date +%s > "$state/.subsuper-stale-$key"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
@@ -208,8 +208,8 @@ test_handle_wake_terminal_signal_clears_pause_tracking() {
   win="sess:fm-held-w10-terminal"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-terminal.meta"
   printf 'done: upstream landed\n' > "$state/held-w10-terminal.status"
-  key=$(printf '%s' "held-w10-terminal" | tr '.:/' '___')
-  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  key=$(fm_state_key_encode "held-w10-terminal")
+  watcher_key=$(fm_state_key_encode "$win")
   date +%s > "$state/.subsuper-paused-$key"
   date +%s > "$state/.subsuper-stale-$key"
   : > "$state/.paused-$watcher_key"
@@ -233,10 +233,10 @@ test_housekeeping_migrates_watcher_pause_marker() {
   win="sess:fm-held-w10-migrate"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/held-w10-migrate.status"
-  key=$(printf '%s' "$win" | tr '.:/' '___')
+  key=$(fm_state_key_encode "$win")
   : > "$state/.paused-$key"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  key=$(printf '%s' "held-w10-migrate" | tr '.:/' '___')
+  key=$(fm_state_key_encode "held-w10-migrate")
   [ -e "$state/.subsuper-paused-$key" ] || fail "watcher pause marker was not migrated into daemon tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "watcher pause migration left a wedge marker behind"
   pass "housekeeping migrates a normal-watcher's declared pause into daemon tracking"
@@ -249,10 +249,10 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   win="sess:fm-held-w10-migrate-unpaused"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate-unpaused.meta"
   printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
-  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  watcher_key=$(fm_state_key_encode "$win")
   : > "$state/.paused-$watcher_key"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
+  key=$(fm_state_key_encode "held-w10-migrate-unpaused")
   [ ! -e "$state/.paused-$watcher_key" ] || fail "stale watcher pause marker was not cleared after resume"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused watcher handoff created a daemon pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "unpaused watcher handoff retained daemon stale tracking"
@@ -267,7 +267,7 @@ test_housekeeping_seeds_pause_marker_from_status() {
   win="sess:fm-held-w10-seed"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-seed.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/held-w10-seed.status"
-  key=$(printf '%s' "held-w10-seed" | tr '.:/' '___')
+  key=$(fm_state_key_encode "held-w10-seed")
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "paused status did not seed daemon pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "paused status seeded wedge tracking"
@@ -284,7 +284,7 @@ test_housekeeping_paused_resurfaces_and_resets() {
   win="sess:fm-held-w11"; pane="$dir/pane.txt"
   printf 'paused: holding for the upstream tool release\n' > "$state/held-w11.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "held-w11" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w11")
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
@@ -305,7 +305,7 @@ test_housekeeping_paused_resumed_cleared() {
   win="sess:fm-held-w12"; pane="$dir/pane.txt"
   printf 'paused: holding for the upstream tool release\n' > "$state/held-w12.status"
   printf 'Working...\n' > "$pane"
-  key=$(printf '%s' "held-w12" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w12")
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
@@ -324,7 +324,7 @@ test_housekeeping_paused_unpaused_cleared() {
   win="sess:fm-held-w13"; pane="$dir/pane.txt"
   printf 'paused: holding for the upstream release\nworking: resumed, upstream landed\n' > "$state/held-w13.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "held-w13" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w13")
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
@@ -339,7 +339,7 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w14"; pane="$dir/pane.txt"
   printf 'paused: awaiting the upstream tool release\n' > "$state/held-w14.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "held-w14" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w14")
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
@@ -355,7 +355,7 @@ test_housekeeping_pause_marker_transitions_to_clear() {
   state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w15"; pane="$dir/pane.txt"
   printf 'working: upstream landed, resuming\n' > "$state/held-w15.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "held-w15" | tr ':/.' '___')
+  key=$(fm_state_key_encode "held-w15")
   date +%s > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 housekeeping "$state"
@@ -374,7 +374,7 @@ test_housekeeping_persistent_stale_escalates() {
   pane="$dir/pane.txt"
   printf 'working\n' > "$state/pers-w5.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "pers-w5" | tr ':/.' '___')
+  key=$(fm_state_key_encode "pers-w5")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
@@ -392,7 +392,7 @@ test_housekeeping_resumed_stale_cleared() {
   pane="$dir/pane.txt"
   printf 'working\n' > "$state/res-w6.status"
   printf 'Working...\n' > "$pane"
-  key=$(printf '%s' "res-w6" | tr ':/.' '___')
+  key=$(fm_state_key_encode "res-w6")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
@@ -407,7 +407,7 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
   state="$dir/state"
   fm_write_meta "$state/herdr-w7.meta" "window=default:w1:p2" "backend=herdr"
   printf 'working\n' > "$state/herdr-w7.status"
-  key=$(printf '%s' "herdr-w7" | tr ':/.' '___')
+  key=$(fm_state_key_encode "herdr-w7")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
     fm_backend_capture() {
@@ -435,7 +435,7 @@ test_housekeeping_herdr_idle_busy_footer_clears_stale() {
   state="$dir/state"
   fm_write_meta "$state/herdr-footer.meta" "window=default:w1:p4" "backend=herdr"
   printf 'working\n' > "$state/herdr-footer.status"
-  key=$(printf '%s' "herdr-footer" | tr ':/.' '___')
+  key=$(fm_state_key_encode "herdr-footer")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
     fm_backend_capture() {
@@ -463,7 +463,7 @@ test_housekeeping_herdr_resumed_stale_cleared() {
   state="$dir/state"
   fm_write_meta "$state/herdr-busy.meta" "window=default:w1:p3" "backend=herdr"
   printf 'working\n' > "$state/herdr-busy.status"
-  key=$(printf '%s' "herdr-busy" | tr ':/.' '___')
+  key=$(fm_state_key_encode "herdr-busy")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
     fm_backend_capture() {
@@ -491,7 +491,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   state="$dir/state"
   fm_write_meta "$state/orca-w8.meta" "window=fm-orca-w8" "terminal=term-orca-w8" "backend=orca"
   printf 'working\n' > "$state/orca-w8.status"
-  key=$(printf '%s' "orca-w8" | tr ':/.' '___')
+  key=$(fm_state_key_encode "orca-w8")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
     fm_backend_capture() {
@@ -614,7 +614,7 @@ test_terminal_stale_escalate_leaves_no_marker() {
   state="$dir/state"
   win="sess:fm-fin-n7"
   printf 'done: PR https://x/y/pull/7\n' > "$state/fin-n7.status"
-  key=$(printf '%s' "fin-n7" | tr ':/.' '___')
+  key=$(fm_state_key_encode "fin-n7")
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "terminal stale was not escalated"
@@ -633,7 +633,7 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   printf 'done: PR https://x/y/pull/8\n' > "$state/sig-t8.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
-  key=$(printf '%s' "sig-t8" | tr ':/.' '___')
+  key=$(fm_state_key_encode "sig-t8")
   [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
     || fail "captain signal escalate did not write the seen-status marker"
   : > "$state/.subsuper-escalations"
@@ -884,7 +884,7 @@ test_classify_signal_dedup_against_scan() {
   state="$dir/state"
   printf 'done: PR https://x/y/pull/9\n' > "$state/dup-s9.status"
   # Simulate the catch-all scan having already escalated this status.
-  key=$(printf '%s' "dup-s9" | tr ':/.' '___')
+  key=$(fm_state_key_encode "dup-s9")
   printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
@@ -902,7 +902,7 @@ test_classify_stale_dedup_against_signal() {
   dir=$(make_supercase stale-dedup)
   state="$dir/state"
   printf 'done: PR https://x/y/pull/10\n' > "$state/dup-s10.status"
-  key=$(printf '%s' "dup-s10" | tr ':/.' '___')
+  key=$(fm_state_key_encode "dup-s10")
   printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
@@ -927,7 +927,7 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
   printf '%s\n' "$incident" > "$state/wishlist-w1.status"
   printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
+  key=$(fm_state_key_encode "wishlist-w1")
   # Simulate an earlier false-positive escalate that wrote the seen marker.
   printf '%s' "$incident" > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")

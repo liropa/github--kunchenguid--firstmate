@@ -1,23 +1,39 @@
 # shellcheck shell=bash
 # bin/fm-state-key-lib.sh - the single owner of the encoding that embeds a task
-# id (or a signal filename) inside a state/ marker filename.
+# id, a signal filename, or a window/target string inside a state/ marker
+# filename.
 #
-# Several watcher and backend markers are named "<fixed-prefix><key>", where the
-# key identifies the task the marker belongs to: the sbx beat-beacon family
-# (.sbx-beat-te-, .sbx-beat-status-, .sbx-noprogress-, .sbx-stranded-alarmed-,
-# .sbx-mount-alarmed-, .sbx-midtask-stop-, .sbx-delivered-, and the transient
-# .sbx-delivery-pending- candidates) and the signal scan's .seen- signatures.
-# Producer (bin/backends/sbx.sh), consumer (bin/fm-watch.sh), and cleanup
-# (bin/fm-teardown.sh) must agree on that key byte for byte, so the transform
-# lives here and ONLY here.
+# Several watcher, daemon and backend markers are named "<fixed-prefix><key>",
+# where the key identifies what the marker belongs to. Three namespaces use it:
+#
+#   - Task ids key the sbx beat-beacon family (.sbx-beat-te-, .sbx-beat-status-,
+#     .sbx-noprogress-, .sbx-stranded-alarmed-, .sbx-mount-alarmed-,
+#     .sbx-midtask-stop-, .sbx-delivered-, and the transient
+#     .sbx-delivery-pending- candidates) and the heartbeat backstop's
+#     .hb-surfaced- markers.
+#   - Signal filenames ("<id>.status", "<id>.turn-ended") key the signal scan's
+#     .seen- signatures.
+#   - Window/target strings key the watcher's per-pane stale, hash, count and
+#     pause families and bin/backends/herdr.sh's escalation dedupe marker. These
+#     are the least constrained of the three: a tmux "<session>:<window>", a
+#     herdr "<session>:<pane_id>" whose pane_id itself contains a `:`
+#     ("default:wG:pQ"), or an orca terminal id.
+#
+# Producers (bin/fm-watch.sh, bin/fm-supervise-daemon.sh, bin/backends/sbx.sh,
+# bin/backends/herdr.sh) and cleanup (bin/fm-teardown.sh) must agree on that key
+# byte for byte, so the transform lives here and ONLY here. In particular the
+# daemon reconstructs the watcher's own key to clear its pause families, so a
+# second copy of the transform anywhere would desynchronize the two.
 #
 # THE ENCODING. fm_state_key_encode escapes with `_` as the escape character:
 # every byte outside [A-Za-z0-9-] becomes `_` plus its two lowercase hex digits,
 # and bytes inside that set pass through unchanged. It is ordinary
 # percent-encoding with `_` in place of `%`, chosen because it is the simplest
-# transform that is injective (the property the previous `tr '.' '_'` fold
-# lacked: it mapped both `a.b` and `a_b` to `a_b`, so two tasks shared one
-# marker file) while keeping the properties the marker names depend on:
+# transform that is injective (the property both superseded folds lacked: the id
+# fold `tr '.' '_'` mapped `a.b` and `a_b` to `a_b`, and the window fold
+# `tr ':/.' '___'` mapped three distinct bytes onto one, so `s:w`, `s/w` and
+# `s.w` all shared one marker file) while keeping the properties the marker
+# names depend on:
 #
 #   - Distinct inputs produce distinct keys, and fm_state_key_decode recovers
 #     the exact input bytes from the key.
@@ -36,6 +52,8 @@
 #   - A task id that is already a bare slug (letters, digits and hyphens - the
 #     shape fm-spawn.sh's callers actually use) encodes to itself, so the common
 #     case is byte-identical to the pre-migration name and needs no migration.
+#     Window/target strings always carry a `:`, so their keys always change; see
+#     fm_state_watch_target_prefixes for why that needs no migration either.
 #
 # Production code only ever ENCODES. fm_state_key_decode is the reversibility
 # half of the contract: the tests hold the round-trip property against it, and
@@ -45,12 +63,14 @@
 # invent an owner rather than resolve it; it resolves legacy names against the
 # ids the home can actually enumerate instead.
 #
-# fm_state_key_legacy reproduces the superseded fold. It exists so migration
-# can recognize old names and teardown can compare a current key with another
-# live owner's legacy key before cleanup. No caller may use it to name a file.
+# fm_state_key_legacy and fm_state_key_legacy_target reproduce the two
+# superseded folds. They exist so migration can recognize old names and teardown
+# can compare a current key with another live owner's legacy key before cleanup.
+# No caller may use either to name a file.
 #
-# Sourced by bin/fm-watch.sh, bin/fm-teardown.sh, bin/backends/sbx.sh,
-# bin/fm-state-key-migrate.sh, and the tests. No side effects on source.
+# Sourced by bin/fm-watch.sh, bin/fm-supervise-daemon.sh, bin/fm-teardown.sh,
+# bin/backends/sbx.sh, bin/backends/herdr.sh, bin/fm-state-key-migrate.sh, and
+# the tests. No side effects on source.
 # set -u / set -e safe.
 #
 # Usage: . bin/fm-state-key-lib.sh
@@ -120,12 +140,24 @@ fm_state_key_decode() {  # <key>
   printf '%s' "$out"
 }
 
-# fm_state_key_legacy <text>: print the SUPERSEDED marker key for <text> - every
-# `.` folded to `_`. Only bin/fm-state-key-migrate.sh may use it to recognize
-# old names, and bin/fm-teardown.sh to compare ownership before cleanup; neither
-# may use it to name a file.
+# fm_state_key_legacy <text>: print the SUPERSEDED task-id/signal marker key for
+# <text> - every `.` folded to `_`. Only bin/fm-state-key-migrate.sh may use it
+# to recognize old names, and bin/fm-teardown.sh to compare ownership before
+# cleanup; neither may use it to name a file.
 fm_state_key_legacy() {  # <text>
   local text=${1-}
+  printf '%s' "${text//./_}"
+}
+
+# fm_state_key_legacy_target <text>: print the SUPERSEDED window/target marker
+# key for <text> - `:`, `/` and `.` all folded to `_`. Same rule as
+# fm_state_key_legacy: recognition and ownership comparison only, never to name
+# a file. bin/fm-teardown.sh uses it to prove a name it is about to remove
+# cannot still be another live target's legacy marker.
+fm_state_key_legacy_target() {  # <text>
+  local text=${1-}
+  text=${text//:/_}
+  text=${text//\//_}
   printf '%s' "${text//./_}"
 }
 
@@ -144,6 +176,43 @@ fm_state_sbx_marker_prefixes() {
 .sbx-mount-alarmed-
 .sbx-midtask-stop-
 .sbx-delivered-
+EOF
+}
+
+# fm_state_watch_target_prefixes: the watcher marker families keyed by a
+# WINDOW/TARGET string, one per line, each named "<prefix><key>". Shared by
+# bin/fm-watch.sh's own bookkeeping and bin/fm-teardown.sh's cleanup so the two
+# cannot disagree about which families exist. bin/backends/herdr.sh's
+# .herdr-escalated- marker is deliberately absent: it is keyed the same way but
+# owned by that adapter, and teardown already clears it through
+# fm_backend_clear_transition rather than by name.
+#
+# These families are NOT migrated off the superseded fold, unlike the sbx
+# beacons in fm_state_sbx_marker_prefixes. Every one is a suppressor, a counter
+# or a timer anchor that the watcher rebuilds within a poll or two, so a marker
+# left under a legacy name reads as absent and costs at most one duplicate wake
+# or one delayed escalation. The sbx beacons needed a sweep because losing one
+# runs the other way: a stale .sbx-stranded-alarmed- SUPPRESSES a real alarm and
+# a stale .sbx-delivered- raises a false one, neither of which self-heals.
+fm_state_watch_target_prefixes() {
+  cat <<'EOF'
+.hash-
+.count-
+.stale-
+.stale-since-
+.wedge-escalations-
+.paused-
+.paused-rechecked-
+.paused-resurfaced-
+EOF
+}
+
+# fm_state_watch_task_prefixes: the watcher marker families keyed by a TASK ID.
+# Same no-migration reasoning as fm_state_watch_target_prefixes, and a bare-slug
+# id encodes to itself anyway, so these names do not change at all in practice.
+fm_state_watch_task_prefixes() {
+  cat <<'EOF'
+.hb-surfaced-
 EOF
 }
 
