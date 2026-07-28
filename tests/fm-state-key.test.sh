@@ -448,10 +448,32 @@ pass "a legacy target name CAN equal a current target name, so the target guard 
 # copies of the window fold is what motivated adopting it here, so guard the
 # property directly rather than trusting review to catch a seventh.
 
-# Code only: this library's own header documents the superseded fold in prose,
-# and a comment cannot name a file.
-LEFTOVER=$(grep -rn "tr ':/\.'\|tr '\.:/'\|tr ':\./'" "$ROOT/bin" \
-  | grep -v '^[^:]*:[0-9][0-9]*:[[:space:]]*#' || true)
+# Code only: this library's legacy helpers reproduce the superseded folds for
+# recognition and ownership checks, and comments cannot name a file.
+LEFTOVER=$(
+  while IFS= read -r SCRIPT; do
+    awk -v file="$SCRIPT" -v legacy_lib="$ROOT/bin/fm-state-key-lib.sh" '
+      file == legacy_lib && /^fm_state_key_legacy(_target)?\(\)[[:space:]]*\{/ {
+        in_legacy_helper = 1
+      }
+      in_legacy_helper {
+        if (/^}/) {
+          in_legacy_helper = 0
+        }
+        next
+      }
+      /^[[:space:]]*#/ {
+        next
+      }
+      index($0, "//:/_") \
+        || index($0, "//\\//_") \
+        || index($0, "//./_") \
+        || $0 ~ /tr[[:space:]]+[\047"]?[.:\/][.:\/][.:\/][\047"]?[[:space:]]+/ {
+          printf "%s:%d:%s\n", file, NR, $0
+        }
+    ' "$SCRIPT"
+  done < <(find "$ROOT/bin" -type f -name '*.sh' -print)
+)
 [ -z "$LEFTOVER" ] \
   || fail "bin/ must not re-derive the window key; use fm_state_key_encode:
 $LEFTOVER"
@@ -460,10 +482,31 @@ pass "no script under bin/ re-derives the window/target key fold"
 # Teardown removes the families this list names, so a family the watcher writes
 # but the list omits leaks forever. Assert the list covers every marker family
 # fm-watch.sh actually names.
-KNOWN=$( { fm_state_sbx_marker_prefixes; fm_state_watch_target_prefixes; fm_state_watch_task_prefixes; } | LC_ALL=C sort -u)
-# shellcheck disable=SC2016  # `$key` is literal text in the pattern, not an expansion
-WRITTEN=$(grep -oE '/\.[a-z-]+-\$key' "$ROOT/bin/fm-watch.sh" | sed 's#^/##; s#\$key$##' | LC_ALL=C sort -u)
-WRITTEN=$(printf '%s\n%s\n' "$WRITTEN" "$(grep -oE '/\.hb-surfaced-' "$ROOT/bin/fm-watch.sh" | sed 's#^/##' | LC_ALL=C sort -u)")
+KNOWN=$(fm_state_watch_marker_prefixes | LC_ALL=C sort -u)
+WATCH_CODE=$(awk '!/^[[:space:]]*#/' "$ROOT/bin/fm-watch.sh")
+# shellcheck disable=SC2016  # `$STATE` and `$key` are literal source text.
+KEYED_PATH_LINES=$(printf '%s\n' "$WATCH_CODE" \
+  | awk '/\$STATE/ && (/\$key/ || /fm_state_key_encode/)')
+WRITTEN=$(printf '%s\n' "$KEYED_PATH_LINES" \
+  | grep -oE '\.[a-z][a-z-]+-' \
+  | LC_ALL=C sort -u)
+PREFIX_VARS=$(printf '%s\n' "$KEYED_PATH_LINES" \
+  | grep -oE 'FM_STATE_[A-Z_]+PREFIX' \
+  | LC_ALL=C sort -u || true)
+while IFS= read -r PREFIX_VAR; do
+  [ -n "$PREFIX_VAR" ] || continue
+  PREFIX=${!PREFIX_VAR-}
+  [ -n "$PREFIX" ] \
+    || fail "fm-watch.sh names an undefined marker-prefix variable '$PREFIX_VAR'"
+  WRITTEN=$(printf '%s\n%s\n' "$WRITTEN" "$PREFIX" | LC_ALL=C sort -u)
+done <<EOF
+$PREFIX_VARS
+EOF
+UNCLASSIFIED=$(printf '%s\n' "$KEYED_PATH_LINES" \
+  | grep -vE '\.[a-z][a-z-]+-|FM_STATE_[A-Z_]+PREFIX' || true)
+[ -z "$UNCLASSIFIED" ] \
+  || fail "fm-watch.sh constructs an encoded marker without a manifest prefix:
+$UNCLASSIFIED"
 while IFS= read -r FAMILY; do
   [ -n "$FAMILY" ] || continue
   printf '%s\n' "$KNOWN" | grep -qxF "$FAMILY" \

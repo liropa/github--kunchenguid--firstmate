@@ -1268,6 +1268,40 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_herdr_teardown_keeps_ambiguous_escalation_marker() {
+  local case_dir state target other_target marker
+  case_dir=$(make_case herdr-marker-ambiguity)
+  state="$case_dir/state"
+  target='fmtest:fm-other'
+  other_target='fmtest:3afm-other'
+  write_meta "$case_dir" local-only ship
+  sed -i.bak "s/^window=.*/window=$target/" "$state/task-x1.meta"
+  rm -f "$state/task-x1.meta.bak"
+  printf '%s\n' 'backend=herdr' >> "$state/task-x1.meta"
+  fm_write_meta "$state/task-x2.meta" \
+    "window=$other_target" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "$target")"
+  : > "$marker"
+
+  [ "$(fm_state_key_legacy_target "$other_target")" = "$(fm_state_key_encode "$target")" ] \
+    || fail "herdr-marker-ambiguity: fixture no longer sets up a cross-scheme collision"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-marker-ambiguity: forced teardown failed"
+  [ -e "$marker" ] \
+    || fail "herdr-marker-ambiguity: teardown removed a live pane's legacy escalation marker"
+  pass "herdr teardown preserves escalation state with ambiguous legacy ownership"
+}
+
 # --- watcher marker cleanup ---------------------------------------------------
 #
 # Before this, teardown removed only the sbx beacon families. The signal-scan
@@ -1544,6 +1578,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_herdr_teardown_keeps_ambiguous_escalation_marker
 test_teardown_removes_watcher_markers
 test_teardown_keeps_ambiguous_watcher_markers
 test_teardown_ambiguity_survives_a_targetless_meta
