@@ -13,6 +13,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The adapter names its escalation marker through the production key owner, so
+# these assertions build expected names with it rather than with a literal fold.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$ROOT/bin/fm-state-key-lib.sh"
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
@@ -2508,6 +2513,10 @@ SH
   printf '%s\n' "$path"
 }
 
+# Fixture-local pane->filename mapping, shared with the stub above. Deliberately
+# NOT the production marker key: this names a scratch file standing in for
+# herdr's own per-pane agent status, and the stub is a standalone script that
+# cannot source bin/fm-state-key-lib.sh.
 set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   local dir=$1 target=$2 status=$3 key
   key=$(printf '%s' "$target" | tr ':/.' '___')
@@ -2528,18 +2537,33 @@ test_normalize_event_leaves_from_empty() {
 }
 
 test_escalation_marker_keys_like_watcher() {
-  local m
+  local m expect
+  expect="/st/.herdr-escalated-$(fm_state_key_encode 'default:wG:pQ')"
   m=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_escalation_marker /st default:wG:pQ' "$ROOT")
-  [ "$m" = "/st/.herdr-escalated-default_wG_pQ" ] \
-    || fail "escalation marker key must match the watcher's tr ':/.' '___' scheme, got '$m'"
+  [ "$m" = "$expect" ] \
+    || fail "escalation marker key must come from fm_state_key_encode; want '$expect', got '$m'"
   pass "fm_backend_herdr_escalation_marker keys the dedupe marker exactly like the watcher's .stale-<key>"
+}
+
+# The superseded fold was `tr ':/.' '___'`, which mapped `:`, `/` and `.` onto
+# one byte: three distinct panes shared one dedupe marker, so the first one to
+# escalate silenced the other two. Assert on the adapter itself, not on the
+# encoder, so a future adapter-local key can never quietly reintroduce the fold.
+test_escalation_marker_separates_fold_colliding_panes() {
+  local a b c
+  a=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_escalation_marker /st "s:wG"' "$ROOT")
+  b=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_escalation_marker /st "s/wG"' "$ROOT")
+  c=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_escalation_marker /st "s.wG"' "$ROOT")
+  [ "$a" != "$b" ] && [ "$a" != "$c" ] && [ "$b" != "$c" ] \
+    || fail "panes s:wG, s/wG and s.wG must not share one escalation marker (got '$a', '$b', '$c')"
+  pass "fm_backend_herdr_escalation_marker separates panes the superseded fold collapsed"
 }
 
 test_apply_transition_blocked_requires_commit_to_dedupe() {
   local dir state rec out rc marker
   dir="$TMP_ROOT/apply-blocked"; state="$dir/state"; mkdir -p "$state"
   rec=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
-  marker="$state/.herdr-escalated-default_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"); rc=$?
   [ "$rc" = 0 ] || fail "a fresh blocked edge must return 0 (actionable), got $rc"
   case "$out" in *blocked*) : ;; *) fail "apply_transition should print the record on a fresh actionable edge, got '$out'" ;; esac
@@ -2556,7 +2580,7 @@ test_apply_transition_blocked_requires_commit_to_dedupe() {
 test_apply_transition_working_clears_marker() {
   local dir state blocked working marker rc
   dir="$TMP_ROOT/apply-working"; state="$dir/state"; mkdir -p "$state"
-  marker="$state/.herdr-escalated-default_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
   blocked=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
   working=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" working claude' "$ROOT")
   bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_commit_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$blocked"
@@ -2573,7 +2597,7 @@ test_apply_transition_working_clears_marker() {
 test_clear_transition_removes_task_marker() {
   local dir state marker
   dir="$TMP_ROOT/clear-transition"; state="$dir/state"; mkdir -p "$state"
-  marker="$state/.herdr-escalated-default_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
   : > "$marker"
   bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_clear_transition "$1" "$2"' "$ROOT" "$state" default:wG:pQ
   [ ! -e "$marker" ] || fail "clear_transition must remove the marker owned by a torn-down pane"
@@ -2583,7 +2607,7 @@ test_clear_transition_removes_task_marker() {
 test_apply_transition_defer_and_fallback_are_noops() {
   local dir state marker rc s
   dir="$TMP_ROOT/apply-defer"; state="$dir/state"; mkdir -p "$state"
-  marker="$state/.herdr-escalated-default_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
   for s in idle "done" unknown ""; do
     local rec
     rec=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" "$1" claude' "$ROOT" "$s")
@@ -2617,7 +2641,7 @@ test_wait_transition_reconcile_blocked_returns_record() {
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" blocked
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
-  marker="$state/.herdr-escalated-sess_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "sess:wG:pQ")"
   out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
@@ -2647,7 +2671,7 @@ test_wait_transition_reconcile_dedupes_when_marked() {
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" blocked
   # Pre-mark: this blocked was already escalated.
-  : > "$state/.herdr-escalated-sess_wG_pQ"
+  : > "$state/.herdr-escalated-$(fm_state_key_encode "sess:wG:pQ")"
   # No stream events, reader exits 0 -> a clean timeout (rc 1), NOT a re-fire.
   local reader lines
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
@@ -2665,7 +2689,7 @@ test_wait_transition_stream_blocked_returns_record() {
   set_fake_agent "$agent" "wG:pQ" idle   # reconcile sees idle -> proceeds to stream
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"
   printf 'wG:pQ\t\tblocked\tclaude\n' > "$lines"
-  marker="$state/.herdr-escalated-sess_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "sess:wG:pQ")"
   out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
@@ -2680,9 +2704,9 @@ test_wait_transition_stream_absorb_clears_then_timeout() {
   dir="$TMP_ROOT/wt-stream-absorb"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
   fb=$(make_herdr_eventfake "$dir")
   set_fake_agent "$agent" "wG:pQ" idle
-  : > "$state/.herdr-escalated-sess_wG_pQ"   # previously escalated
+  : > "$state/.herdr-escalated-$(fm_state_key_encode "sess:wG:pQ")"   # previously escalated
   reader=$(make_fake_reader "$dir"); lines="$dir/lines"
-  marker="$state/.herdr-escalated-sess_wG_pQ"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "sess:wG:pQ")"
   # Stream a working edge (absorb) then an idle edge (defer). Neither is a fresh
   # actionable edge, so the wait ends as a clean timeout (rc 1) and the marker
   # is cleared by the working edge.
@@ -2857,6 +2881,7 @@ test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
+test_escalation_marker_separates_fold_colliding_panes
 test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
 test_clear_transition_removes_task_marker

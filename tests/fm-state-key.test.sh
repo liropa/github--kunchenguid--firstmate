@@ -376,4 +376,101 @@ OUT=$(CLAUDE_PID="$$" PATH="$FAKEBIN:$PATH" FM_HOME="${STATE%/state}" \
   || fail "standalone bootstrap emitted a marker migration diagnostic"
 pass "lock ownership alone does not enable session-start-only migration"
 
+# --- window/target keys ------------------------------------------------------
+#
+# The watcher, the away-mode daemon and the herdr adapter key per-pane markers by
+# a window/target string. That key used to be `tr ':/.' '___'`, which folds THREE
+# distinct bytes onto one: `s:w`, `s/w` and `s.w` all named one file, so one
+# pane's stale suppressor silenced another's alarm and one pane's hash reset
+# another's wedge counter.
+
+A=$(fm_state_key_encode 's:w')
+B=$(fm_state_key_encode 's/w')
+C=$(fm_state_key_encode 's.w')
+[ "$A" != "$B" ] && [ "$A" != "$C" ] && [ "$B" != "$C" ] \
+  || fail "targets s:w, s/w and s.w must produce three distinct keys (got '$A', '$B', '$C')"
+pass "the target key separates the three bytes the superseded fold collapsed"
+
+for TARGET in 'fm:fm-task-w1' 'herdr:%3' 'sess:win.name' 'a/b:c' '' 'x:y/z.w'; do
+  [ "$(fm_state_key_decode "$(fm_state_key_encode "$TARGET")")" = "$TARGET" ] \
+    || fail "target key must round-trip: $TARGET"
+done
+pass "window/target keys round-trip through decode"
+
+for TARGET in 'fm:fm-task-w1' 'herdr:%3' 'a/b:c.d'; do
+  KEY=$(fm_state_key_encode "$TARGET")
+  case $KEY in
+    */*) fail "target key must be one path segment, got '$KEY'" ;;
+    .*) fail "target key must not start a dot, got '$KEY'" ;;
+    *.*) fail "target key must contain no '.', got '$KEY'" ;;
+  esac
+done
+pass "window/target keys stay one dot-free path segment"
+
+# fm_state_key_legacy_target must reproduce the superseded fold EXACTLY, because
+# bin/fm-teardown.sh uses it to prove a name it is about to remove is not another
+# live pane's old marker. A drifted legacy fold would silently weaken that guard.
+for TARGET in 'fm:fm-task-w1' 'a/b' 'a.b' 'x:y/z.w' 'plain'; do
+  [ "$(fm_state_key_legacy_target "$TARGET")" = "$(printf '%s' "$TARGET" | tr ':/.' '___')" ] \
+    || fail "fm_state_key_legacy_target must reproduce the superseded fold for '$TARGET'"
+done
+pass "fm_state_key_legacy_target reproduces the superseded window fold exactly"
+
+# --- .seen- names are disjoint across the two schemes -------------------------
+#
+# bin/fm-teardown.sh removes its own .seen- signatures with NO ambiguity guard,
+# unlike every other family it cleans. That is safe only because a legacy
+# signature name can never equal a current one: the superseded fold turned the
+# basename's `.` into `_`, so a legacy name ends "_status"/"_turn-ended", while
+# the current encoding escapes it to "_2e" and so ends "_2estatus"/"_2eturn-ended".
+# If that ever stops holding, teardown starts deleting live neighbours' markers,
+# so pin it here rather than leaving it as a comment.
+for ID_A in 'a' 'a.b' 'a_b' 'a_2e' 'task-x1' 'x.y.z' 'a-b_2e'; do
+  for ID_B in 'a' 'a.b' 'a_b' 'a_2e' 'task-x1' 'x.y.z' 'a-b_2e'; do
+    for SUFFIX in status turn-ended; do
+      [ "$(fm_state_key_encode "$ID_A.$SUFFIX")" != "$(fm_state_key_legacy "$ID_B.$SUFFIX")" ] \
+        || fail "signal key collision across schemes: current '$ID_A.$SUFFIX' = legacy '$ID_B.$SUFFIX'"
+    done
+  done
+done
+pass "no current .seen- name can equal a legacy .seen- name"
+
+# The window/target namespace has NO such separator, which is why teardown does
+# carry an ambiguity guard there. Prove the collision is real and reachable, so
+# the asymmetry between the two cleanups stays justified rather than accidental.
+[ "$(fm_state_key_legacy_target 'fmtest:3afm-other')" = "$(fm_state_key_encode 'fmtest:fm-other')" ] \
+  || fail "expected a reachable cross-scheme target collision; teardown's guard would be dead code"
+pass "a legacy target name CAN equal a current target name, so the target guard is load-bearing"
+
+# --- one owner ---------------------------------------------------------------
+#
+# The whole point of this library is that no caller re-derives the key. Six
+# copies of the window fold is what motivated adopting it here, so guard the
+# property directly rather than trusting review to catch a seventh.
+
+# Code only: this library's own header documents the superseded fold in prose,
+# and a comment cannot name a file.
+LEFTOVER=$(grep -rn "tr ':/\.'\|tr '\.:/'\|tr ':\./'" "$ROOT/bin" \
+  | grep -v '^[^:]*:[0-9][0-9]*:[[:space:]]*#' || true)
+[ -z "$LEFTOVER" ] \
+  || fail "bin/ must not re-derive the window key; use fm_state_key_encode:
+$LEFTOVER"
+pass "no script under bin/ re-derives the window/target key fold"
+
+# Teardown removes the families this list names, so a family the watcher writes
+# but the list omits leaks forever. Assert the list covers every marker family
+# fm-watch.sh actually names.
+KNOWN=$( { fm_state_sbx_marker_prefixes; fm_state_watch_target_prefixes; fm_state_watch_task_prefixes; } | LC_ALL=C sort -u)
+# shellcheck disable=SC2016  # `$key` is literal text in the pattern, not an expansion
+WRITTEN=$(grep -oE '/\.[a-z-]+-\$key' "$ROOT/bin/fm-watch.sh" | sed 's#^/##; s#\$key$##' | LC_ALL=C sort -u)
+WRITTEN=$(printf '%s\n%s\n' "$WRITTEN" "$(grep -oE '/\.hb-surfaced-' "$ROOT/bin/fm-watch.sh" | sed 's#^/##' | LC_ALL=C sort -u)")
+while IFS= read -r FAMILY; do
+  [ -n "$FAMILY" ] || continue
+  printf '%s\n' "$KNOWN" | grep -qxF "$FAMILY" \
+    || fail "fm-watch.sh writes marker family '$FAMILY' but no fm-state-key-lib.sh list names it, so teardown leaks it"
+done <<EOF
+$WRITTEN
+EOF
+pass "every marker family fm-watch.sh writes is named by a fm-state-key-lib.sh list"
+
 echo "# fm-state-key.test.sh: all assertions passed"
