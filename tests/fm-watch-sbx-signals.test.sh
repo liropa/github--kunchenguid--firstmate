@@ -32,6 +32,11 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-sbx-signals)
 
 WATCH="$ROOT/bin/fm-watch.sh"
 
+# The marker-filename key the watcher reads with, so assertions name the same
+# files rather than re-rolling the transform.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$ROOT/bin/fm-state-key-lib.sh"
+
 watch_bg() {  # <state> <fakebin> <out>
   local state=$1 fakebin=$2 out=$3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -299,6 +304,36 @@ test_midtask_stop_marker_fires_named_alarm() {
     || fail "one mid-task stop should hold at ONE queued alarm: $(cat "$state/.wake-queue")"
 
   pass "a mid-task-stop marker raises one named check wake and is consumed"
+}
+
+test_midtask_stop_marker_is_not_read_for_a_colliding_id() {
+  # Two ids the superseded `tr '.' '_'` key fold collapsed into one marker
+  # name. The beacon must read the marker only for the secondmate it was
+  # written for: attributing it to the other one would name a healthy
+  # secondmate as stopped mid-task and consume the real one's alarm.
+  local dir state mount out pid
+  dir=$(make_case midtask-stop-collision); state="$dir/state"; out="$dir/watch.out"
+  mount="$dir/mount"
+  mkdir -p "$mount"
+  for id in a.b a_b; do
+    ln -s "$mount/$id.status" "$state/$id.status"
+    ln -s "$mount/$id.turn-ended" "$state/$id.turn-ended"
+  done
+  # Written for a.b only, under a.b's key.
+  printf 'the VM connection dropped while in-guest work was active\n' \
+    > "$state/.sbx-midtask-stop-$(fm_state_key_encode 'a.b')"
+
+  watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not alarm on the mid-task-stop marker: $(cat "$out")"
+  grep -F "sbx-midtask-stop:a.b" "$state/.wake-queue" >/dev/null \
+    || fail "the alarm should name a.b: $(cat "$state/.wake-queue" 2>/dev/null)"
+  ! grep -F "sbx-midtask-stop:a_b" "$state/.wake-queue" >/dev/null \
+    || fail "a.b's marker was misread as a_b's: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.sbx-midtask-stop-$(fm_state_key_encode 'a.b')" ] \
+    || fail "the surfaced marker should be consumed"
+
+  pass "a mid-task-stop marker alarms only for the id it was written for, not a fold-colliding neighbour"
 }
 
 test_inguest_activity_suppresses_stranding() {
@@ -636,6 +671,7 @@ test_mount_alarm_fires_once_and_rearms
 test_no_progress_turns_fire_stranding_alarm
 test_status_progress_resets_stranding_counter
 test_midtask_stop_marker_fires_named_alarm
+test_midtask_stop_marker_is_not_read_for_a_colliding_id
 test_inguest_activity_suppresses_stranding
 test_healthy_idle_secondmate_never_alarms
 test_recent_delivery_is_not_yet_stranding

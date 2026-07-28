@@ -33,6 +33,11 @@ set -u
 # shellcheck source=tests/sbx-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
+# The marker-filename key the adapter writes with, so assertions name the same
+# files the production code does rather than re-rolling the transform.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$ROOT/bin/fm-state-key-lib.sh"
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; exit 0; }
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -864,6 +869,31 @@ test_send_records_delivery_breadcrumb() {
   pass "send path: delivery records the beacon's content-free acknowledgement breadcrumb"
 }
 
+test_delivery_breadcrumb_is_not_shared_by_colliding_ids() {
+  # The marker key must separate two ids the superseded `tr '.' '_'` fold
+  # collapsed (bin/fm-state-key-lib.sh). Sharing one breadcrumb let a steer to
+  # one secondmate silence the other's unacknowledged-delivery alarm, and let
+  # either one's teardown delete the other's live beacon.
+  local w fb dotted under
+  w=$(new_sbx_world delivered-collision); fb=$(make_fake_sbx "$w")
+  : > "$w/sbx.log"
+  sbx_ls_json fm-a.b running > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-a.b "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "a steer to the dotted id should succeed"
+  sbx_ls_json fm-a_b running > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-a_b "steer"' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=0 \
+    || fail "a steer to the underscored id should succeed"
+
+  dotted="$w/state/.sbx-delivered-$(fm_state_key_encode 'a.b')"
+  under="$w/state/.sbx-delivered-$(fm_state_key_encode 'a_b')"
+  [ "$dotted" != "$under" ] || fail "the two ids still resolve to one breadcrumb path"
+  [ -f "$dotted" ] || fail "a.b's delivery breadcrumb is missing: $(ls -a "$w/state")"
+  [ -f "$under" ] || fail "a_b's delivery breadcrumb is missing: $(ls -a "$w/state")"
+  pass "send path: two ids the old fold collapsed publish separate delivery breadcrumbs"
+}
+
 test_delivery_breadcrumb_predates_guest_acknowledgement() {
   local w fb marker ack
   w=$(new_sbx_world delivered-before-ack); fb=$(make_fake_sbx "$w")
@@ -1619,9 +1649,13 @@ test_teardown_clears_beacon_markers() {
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
            .sbx-midtask-stop-domain .sbx-delivered-domain \
-           .sbx-delivery-pending-domain-123-456; do
+           .sbx-delivery-pending-domain.123.456; do
     : > "$w/home/state/$m"
   done
+  # A neighbour whose id merely starts with this one's: teardown's candidate
+  # glob is delimited by the `.` an encoded key can never contain, so it must
+  # not reach the neighbour's in-flight candidate.
+  : > "$w/home/state/.sbx-delivery-pending-domain-two.123.457"
   set +e
   out=$(run_teardown_sbx "$w" "$fb" "")
   rc=$?
@@ -1630,10 +1664,12 @@ test_teardown_clears_beacon_markers() {
   for m in .sbx-beat-te-domain .sbx-beat-status-domain .sbx-noprogress-domain \
            .sbx-stranded-alarmed-domain .sbx-mount-alarmed-domain \
            .sbx-midtask-stop-domain .sbx-delivered-domain \
-           .sbx-delivery-pending-domain-123-456; do
+           .sbx-delivery-pending-domain.123.456; do
     [ ! -e "$w/home/state/$m" ] || fail "teardown should remove the beacon marker $m"
   done
-  pass "teardown: the id's beat-beacon markers are removed with its state files"
+  [ -e "$w/home/state/.sbx-delivery-pending-domain-two.123.457" ] \
+    || fail "teardown of domain must not reach domain-two's in-flight delivery candidate"
+  pass "teardown: the id's beat-beacon markers are removed with its state files, and no neighbour id's are"
 }
 
 test_teardown_force_skips_guest_probe() {
@@ -1688,6 +1724,7 @@ test_submit_counts_full_history_when_window_scrolls
 test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
 test_send_records_delivery_breadcrumb
+test_delivery_breadcrumb_is_not_shared_by_colliding_ids
 test_delivery_breadcrumb_predates_guest_acknowledgement
 test_delivery_beacon_prepare_failure_refuses_before_send
 test_delivery_beacon_publish_failure_does_not_invite_resend

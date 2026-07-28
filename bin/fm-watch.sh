@@ -81,6 +81,11 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# The single owner of the key that names this watcher's per-task marker files
+# (.seen-* signatures and the sbx beat beacons), shared with the sbx adapter
+# that writes those beacons and the teardown that removes them.
+# shellcheck source=bin/fm-state-key-lib.sh
+. "$SCRIPT_DIR/fm-state-key-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -494,12 +499,16 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # line per changed file. .seen-* is updated only after the wake is either
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
+# The signature file is keyed by the WHOLE signal filename through the shared
+# reversible encoding (bin/fm-state-key-lib.sh), so two tasks can never share
+# one signature and re-signal each other every poll.
 scan_signals() {
-  local f sig sf
+  local f sig sf base
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
     sig=$(stat_sig "$f") || continue
-    sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
+    base=${f##*/}
+    sf="$STATE/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode "$base")"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
     fi
@@ -516,7 +525,7 @@ scan_sbx_beacon() {
   for te in "$STATE"/*.turn-ended; do
     [ -L "$te" ] || continue
     id=$(basename "$te" .turn-ended)
-    key=$(printf '%s' "$id" | tr '.' '_')
+    key=$(fm_state_key_encode "$id")
     tgt=$(readlink "$te") || continue
     mdir=$(dirname "$tgt")
     # One alarm per outage, durable across watcher restarts: the .sbx-mount-

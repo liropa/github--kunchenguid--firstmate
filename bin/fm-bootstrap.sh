@@ -11,6 +11,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "STATE_KEY_MIGRATION: <marker name left unmigrated>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>",
@@ -77,14 +78,15 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
-#          above; the TANGLE line switches to advisory-only wording with no
-#          checkout command. Used by
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          (PR-check migration, state-key migration, secondmate_sync,
+#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line above; the TANGLE line switches
+#          to advisory-only wording with no checkout command. Used by
 #          fm-session-start.sh's read-only path when the lock is refused, so no
-#          unverified session race-mutates PR-check artifacts, secondmate homes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          unverified session race-mutates PR-check artifacts, per-task marker
+#          names, secondmate homes, X-mode artifacts, project clones, or repair
+#          instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -883,6 +885,10 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  # Same locked boundary, and before supervision is armed: rename per-task
+  # marker files onto the reversible key encoding so the watcher, the sbx
+  # adapter, and teardown cannot read one task's beacon as another's.
+  "$SCRIPT_DIR/fm-state-key-migrate.sh" || true
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
