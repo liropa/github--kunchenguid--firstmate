@@ -13,6 +13,7 @@
 #          exit 1: another live firstmate session holds the lock
 #          exit 2: cannot identify this session's own harness process
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh owns      exit 0 only when this session owns the lock
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +21,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
-mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
@@ -89,6 +89,14 @@ me=$(harness_pid) || {
   echo "error: cannot identify this session's harness process (ancestry walk found none, and no FM_HARNESS_PID/CLAUDE_PID names a live harness)" >&2
   exit 2
 }
+if [ "${1:-}" = "owns" ]; then
+  [ -f "$LOCK" ] || exit 1
+  old=$(cat "$LOCK")
+  [ "$old" = "$me" ]
+  exit
+fi
+
+mkdir -p "$STATE"
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")
   if [ "$old" != "$me" ] && holder_alive "$old"; then

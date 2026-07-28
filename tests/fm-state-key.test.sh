@@ -192,6 +192,21 @@ assert_contains "$OUT" "a.b" "the report should name the candidate ids"
 assert_contains "$OUT" "a_b" "the report should name the candidate ids"
 pass "migration reports a legacy name that maps to more than one live id instead of picking one"
 
+STATE=$(new_state cross-scheme)
+: > "$STATE/a.b.meta"
+: > "$STATE/a_2eb.meta"
+printf 'ambiguous\n' > "$STATE/.sbx-delivered-a_2eb"
+OUT=$(migrate "$STATE")
+[ ! -e "$STATE/.sbx-delivered-a_2eb" ] \
+  || fail "a cross-scheme overlap remained visible as a.b's current marker"
+[ ! -e "$STATE/.sbx-delivered-$(fm_state_key_encode 'a_2eb')" ] \
+  || fail "a cross-scheme overlap was attributed to its legacy owner"
+[ "$(cat "$STATE/.sbx-delivered-a_2eb.state-key-unresolved")" = ambiguous ] \
+  || fail "a cross-scheme overlap was not preserved under an inert name"
+assert_contains "$OUT" "could be current for a.b or legacy for a_2eb" \
+  "the cross-scheme ambiguity was not reported"
+pass "migration makes a cross-scheme overlap invisible without attributing or deleting it"
+
 # --- migration: names it must not touch --------------------------------------
 
 STATE=$(new_state untouched)
@@ -218,6 +233,30 @@ OUT=$(migrate "$STATE")
 [ -e "$STATE/.sbx-delivered-a_b" ] || fail "the legacy marker should survive a refused rename"
 assert_contains "$OUT" "already exists" "the destination conflict was not reported"
 pass "migration refuses a rename that would land on an existing name and reports it"
+
+STATE=$(new_state raced-conflict)
+: > "$STATE/a.b.meta"
+printf 'legacy\n' > "$STATE/.sbx-delivered-a_b"
+FAKEBIN="$TMP_ROOT/raced-conflict/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=
+for argument in "$@"; do
+  destination=$argument
+done
+printf 'racer\n' > "$destination"
+exec /bin/mv "$@"
+SH
+chmod +x "$FAKEBIN/mv"
+OUT=$(PATH="$FAKEBIN:$PATH" migrate "$STATE")
+[ "$(cat "$STATE/.sbx-delivered-$(fm_state_key_encode 'a.b')")" = racer ] \
+  || fail "the sweep overwrote a destination created during the rename"
+[ "$(cat "$STATE/.sbx-delivered-a_b")" = legacy ] \
+  || fail "the legacy marker disappeared after a raced destination conflict"
+assert_contains "$OUT" "already exists" "the raced destination conflict was not reported"
+pass "migration atomically refuses a destination created during the rename"
 
 # --- migration: the signal-scan signatures -----------------------------------
 
@@ -259,5 +298,31 @@ STATE=$(new_state empty)
 OUT=$(migrate "$STATE")
 [ -z "$OUT" ] || fail "an empty state dir should be silent, printed: $OUT"
 pass "migration is a silent no-op for a home with no state yet"
+
+INVALID="$TMP_ROOT/invalid-state"
+printf 'not a directory\n' > "$INVALID"
+STATUS=0
+OUT=$(migrate "$INVALID") || STATUS=$?
+expect_code 1 "$STATUS" "migration must reject a state path that is a file"
+assert_contains "$OUT" "state path is not a directory" "the invalid state path was not explained"
+BROKEN="$TMP_ROOT/broken-state"
+ln -s "$TMP_ROOT/missing-state-target" "$BROKEN"
+STATUS=0
+OUT=$(migrate "$BROKEN") || STATUS=$?
+expect_code 1 "$STATUS" "migration must reject a broken state symlink"
+assert_contains "$OUT" "state path is not a directory" "the broken state symlink was not explained"
+pass "migration rejects existing unusable state paths"
+
+STATE=$(new_state unlocked-bootstrap)
+: > "$STATE/a.b.meta"
+: > "$STATE/.sbx-delivered-a_b"
+FM_HOME="${STATE%/state}" FM_STATE_OVERRIDE="$STATE" FM_PROJECTS_OVERRIDE="${STATE%/state}/projects" \
+  FM_CONFIG_OVERRIDE="${STATE%/state}/config" FM_DATA_OVERRIDE="${STATE%/state}/data" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+[ -e "$STATE/.sbx-delivered-a_b" ] \
+  || fail "standalone bootstrap migrated marker state without owning the session lock"
+[ ! -e "$STATE/.sbx-delivered-$(fm_state_key_encode 'a.b')" ] \
+  || fail "standalone bootstrap produced a current marker without owning the session lock"
+pass "standalone bootstrap cannot migrate marker state without the session lock"
 
 echo "# fm-state-key.test.sh: all assertions passed"

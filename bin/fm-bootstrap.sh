@@ -87,6 +87,8 @@
 #          unverified session race-mutates PR-check artifacts, per-task marker
 #          names, secondmate homes, X-mode artifacts, project clones, or repair
 #          instructions.
+#          State-key migration additionally verifies that the invoking session
+#          owns state/.lock, so standalone bootstrap cannot race supervision.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -885,10 +887,9 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
-  # Same locked boundary, and before supervision is armed: rename per-task
-  # marker files onto the reversible key encoding so the watcher, the sbx
-  # adapter, and teardown cannot read one task's beacon as another's.
-  "$SCRIPT_DIR/fm-state-key-migrate.sh" || true
+  if "$SCRIPT_DIR/fm-lock.sh" owns >/dev/null 2>&1; then
+    "$SCRIPT_DIR/fm-state-key-migrate.sh" || true
+  fi
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
