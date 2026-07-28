@@ -357,7 +357,8 @@ $ /bin/mv -- SRC DST; echo "exit=$?"
 exit=0
 ```
 
-The first `ln` created the link and the repeated command refused to replace it, confirming that the stock implementation both accepts `--` and supplies the atomic no-replace primitive the migration uses.
+These results disprove the earlier claim that stock macOS `ln`, `rm`, `mkdir`, and `rmdir` reject `--`.
+The terminators are correct guards against an operand path beginning with a hyphen, and the repeated `ln` refusal confirms the atomic no-replace primitive the migration uses.
 
 `tests/fm-state-key.test.sh` covers the `a.b` / `a_b` collision directly (it fails against the superseded fold), round-trip reversibility, the path-segment and length properties, migration idempotency across three consecutive runs, and the migration's refusal to resolve an ambiguous legacy name.
 `tests/fm-backend-sbx.test.sh` proves the producer half - two steers to fold-colliding ids publish separate `.sbx-delivered-` breadcrumbs - and that teardown of one id no longer reaches a neighbouring id's in-flight candidate.

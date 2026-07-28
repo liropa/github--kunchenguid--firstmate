@@ -45,9 +45,9 @@
 # invent an owner rather than resolve it; it resolves legacy names against the
 # ids the home can actually enumerate instead.
 #
-# fm_state_key_legacy reproduces the superseded fold. It exists only so the
-# migration has one owner for the old shape too, and no caller outside the
-# migration may use it to name a file.
+# fm_state_key_legacy reproduces the superseded fold. It exists so migration
+# can recognize old names and teardown can compare a current key with another
+# live owner's legacy key before cleanup. No caller may use it to name a file.
 #
 # Sourced by bin/fm-watch.sh, bin/fm-teardown.sh, bin/backends/sbx.sh,
 # bin/fm-state-key-migrate.sh, and the tests. No side effects on source.
@@ -121,8 +121,9 @@ fm_state_key_decode() {  # <key>
 }
 
 # fm_state_key_legacy <text>: print the SUPERSEDED marker key for <text> - every
-# `.` folded to `_`. Only bin/fm-state-key-migrate.sh may call this, and only to
-# recognize names written before the encoding above existed.
+# `.` folded to `_`. Only bin/fm-state-key-migrate.sh may use it to recognize
+# old names, and bin/fm-teardown.sh to compare ownership before cleanup; neither
+# may use it to name a file.
 fm_state_key_legacy() {  # <text>
   local text=${1-}
   printf '%s' "${text//./_}"
