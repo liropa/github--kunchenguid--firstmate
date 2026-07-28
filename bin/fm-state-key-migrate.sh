@@ -34,11 +34,11 @@
 # glob. A pre-migration leftover is inert debris, which is a better outcome than
 # a sweep that could delete a candidate a running send is about to promote.
 #
-# Runs at one well-defined safe point: the session-start-only
-# bin/fm-bootstrap.sh mutating sweep, while the session holds this home's
-# session lock and before supervision is armed. A watcher still running the
-# pre-update code can re-create a legacy name after the sweep; that is benign
-# and the next session start migrates it again.
+# Runs at one well-defined safe point: invoked directly by
+# bin/fm-session-start.sh while the session holds this home's session lock and
+# before supervision is armed. A watcher still running the pre-update code can
+# re-create a legacy name after the sweep; that is benign and the next session
+# start migrates it again.
 #
 # Usage: fm-state-key-migrate.sh [--state <dir>]
 #   Prints one STATE_KEY_MIGRATION: line per name it refused to resolve, one

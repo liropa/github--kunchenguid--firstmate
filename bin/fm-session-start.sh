@@ -82,10 +82,10 @@
 # truly needed.
 #
 # Usage: fm-session-start.sh
-#   Prints the full ordered digest to stdout and always exits 0: this is a
-#   reporting command, not a gate. A lock refusal is reported as a loud
-#   banner inline, never a silent failure or a non-zero exit that would make
-#   an agent skip the rest of the digest.
+#   Prints the full ordered digest to stdout and exits 0, including when lock
+#   refusal selects the read-only path. If the locked marker-key migration
+#   fails, prints the lock result, BOOTSTRAP heading, and migration diagnostic,
+#   then exits 1 before bootstrap, wake drain, or the remaining digest.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
