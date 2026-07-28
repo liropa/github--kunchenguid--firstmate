@@ -22,11 +22,12 @@
 # Errors run one way on purpose. Anything left under a legacy-only name is
 # invisible to the new-scheme consumer, so it behaves as absent: the delivery
 # breadcrumb goes quiet until the next steer republishes it, a signature marker
-# costs one duplicate wake, and the counters rebuild. Every one of those
-# self-heals within a cycle. Attributing a marker to the WRONG task does not: it
-# can raise a named alarm against a healthy secondmate and latch the alarmed
-# marker that suppresses the real one. Under-reporting beats misattribution
-# here, so a cross-scheme name must be moved aside or the sweep fails.
+# costs one duplicate wake, and the counters rebuild. Each affected mechanism
+# recovers on its next natural event. Attributing a marker to the WRONG task
+# does not: it can raise a named alarm against a healthy secondmate and latch
+# the alarmed marker that suppresses the real one. Under-reporting beats
+# misattribution here, so a cross-scheme name must be moved aside or the sweep
+# fails.
 #
 # The transient .sbx-delivery-pending- candidates are deliberately out of scope.
 # They are content-free, live only inside one in-flight send, and nothing reads
