@@ -42,7 +42,27 @@ make_fake_toolchain() {
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
-  exit 0
+  case "${FM_FAKE_GH_AUTH:-ok}" in
+    ok) exit 0 ;;
+    logged-out)
+      printf '%s\n' 'You are not logged into any GitHub hosts. To log in, run: gh auth login' >&2
+      exit 1 ;;
+    config-denied)
+      printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
+      printf '%s\n' 'failed to create root command: failed to read configuration: open /h/.config/gh/config.yml: operation not permitted' >&2
+      exit 1 ;;
+    keyring-denied)
+      printf '%s\n' 'failed to migrate config: cowardly refusing to continue with multi account migration: could not migrate oauth token for "github.com": exit status 161' >&2
+      exit 1 ;;
+    invalid-token)
+      printf '%s\n' 'github.com' >&2
+      printf '%s\n' '  X Failed to log in to github.com using token (GH_TOKEN)' >&2
+      printf '%s\n' '  - The token in GH_TOKEN is invalid.' >&2
+      exit 1 ;;
+    *)
+      printf '%s\n' 'some wording no version of firstmate has ever seen' >&2
+      exit 1 ;;
+  esac
 fi
 exit 0
 SH
@@ -118,6 +138,28 @@ add_real_jq() {
 exec '$real_jq' "\$@"
 SH
   chmod +x "$fakebin/jq"
+}
+
+# A git that answers `credential fill` from FM_FAKE_GIT_CREDENTIAL and delegates
+# every other subcommand to the real binary, so bootstrap's tangle and fleet-sync
+# git calls keep working while the GitHub-credential probe stays hermetic.
+add_credential_git() {
+  local fakebin=$1 real_git
+  real_git=$(command -v git 2>/dev/null) || fail "git is required for the GitHub auth probe tests"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = credential ] && [ "\${2:-}" = fill ]; then
+  cat >/dev/null
+  if [ "\${FM_FAKE_GIT_CREDENTIAL:-yes}" = yes ]; then
+    printf 'protocol=https\nhost=github.com\nusername=tester\npassword=fake-token\n'
+    exit 0
+  fi
+  printf '%s\n' 'fatal: could not read Username for https://github.com: terminal prompts disabled' >&2
+  exit 128
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
 }
 
 make_fake_fleet_sync_root() {
@@ -810,6 +852,53 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# `gh auth status` exits non-zero both when nobody is signed in and when gh cannot
+# read its own credential store, and the two demand opposite responses: the first
+# must block dispatch, the second must not, because signing in again neither fixes
+# nor is needed for an unreadable store. Missing a real sign-in problem is the
+# worse failure, so the rows also pin the cases that must keep reporting: an
+# unreadable store that yields no GitHub credential at all, an invalid token
+# (which never says "not logged in"), and wording this probe does not recognise.
+test_gh_auth_probe_separates_sign_out_from_unreadable_store() {
+  local label gh_auth cred verbose mode expect notcontains case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label gh_auth cred verbose mode expect notcontains; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/ghauth-$n"
+    mkdir -p "$case_dir/home"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_credential_git "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AUTH="$gh_auth" FM_FAKE_GIT_CREDENTIAL="$cred" \
+      FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+      grep)
+        printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)"
+        if [ -n "$notcontains" ]; then
+          printf '%s\n' "$out" | grep -F "$notcontains" >/dev/null && fail "$label: unexpected '$notcontains' in: $out"
+        fi
+        ;;
+      notcontains)
+        printf '%s\n' "$out" | grep -F "$expect" >/dev/null && fail "$label: unexpected '$expect' in: $out"
+        : ;;
+    esac
+  done <<'ROWS'
+a readable store with valid credentials stays silent^ok^yes^0^exact^^
+a signed-out session still blocks dispatch^logged-out^yes^0^exact^NEEDS_GH_AUTH^
+an unreadable config store is not a sign-out^config-denied^yes^0^notcontains^NEEDS_GH_AUTH^
+an unreadable keyring is not a sign-out^keyring-denied^yes^0^notcontains^NEEDS_GH_AUTH^
+an unreadable store is a no-action fact when asked for facts^config-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its credential store in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
+an unreadable store with no usable credential blocks dispatch^config-denied^no^0^exact^NEEDS_GH_AUTH^
+a signed-out session blocks dispatch even with a git credential present^logged-out^yes^1^grep^NEEDS_GH_AUTH^
+an invalid token blocks dispatch even with a git credential present^invalid-token^yes^0^exact^NEEDS_GH_AUTH^
+an unrecognised gh failure blocks dispatch rather than passing silently^mystery-failure^yes^0^exact^NEEDS_GH_AUTH^
+ROWS
+  pass "bootstrap separates a GitHub sign-out from an unreadable credential store"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
@@ -832,3 +921,4 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_gh_auth_probe_separates_sign_out_from_unreadable_store

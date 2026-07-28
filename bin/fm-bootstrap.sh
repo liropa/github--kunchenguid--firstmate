@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "BOOTSTRAP_INFO: gh cannot read its credential store ..." (verbose only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -622,6 +623,75 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+# macOS ships no `timeout`, so the perl alarm is the portable bound; same shape
+# as fm-fleet-snapshot.sh's run_timed. No bound available means the caller sees
+# the timeout code and decides, rather than this running unbounded.
+gh_auth_run_bounded() {  # <seconds> <command...>
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 124
+  fi
+}
+
+# Does a GitHub credential resolve WITHOUT gh's store? git keeps its own
+# credential, and that is what actually authorizes fetch and push, so a usable
+# one proves this session is authenticated even when gh cannot read its config.
+# Local only, never a network call, and bounded because a credential helper
+# waiting on a locked keychain would otherwise wedge session start. The
+# credential itself is only matched, never printed.
+github_credential_resolves() {
+  printf 'protocol=https\nhost=github.com\n\n' \
+    | gh_auth_run_bounded 5 env GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null \
+    | grep -q '^password='
+}
+
+# Did gh fail because it could not reach its OWN store, rather than because the
+# account is not usable? gh loads its config before dispatching any subcommand,
+# so a denied config read or an unreachable keyring aborts during startup with
+# one of these, and never reaches a per-host verdict. Matched narrowly on
+# purpose: an unrecognized failure must fall through to the sign-in report.
+gh_auth_store_unreadable() {  # <gh auth status output>
+  case "$1" in
+    *'failed to read configuration'*|*'failed to load config'*|\
+    *'failed to migrate config'*|*'failed to create root command'*) return 0 ;;
+  esac
+  return 1
+}
+
+# `gh auth status` exits non-zero for two unrelated reasons, and collapsing them
+# into NEEDS_GH_AUTH made every OS-sandboxed session report a sign-in problem it
+# never had. The two cannot be told apart by exit code, and `gh api user` cannot
+# tell them apart either: the store load happens before any subcommand runs, so
+# it fails identically. They are separated here by gh's own startup-failure
+# wording, and a store failure is only ever downgraded when a GitHub credential
+# independently proves the session can still authenticate.
+#
+# The match is deliberately one-sided. Anything unrecognized - an expired or
+# revoked token, a scope failure, a future gh error - reports NEEDS_GH_AUTH,
+# because a missed sign-in problem would let firstmate dispatch work that cannot
+# push, while a false alarm only costs a check. That keeps a wording change in a
+# future gh version degrading toward the noisy side rather than the unsafe one.
+gh_auth_diagnostic() {
+  local report rc
+  report=$(gh auth status 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if gh_auth_store_unreadable "$report" && github_credential_resolves; then
+    if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      echo "BOOTSTRAP_INFO: gh cannot read its credential store in this session; GitHub credentials still resolve, so authentication is fine"
+    fi
+    return 0
+  fi
+  echo "NEEDS_GH_AUTH"
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -907,7 +977,7 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_auth_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
