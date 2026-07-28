@@ -256,7 +256,7 @@ nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
     timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
     gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; alarm 0; my $signal = $status & 127; exit($signal ? 128 + $signal : $status >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
     # No bounding tool: the call is deliberately NOT made. That is a clean
     # "nothing to report", not an unreadable read, so it stays exit 0.
     *)        true ;;
@@ -381,7 +381,7 @@ nm_ci_checks_state() {
   # fetch returns a TRUNCATED tail, whose last recognized marker can be an
   # earlier green one with the later red marker simply never written - which
   # would read a still-failing run as checks-green done. Discard it.
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || { printf 'unknown'; return; }
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || { printf 'unreadable'; return; }
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
@@ -427,7 +427,7 @@ nm_runs_status_for_branch() {  # <branch>
   # An unreadable list is not an empty list: a truncated one can be missing its
   # newest rows, which is precisely how an older superseded run gets read as the
   # current one. No answer beats a wrong one.
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT") || return 0
+  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT") || return
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -544,7 +544,15 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # immediately with a second bounded call would just double the wait
       # for no better answer.
       COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      nm_rc=$?
+      if [ "$nm_rc" -ne 0 ]; then
+        COARSE_STATUS=""
+        NM_UNREADABLE=1
+        case "$nm_rc" in
+          124) NM_UNREADABLE_WHY="runs list timed out after ${NM_TIMEOUT}s" ;;
+          *)   NM_UNREADABLE_WHY="no-mistakes runs exit $nm_rc" ;;
+        esac
+      elif [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
@@ -647,7 +655,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != unreadable ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

@@ -1096,6 +1096,28 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+test_perl_bound_preserves_sigkill_exit_status() {
+  reset_fakes
+  local d toolbin out
+  d=$(new_case perl-sigkill)
+  make_repo_on_branch "$d/wt" fm/feat-perl-sigkill
+  make_fakebin "$d" >/dev/null
+  cat > "$d/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+kill -KILL "$$"
+SH
+  chmod +x "$d/fakebin/no-mistakes"
+  toolbin=$(make_no_timeout_toolbin "$d")
+  fm_write_meta "$d/state/perl-sigkill.meta" "window=fm:fm-perl-sigkill" "worktree=$d/wt" "kind=ship"
+  printf 'failed: stale failure\n' > "$d/state/perl-sigkill.status"
+  FM_FAKE_BUSY=0
+  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" perl-sigkill)
+  assert_contains "$out" "state: unknown" "a SIGKILLed no-mistakes read is unknown"
+  assert_contains "$out" "no-mistakes exit 137" "the perl bound preserves signal exit status"
+  assert_not_contains "$out" "source: status-log" "a SIGKILLed read does not reuse stale status"
+  pass "perl bound preserves SIGKILL as exit 137"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1518,6 +1540,27 @@ test_cli_error_status_read_is_unknown_not_failed() {
   pass "CLI-error status read reports unknown, never failed"
 }
 
+test_unreadable_runs_list_is_unknown_not_failed() {
+  reset_fakes
+  local d out
+  d=$(new_case unreadable-runs-list)
+  make_repo_on_branch "$d/wt" fm/feat-runs-error
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/runserr.meta" "window=fm:fm-runserr" "worktree=$d/wt" "kind=ship"
+  printf 'failed: an earlier attempt failed\n' > "$d/state/runserr.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST='error: "runs unavailable"'
+  FM_FAKE_RUNS_RC=1
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" runserr)
+  assert_contains "$out" "state: unknown" "an unreadable runs list is unknown"
+  assert_contains "$out" "source: none" "an unreadable runs list has no state source"
+  assert_contains "$out" "no-mistakes runs exit 1" "the runs-list failure remains diagnostic"
+  assert_not_contains "$out" "state: failed" "an unreadable runs list must not reuse stale failure"
+  assert_not_contains "$out" "source: status-log" "an unreadable runs list suppresses status-log fallback"
+  pass "unreadable runs list reports unknown, never failed"
+}
+
 # Preserved behavior: a genuinely failed or cancelled run still reports failed
 # through BOTH the full and the coarse path. The fix narrows attribution; it
 # must not blunt the verdict when attribution is sound.
@@ -1578,12 +1621,15 @@ test_unreadable_ci_log_does_not_read_as_green() {
   make_repo_on_branch "$d/wt" fm/feat-cilogerr
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/cilogerr.meta" "window=fm:fm-cilogerr" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/cilogerr.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cilogerr)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   FM_FAKE_CI_LOGS_RC=1
   out=$(run_crew_state "$d" cilogerr)
   assert_contains "$out" "state: working" "an unreadable ci log leaves the run working"
+  assert_contains "$out" "source: run-step" "an unreadable ci log keeps run-step authority"
   assert_not_contains "$out" "state: done" "an unreadable ci log must not read as checks-green done"
+  assert_not_contains "$out" "source: status-log" "an unreadable ci log must not republish historical readiness"
   assert_not_contains "$out" "checks green" "an unreadable ci log must not claim checks green"
   pass "unreadable ci log read does not resolve to checks-green done"
 }
@@ -1625,6 +1671,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_perl_bound_preserves_sigkill_exit_status
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
@@ -1644,6 +1691,7 @@ test_timed_out_status_read_is_unknown_not_failed
 test_timed_out_status_read_with_busy_pane_stays_working
 test_truncated_status_read_is_unknown_not_failed
 test_cli_error_status_read_is_unknown_not_failed
+test_unreadable_runs_list_is_unknown_not_failed
 test_terminal_cancelled
 test_coarse_genuine_failed_still_reports_failed
 test_coarse_genuine_cancelled_still_reports_failed
