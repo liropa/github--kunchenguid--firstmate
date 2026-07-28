@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Rename this home's state/ marker files from the superseded `tr '.' '_'` key
-# fold onto the reversible encoding bin/fm-state-key-lib.sh owns.
+# Rename this home's task-id and signal-filename state/ marker files from the
+# superseded `tr '.' '_'` key fold onto the reversible encoding
+# bin/fm-state-key-lib.sh owns.
+#
+# Window/target-keyed families deliberately have no migration sweep.
+# fm_state_watch_target_prefixes in bin/fm-state-key-lib.sh owns that rationale.
 #
 # The markers are live beacon state - the sbx beat-beacon family and the signal
 # scan's .seen- signatures - so this sweep never deletes and never guesses:
