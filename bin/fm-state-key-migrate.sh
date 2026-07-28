@@ -11,8 +11,10 @@
 #     that resolves to more than one live owner is REPORTED and left untouched;
 #     the sweep never picks one.
 #   - A name already in the current scheme - some live owner encodes to it - is
-#     left alone, which is what makes repeated runs a no-op. A task id that is a
-#     bare slug encodes to itself, so most homes have nothing to rename at all.
+#     left alone unless a different live owner also maps to it under the legacy
+#     scheme. Such a cross-scheme overlap is moved to a dot-suffixed inert name,
+#     reported, and attributed to neither owner. A task id that is a bare slug
+#     encodes to itself, so most homes have nothing to rename at all.
 #   - A name with no live owner is dead state from a torn-down task. It is left
 #     in place silently rather than deleted; nothing reads it.
 #   - A rename that would land on an existing name is reported, not forced.
@@ -75,14 +77,49 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Nothing to migrate before this home has any state at all.
-[ -d "$STATE" ] || exit 0
+if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  exit 0
+fi
+if [ ! -d "$STATE" ]; then
+  echo "error: state path is not a directory: $STATE" >&2
+  exit 1
+fi
 
 TAB=$'\t'
 RENAMED=0
 
 report() {  # <detail>
   echo "STATE_KEY_MIGRATION: $1"
+}
+
+move_no_clobber() {  # <source> <destination>
+  local source=$1 destination=$2
+  mv -n -- "$source" "$destination" || return 2
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    return 1
+  fi
+  [ -e "$destination" ] || [ -L "$destination" ] || return 2
+}
+
+move_aside() {  # <path>
+  local source=$1 destination="${1}.state-key-unresolved" suffix=0 rc
+  while :; do
+    rc=0
+    move_no_clobber "$source" "$destination" || rc=$?
+    case $rc in
+      0)
+        printf '%s\n' "${destination##*/}"
+        return 0
+        ;;
+      1)
+        suffix=$(( suffix + 1 ))
+        destination="${source}.state-key-unresolved.$suffix"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
 }
 
 # --- the namespaces this home can enumerate ---------------------------------
@@ -154,7 +191,7 @@ EOF
 
 migrate_family() {  # <prefix> <current-table> <legacy-table>
   local prefix=$1 current=$2 legacy=$3
-  local f base key owners owner count joined new
+  local f base key current_owners current_owner owners owner count joined new moved rc
 
   for f in "$STATE/$prefix"*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -162,12 +199,30 @@ migrate_family() {  # <prefix> <current-table> <legacy-table>
     key=${base#"$prefix"}
     [ -n "$key" ] || continue
 
-    # Already current: a live owner encodes to exactly this key. This is the arm
-    # that makes repeated runs a no-op, and the reason a bare-slug id - which
-    # encodes to itself - is never touched.
-    [ -z "$(table_owners "$current" "$key")" ] || continue
-
+    current_owners=$(table_owners "$current" "$key")
     owners=$(table_owners "$legacy" "$key")
+    if [ -n "$current_owners" ]; then
+      current_owner=${current_owners%%$'\n'*}
+      count=0
+      joined=
+      while IFS= read -r owner; do
+        [ -n "$owner" ] || continue
+        [ "$owner" = "$current_owner" ] && continue
+        count=$(( count + 1 ))
+        joined=${joined:+$joined, }$owner
+      done <<EOF
+$owners
+EOF
+      [ "$count" -gt 0 ] || continue
+
+      if moved=$(move_aside "$f"); then
+        report "state/$base could be current for $current_owner or legacy for $joined; moved aside as state/$moved"
+        continue
+      fi
+      report "state/$base could be current for $current_owner or legacy for $joined and could not be moved aside"
+      continue
+    fi
+
     # No live owner: dead state from a torn-down task, left alone.
     [ -n "$owners" ] || continue
 
@@ -192,11 +247,19 @@ EOF
       report "state/$base belongs to $owner but state/$new already exists; left untouched"
       continue
     fi
-    if ! mv -- "$f" "$STATE/$new"; then
-      report "state/$base could not be renamed to state/$new; left untouched"
-      continue
-    fi
-    RENAMED=$(( RENAMED + 1 ))
+    rc=0
+    move_no_clobber "$f" "$STATE/$new" || rc=$?
+    case $rc in
+      0)
+        RENAMED=$(( RENAMED + 1 ))
+        ;;
+      1)
+        report "state/$base belongs to $owner but state/$new already exists; left untouched"
+        ;;
+      *)
+        report "state/$base could not be renamed to state/$new; left untouched"
+        ;;
+    esac
   done
 }
 

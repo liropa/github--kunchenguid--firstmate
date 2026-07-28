@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
+#     skipped (including bootstrap's six mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
@@ -146,9 +146,31 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
+stable=${FM_FAKE_HARNESS_PID:-}
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = "-p" ] && pid=$argument
+  previous=$argument
+done
 case "$*" in
-  *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
-  *"args="*) printf '%s\n' "$harness"; exit 0 ;;
+  *"comm="*)
+    if [ -z "$stable" ] || [ "$pid" = "$stable" ]; then
+      printf '/usr/local/bin/%s\n' "$harness"
+    else
+      printf '/bin/zsh\n'
+    fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ -z "$stable" ] || [ "$pid" = "$stable" ]; then
+      printf '%s\n' "$harness"
+    else
+      printf 'zsh\n'
+    fi
+    exit 0
+    ;;
+  *"ppid="*) [ -n "$stable" ] && { printf '%s\n' "$stable"; exit 0; } ;;
 esac
 exit 1
 SH
@@ -261,7 +283,7 @@ run_session_start() {
   local home=$1 root=$2 path=$3
   shift 3
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CLAUDE_PID -u FM_HARNESS_PID \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$@" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID="$$" PATH="$path" "$@" \
     "$SESSION_START"
 }
 
@@ -773,6 +795,8 @@ EOF
   rm -f "$fakebin/node"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
+  : > "$home/state/a.b.meta"
+  printf 'legacy marker\n' > "$home/state/.sbx-delivered-a_b"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -784,6 +808,8 @@ EOF
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
+  [ -e "$home/state/.sbx-delivered-a_2eb" ] || fail "locked session start did not run marker-key migration"
+  [ ! -e "$home/state/.sbx-delivered-a_b" ] || fail "locked session start left the legacy marker name behind"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
