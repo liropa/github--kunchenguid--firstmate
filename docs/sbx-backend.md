@@ -307,7 +307,9 @@ Every watcher cycle sweeps the `state/*.turn-ended` **symlinks** (only bridge-ba
   The delivery breadcrumb is host-written in the primary's `state/`, so a guest can neither forge nor suppress it, and a hostile guest touching the mount's `<id>.guest-active` forever only suppresses its own stranding alarm - the same self-harm class as deleting its own provisioning links.
   An sbx secondmate with no outstanding delivery is silent by construction: an empty queue and a stopped VM are its healthy resting state, never a fault.
 
-Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`, `.sbx-delivered-`, plus transient `.sbx-delivery-pending-` candidates), so counters survive the actionable exit each turn-end causes; teardown removes them with the id's other state files (a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm, and a leftover delivery marker would raise one for a delivery the replacement never received).
+Tracking state is per-id marker files in the primary's `state/` (`.sbx-beat-te-`, `.sbx-beat-status-`, `.sbx-noprogress-`, `.sbx-stranded-alarmed-`, `.sbx-mount-alarmed-`, `.sbx-midtask-stop-`, `.sbx-delivered-`, plus transient `.sbx-delivery-pending-` candidates), so counters survive the actionable exit each turn-end causes.
+Teardown removes the transient candidates and, when the current key cannot also be another live task's legacy key, the durable markers with the id's other state files.
+An ambiguous durable marker is left untouched rather than risking another task's live beacon; otherwise a leftover alarmed marker would suppress a re-provisioned same-id secondmate's alarm, and a leftover delivery marker would raise one for a delivery the replacement never received.
 
 ### Marker naming (`bin/fm-state-key-lib.sh`)
 
