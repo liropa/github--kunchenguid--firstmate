@@ -1301,7 +1301,6 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
@@ -1349,6 +1348,7 @@ for _signal_name in "$ID.status" "$ID.turn-ended"; do
   rm -f "$STATE/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode "$_signal_name")"
 done
 if [ -n "$T" ] && [ "$_target_ambiguous" -eq 0 ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
   remove_marker_family "$STATE" "$_target_key" < <(fm_state_watch_target_prefixes)
 fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

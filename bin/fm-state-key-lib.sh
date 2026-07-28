@@ -216,6 +216,15 @@ fm_state_watch_task_prefixes() {
 EOF
 }
 
+# fm_state_watch_marker_prefixes: every durable encoded-key marker family
+# written or consumed by bin/fm-watch.sh and removed by bin/fm-teardown.sh.
+fm_state_watch_marker_prefixes() {
+  fm_state_sbx_marker_prefixes
+  fm_state_watch_target_prefixes
+  fm_state_watch_task_prefixes
+  printf '%s\n' "$FM_STATE_SEEN_PREFIX"
+}
+
 # Transient delivery candidate: FM_STATE_SBX_PENDING_PREFIX<key>.<pid>.<random>.
 # The `.` delimiter is load-bearing - an encoded key never contains one, so
 # teardown's "<key>." glob matches this task's candidates and no others.
