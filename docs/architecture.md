@@ -25,10 +25,10 @@ Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed 
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
-The script header owns the exact run-head ancestry rules.
+The script header owns the exact run-head ancestry rules and the distinction between a clean no-match and an unreadable run query.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
-Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
+After a clean read finds no matching run, it falls back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; the script header owns the stricter fallback used when the run query is unreadable.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the rendered busy signature before deciding the crew is not working.
