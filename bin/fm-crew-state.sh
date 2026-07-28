@@ -27,7 +27,10 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. Only the NEWEST row for the
+#      branch is ever a candidate: if it fails that code-identity check there is
+#      no attributable run at all, and an older row is by definition superseded
+#      by it, so rejection stops the search instead of walking further back.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -35,15 +38,24 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. UNREADABLE run status (the bounded call timed out, crashed, or the CLI
+#      errored - any nonzero exit) is `unknown`, never a state. Its output is
+#      discarded rather than parsed, the coarse fallback is skipped, and the
+#      status log is not consulted; only the live pane may still answer. This is
+#      a DIFFERENT fact from a clean read that simply has no run for this crew,
+#      which exits 0 and continues to step 5. Conflating the two is what let an
+#      unreadable read degrade into a `failed` verdict. Firstmate's correct
+#      reaction to `unknown` is to re-read (the next heartbeat re-runs this),
+#      never to tear down or re-dispatch.
+#   4. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -217,7 +229,24 @@ strip_quotes() {
   trim "$s"
 }
 
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
+# Bounded no-mistakes call in the worktree; stdout only. Never aborts the script
+# (there is no `set -e`), but it DOES propagate the command's own exit status, so
+# callers can tell an unreadable read from a real answer.
+#
+# Every branch used to end `2>/dev/null || true`, which made a timeout (124), a
+# crash, and a genuine empty answer indistinguishable - the root classification
+# bug this reader was built to avoid. Both failure shapes carry a payload that
+# parses as something: a `timeout`-killed call leaves PARTIAL TOON on stdout
+# (enough for `branch:` but not `head:`), and a CLI error leaves an
+# `error: "..."` line (verified on the installed v1.40.2: `axi status --run
+# <missing>` exits 1 with that payload on STDOUT). Either one reads as
+# "answered, but attribution missed" and falls into the coarse runs-list
+# fallback, which then reports whatever historical run it can bind - including a
+# superseded failed one. Exit status is the only thing that separates them.
+#
+# The benign no-run case is NOT an error: a branch with no run of its own still
+# exits 0, answering with some other branch's run (verified against the same
+# binary, and the behavior nm_runs_status_for_branch exists to correct).
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
@@ -225,9 +254,11 @@ elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    # No bounding tool: the call is deliberately NOT made. That is a clean
+    # "nothing to report", not an unreadable read, so it stays exit 0.
     *)        true ;;
   esac
 }
@@ -346,7 +377,11 @@ nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
   [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  # Same unreadable-is-not-an-answer rule as the status read: a timed-out log
+  # fetch returns a TRUNCATED tail, whose last recognized marker can be an
+  # earlier green one with the later red marker simply never written - which
+  # would read a still-failing run as checks-green done. Discard it.
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || { printf 'unknown'; return; }
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
@@ -389,7 +424,10 @@ nm_ci_checks_state() {
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+  # An unreadable list is not an empty list: a truncated one can be missing its
+  # newest rows, which is precisely how an older superseded run gets read as the
+  # current one. No answer beats a wrong one.
+  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT") || return 0
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -402,11 +440,17 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status. Rejection is TERMINAL, not a
+      # `continue`: rows are newest-first, so the first row for this branch is
+      # the only live candidate and every row behind it is strictly more
+      # superseded. Walking on after a rejected row is what attributed an
+      # earlier FAILED attempt to a healthy run - the newest row was rejected
+      # for the ordinary reason (its recorded head is an ancestor of the
+      # worktree tip, e.g. after the pipeline's own rebase step or a later
+      # commit), the loop kept scanning, and the older failed row still bound
+      # to HEAD. That surfaced `failed` for a run that was mid-lint and green,
+      # which reads to firstmate as authority to tear the work down.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi
@@ -462,11 +506,32 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# 1 when the bounded `axi status` read did not complete: timeout, crash, or CLI
+# error. Held separately from "no run for this crew" because the two demand
+# opposite handling - an absent run means read the pane/log instead, while an
+# unreadable one means we learned NOTHING about this crew's run and must not
+# substitute a historical record for it (header, step 3).
+NM_UNREADABLE=0
+NM_UNREADABLE_WHY=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
+  nm_rc=$?
+  if [ "$nm_rc" -ne 0 ]; then
+    # Discard the payload unparsed. Partial TOON and an `error: "..."` line both
+    # LOOK like an answer whose attribution missed, which would drop straight
+    # into the coarse fallback below and bind some historical run.
+    RUN_OUT=""
+    NM_UNREADABLE=1
+    # 124 is the bound firing, from `timeout`/`gtimeout` and from the perl
+    # fallback alike. Anything else reports its own code rather than being
+    # guessed at: the reason is diagnostic only, never part of the verdict.
+    case "$nm_rc" in
+      124) NM_UNREADABLE_WHY="timed out after ${NM_TIMEOUT}s" ;;
+      *)   NM_UNREADABLE_WHY="no-mistakes exit $nm_rc" ;;
+    esac
+  elif [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
@@ -617,6 +682,16 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
+fi
+
+# An unreadable run status stops here at `unknown` (header, step 3). The pane
+# above was still allowed to answer because it is an INDEPENDENT live signal;
+# the status log below is a historical event record, and standing it in for a
+# run we could not read is the second way this reader produced a false `failed`
+# - a superseded `failed:` event republished as current state while the run it
+# belonged to was long since resolved.
+if [ "$NM_UNREADABLE" = 1 ]; then
+  emit unknown none "run status unreadable: $NM_UNREADABLE_WHY"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
