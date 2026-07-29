@@ -640,7 +640,7 @@ gh_auth_run_bounded() {  # <seconds> <command...>
   fi
 }
 
-# Does a GitHub credential resolve WITHOUT gh's store? git keeps its own
+# Does a GitHub credential resolve independently of gh? git keeps its own
 # credential, and that is what actually authorizes fetch and push, so a usable
 # one proves this session is authenticated even when gh cannot read its config.
 # Local only, never a network call, and bounded because a credential helper
@@ -652,12 +652,12 @@ github_credential_resolves() {
     | grep -q '^password='
 }
 
-# Did gh fail because it could not reach its OWN store, rather than because the
-# account is not usable? gh loads its config before dispatching any subcommand,
-# so a denied config read aborts during startup with one of these, and never
-# reaches a per-host verdict. Matched narrowly on purpose: an unrecognized
-# failure must fall through to the sign-in report.
-gh_auth_store_unreadable() {  # <gh auth status output>
+# Did gh fail because it could not read its configuration, rather than because
+# the account is not usable? gh loads its config before dispatching any
+# subcommand, so a denied config read aborts during startup with one of these,
+# and never reaches a per-host verdict. Matched narrowly on purpose: an
+# unrecognized failure must fall through to the sign-in report.
+gh_auth_config_unreadable() {  # <gh auth status output>
   case "$1" in
     *'failed to read configuration'*|*'failed to load config'*) return 0 ;;
   esac
@@ -667,10 +667,10 @@ gh_auth_store_unreadable() {  # <gh auth status output>
 # `gh auth status` exits non-zero for two unrelated reasons, and collapsing them
 # into NEEDS_GH_AUTH made every OS-sandboxed session report a sign-in problem it
 # never had. The two cannot be told apart by exit code, and `gh api user` cannot
-# tell them apart either: the store load happens before any subcommand runs, so
+# tell them apart either: the config load happens before any subcommand runs, so
 # it fails identically. They are separated here by gh's own startup-failure
-# wording, and a store failure is only ever downgraded when a GitHub credential
-# independently proves the session can still authenticate.
+# wording, and a recognized config-read failure is only ever downgraded when a
+# GitHub credential independently proves the session can still authenticate.
 #
 # The match is deliberately one-sided. Anything unrecognized - an expired or
 # revoked token, a scope failure, a future gh error - reports NEEDS_GH_AUTH,
@@ -682,7 +682,7 @@ gh_auth_diagnostic() {
   report=$(gh auth status 2>&1)
   rc=$?
   [ "$rc" -eq 0 ] && return 0
-  if gh_auth_store_unreadable "$report" && github_credential_resolves; then
+  if gh_auth_config_unreadable "$report" && github_credential_resolves; then
     if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine"
     fi
