@@ -630,11 +630,11 @@ gh_auth_run_bounded() {  # <seconds> <command...>
   local seconds=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
+    timeout --kill-after=1 "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
+    gtimeout --kill-after=1 "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; alarm 0; my $signal = $status & 127; exit($signal ? 128 + $signal : $status >> 8)' "$seconds" "$@"
   else
     return 124
   fi
@@ -649,7 +649,7 @@ gh_auth_run_bounded() {  # <seconds> <command...>
 github_credential_resolves() {
   printf 'protocol=https\nhost=github.com\n\n' \
     | gh_auth_run_bounded 5 env GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null \
-    | grep -q '^password='
+    | grep -q '^password=.'
 }
 
 # Did gh fail because it could not read its configuration, rather than because
@@ -682,7 +682,7 @@ gh_auth_diagnostic() {
   report=$(gh_auth_run_bounded 5 gh auth status 2>&1)
   rc=$?
   [ "$rc" -eq 0 ] && return 0
-  if [ "$rc" -eq 124 ]; then
+  if [ "$rc" -eq 124 ] || [ "$rc" -ge 128 ]; then
     echo "NEEDS_GH_AUTH"
     return 0
   fi
