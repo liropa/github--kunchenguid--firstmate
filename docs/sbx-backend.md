@@ -120,7 +120,7 @@ Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon
 4. Runs guest-home provisioning: read-through symlinks for inherited local material and markers as described in "Guest-home provisioning" below, plus the credential-placeholder shell profile snippet described in "Guest shell-profile env" below.
 5. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
-6. For a codex harness, seeds the guest's `~/.codex/config.toml` project-trust entry for the home (idempotent), so the directory-trust dialog never parks the launch; the launch command itself carries `--dangerously-bypass-hook-trust` for the hooks gate.
+6. Seeds harness-specific trust before launch: a claude harness gets the fail-soft gate-worktree-root seed owned by "Guest claude gate trust" below, while a codex harness gets the guest home's project-trust entry and carries `--dangerously-bypass-hook-trust` for its separate hooks gate.
 7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend).
 8. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
@@ -199,9 +199,11 @@ A gate worktree is its own git root, so the ancestor grant clears the dialog whi
 The narrow grant is thus strictly weaker than "trust the gate worktree", not merely narrower than "trust everything".
 
 Merge, not replace: `~/.claude.json` is shared with the secondmate's own claude sessions and holds its credentials and accepted-workspace history.
-An entry already marked trusted is left byte-for-byte alone, so respawns and resurrections over a kept sandbox converge, matching the codex trust seed's grep-then-append.
+An entry already marked trusted makes a later spawn a byte-for-byte no-op, and a successful grant persists on guest disk across ordinary VM stop/resurrection.
+Resurrection does not rerun a previously skipped or removed seed; a full respawn does.
 A guest without `python3`, an existing config that does not parse, or a parseable config whose `projects` map or gate-worktree entry is not an object prints a stderr diagnostic and continues.
 Malformed state is left byte-for-byte untouched: not seeding costs one recoverable park on the first validation run, while failing the spawn or overwriting claude's own state costs the whole task.
+When a write is needed, the seed uses an exclusive same-directory temporary file and rename, creates a missing config with mode 0600, and restores an existing config's mode after replacement.
 The seed hard-codes no-mistakes' `worktrees/` layout, so an upstream layout change makes the grant inert and the park returns - the safe direction, never a wider grant.
 
 ### Verification (2026-07-29, claude 2.1.220, macOS 26.5.2 arm64)
@@ -229,7 +231,8 @@ The same `dash` run also covered the seed's other branches - fresh file created,
 
 Print mode reports the settings half separately, and shows it does not walk.
 With `.claude/settings.json` carrying one `permissions.allow` rule, `claude -p` printed `Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has not been trusted.` for a workspace whose ancestor was granted, and printed nothing for the same workspace granted by exact key, or for a plain subdirectory inside a granted git root.
-`claude --help` additionally documents that the workspace trust dialog is skipped entirely in non-interactive mode (`-p`, or a non-TTY stdout), which is how no-mistakes invokes its agent - so on 2.1.220 the seed removes a dialog the interactive path still shows, and is inert rather than widening anything on the print path.
+`claude --help` additionally documents that the workspace trust dialog is skipped entirely in non-interactive mode (`-p`, or a non-TTY stdout), so on 2.1.220 the seed removes the dialog only on the interactive path and remains inert rather than widening anything on the print path.
+That print-mode observation does not identify the launch mode or claude version of the separately observed 2026-07-23 parked in-guest run.
 
 Behavior-level, against the real scripts with a faked `sbx` CLI:
 
