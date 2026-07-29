@@ -679,9 +679,13 @@ gh_auth_config_unreadable() {  # <gh auth status output>
 # future gh version degrading toward the noisy side rather than the unsafe one.
 gh_auth_diagnostic() {
   local report rc
-  report=$(gh auth status 2>&1)
+  report=$(gh_auth_run_bounded 5 gh auth status 2>&1)
   rc=$?
   [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 124 ]; then
+    echo "NEEDS_GH_AUTH"
+    return 0
+  fi
   if gh_auth_config_unreadable "$report" && github_credential_resolves; then
     if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine"
