@@ -1463,6 +1463,82 @@ if [ "$BACKEND" = sbx ]; then
       }
       # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
       sbx exec "$W" -- sh -c 'printf "%s\n" ".claude/settings.local.json" >> "$1/.git/info/exclude"' _ "$PROJ_ABS" || true
+      # Pre-accept workspace trust for the no-mistakes gate's worktree ROOT, so
+      # the first in-guest validation run does not park the review agent on the
+      # trust dialog (fork issue #17: diagnosed and hand-fixed in-guest
+      # 2026-07-23, costing a full pipeline restart).
+      #
+      # The gate checks out each run into its own directory,
+      # <no-mistakes home>/worktrees/<repo id>/<run id>, so the per-run path is
+      # unknowable at provisioning time and no fixed exact-path grant can cover
+      # it. What makes a narrow grant possible is that claude's workspace-trust
+      # check walks the cwd's ANCESTORS: a grant on any ancestor directory
+      # satisfies it (verified against claude 2.1.220, see
+      # docs/sbx-backend.md "Guest claude gate trust"). Granting the worktree
+      # root therefore covers every future run and nothing else - the walk only
+      # ever moves UP from cwd, so a grant here never trusts $HOME, the
+      # secondmate's own home, the project clones, or /.
+      #
+      # Deliberately NOT the exact per-worktree key: only that key would make
+      # claude honour a `.claude/settings.json` carried by the branch under
+      # review, and a gate reviewing a pull request must not adopt permissions,
+      # hooks, or MCP servers from the code it is reviewing. Those stay dropped.
+      #
+      # Idempotent for respawns over a kept sandbox: an entry already marked
+      # trusted is left untouched, and every other key in the guest's shared
+      # ~/.claude.json is preserved. A guest with no python3, or an existing
+      # config that does not parse, warns and continues rather than failing the
+      # spawn or overwriting claude's own state - the cost of not seeding is the
+      # original recoverable park, which is strictly better than a lost config.
+      # shellcheck disable=SC2016  # single quotes deliberate: $HOME and the heredoc body expand in the guest sh, not here
+      sbx exec "$W" -- sh -c '
+        home=${HOME:-}
+        case $home in /*) ;; *) echo "firstmate sbx: guest $HOME is not absolute; skipped the claude gate-trust seed" >&2; exit 0 ;; esac
+        while :; do case $home in */) home=${home%/} ;; *) break ;; esac; done
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "firstmate sbx: no python3 in the guest; skipped the claude gate-trust seed (the first no-mistakes run may park on the trust dialog)" >&2
+          exit 0
+        fi
+        FM_TRUST_KEY=$home/.no-mistakes/worktrees FM_TRUST_CFG=$home/.claude.json python3 - <<"FMPY"
+import json, os, stat, sys
+
+cfg = os.environ["FM_TRUST_CFG"]
+key = os.environ["FM_TRUST_KEY"]
+mode = None
+try:
+    mode = stat.S_IMODE(os.stat(cfg).st_mode)
+    with open(cfg) as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict):
+        raise ValueError("top level is not an object")
+except FileNotFoundError:
+    doc = {}
+except Exception as exc:
+    sys.stderr.write(
+        "firstmate sbx: %s did not parse (%s); left it untouched and skipped the "
+        "claude gate-trust seed\n" % (cfg, exc)
+    )
+    raise SystemExit(0)
+
+projects = doc.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+entry = projects.get(key)
+if not isinstance(entry, dict):
+    entry = {}
+if entry.get("hasTrustDialogAccepted") is True:
+    raise SystemExit(0)
+
+entry["hasTrustDialogAccepted"] = True
+projects[key] = entry
+doc["projects"] = projects
+tmp = cfg + ".fm-trust-tmp"
+with open(tmp, "w") as fh:
+    json.dump(doc, fh, indent=2)
+os.chmod(tmp, mode if mode is not None else 0o600)
+os.replace(tmp, cfg)
+FMPY
+      ' || echo "firstmate sbx: the claude gate-trust seed did not complete in sandbox $W (the first no-mistakes run may park on the trust dialog)" >&2
       ;;
     codex*)
       # codex's directory-trust TUI gate blocks a non-interactive first

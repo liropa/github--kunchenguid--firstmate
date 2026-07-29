@@ -91,6 +91,12 @@
 #                            loop's verdict; unset = no output (the exec-died
 #                            case the wrapper must classify)
 #   FM_FAKE_SBX_KEEPALIVE_RC exit code for the keep-alive exec (default 0)
+#   FM_FAKE_SBX_TRUST_SEED_RC
+#                            non-zero fails the claude gate-trust seed exec (the
+#                            `sh -c` pass naming .no-mistakes/worktrees) instead
+#                            of executing it. That exec writes the guest USER's
+#                            ~/.claude.json, so it uses FM_FAKE_SBX_GUEST_USER_HOME
+#                            and the same always-override $HOME rule.
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -280,6 +286,19 @@ case "$cmd" in
           set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
         fi
         sh -c "$script" "$@"
+        exit $?
+        ;;
+      "sh -c "*".no-mistakes/worktrees"*)
+        # fm-spawn's claude gate-trust seed (fork issue #17). Executed for real
+        # against a fixture $HOME, like the guest-home provisioning pass above,
+        # so suites assert the resulting ~/.claude.json rather than grepping
+        # script text - the merge is the behaviour under test.
+        [ "${FM_FAKE_SBX_TRUST_SEED_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_TRUST_SEED_RC}"
+        script=$3
+        shift 3
+        guest_user_home=${FM_FAKE_SBX_GUEST_USER_HOME:-${FM_FAKE_SBX_LOG:-/dev/null}.guest-user-home}
+        mkdir -p "$guest_user_home" 2>/dev/null || true
+        env HOME="$guest_user_home" sh -c "$script" "$@"
         exit $?
         ;;
       "sh -c mkdir -p"*"cat >> "*)

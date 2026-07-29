@@ -97,6 +97,53 @@ guest_write_file() {  # <world> <guest-path>
   printf '%s/guest-writes/%s' "$1" "$(printf '%s' "$2" | tr '/' '_')"
 }
 
+# claude_trusts <claude.json> <abs-path> -> "yes" | "no". Re-implements claude's
+# workspace-trust resolution so the narrowness of the gate-trust seed is
+# asserted against the ACTUAL rule rather than against the shape of the file we
+# just wrote: normalize the path, then test it and every ancestor for a projects
+# entry with hasTrustDialogAccepted true. Verified against claude 2.1.220 -
+# docs/sbx-backend.md "Guest claude gate trust" owns the evidence.
+claude_trusts() {  # <claude.json> <abs-path>
+  python3 - "$1" "$2" <<'PY'
+import json, posixpath, sys
+
+cfg, path = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg) as fh:
+        projects = json.load(fh).get("projects") or {}
+except Exception:
+    projects = {}
+node = posixpath.normpath(path)
+while True:
+    entry = projects.get(node)
+    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+        print("yes")
+        break
+    parent = posixpath.normpath(posixpath.join(node, ".."))
+    if parent == node:
+        print("no")
+        break
+    node = parent
+PY
+}
+
+# assert_gate_trust_is_narrow <claude.json> <guest-home> <secondmate-home>: every
+# per-run gate worktree is trusted, and nothing outside the gate worktree root
+# is. A grant that widened past that root would be invisible and permanent, so
+# each out-of-scope path is a hard assertion, not a spot check.
+assert_gate_trust_is_narrow() {  # <claude.json> <guest-home> <secondmate-home>
+  local cfg=$1 gh=$2 sm=$3 outside
+  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ")" = yes ] \
+    || fail "a per-run gate worktree must resolve as trusted - that is the whole point of the seed"
+  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/cd66f62cf067/01KYMKM0Y9G1KDDFBGVKD9KQK5")" = yes ] \
+    || fail "a gate worktree for a SECOND gated repo must resolve as trusted too"
+  for outside in / "$gh" "$gh/.no-mistakes" "$gh/.no-mistakes/repos/1b27f869c922.git" \
+                 "$gh/work" "$sm" "$sm/projects/alpha"; do
+    [ "$(claude_trusts "$cfg" "$outside")" = no ] \
+      || fail "the gate-trust seed must leave $outside untrusted"
+  done
+}
+
 test_refuses_non_secondmate_spawn() {
   local w fb out rc=0
   w=$(new_world refuse-ship); fb=$(make_fake_sbx "$w")
@@ -500,8 +547,112 @@ test_spawn_fails_when_provision_exec_fails() {
   pass "spawn: a failed guest-home provisioning exec fails the spawn before launch"
 }
 
+# --- claude gate trust (fork issue #17) ---------------------------------------
+
+test_claude_spawn_seeds_gate_trust_for_the_worktree_root_only() {
+  local w fb out gh cfg
+  w=$(new_world gate-trust); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  [ -f "$cfg" ] \
+    || fail "a claude spawn must pre-accept gate-worktree trust (the first validation run parks otherwise)"
+  assert_contains "$(cat "$cfg")" "$gh/.no-mistakes/worktrees" \
+    "the seeded key must name the no-mistakes gate worktree ROOT, the only ancestor every run shares"
+  assert_gate_trust_is_narrow "$cfg" "$gh" "$w/sm"
+  pass "spawn: the claude gate-trust seed covers every gate worktree and nothing outside it"
+}
+
+test_claude_gate_trust_seed_merges_into_the_shared_config() {
+  local w fb out gh cfg
+  w=$(new_world gate-trust-merge); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  # ~/.claude.json is SHARED with the secondmate's own claude sessions and
+  # carries its credentials and accepted-workspace history, so the seed must
+  # merge into it - replacing it would log the secondmate out and re-arm every
+  # trust dialog it had already answered.
+  cat > "$cfg" <<JSON
+{
+  "hasCompletedOnboarding": true,
+  "oauthAccount": {"accountUuid": "must-survive"},
+  "projects": {
+    "$w/sm": {"hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true}
+  }
+}
+JSON
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$cfg")" "must-survive" \
+    "the seed must preserve the guest's existing claude credentials"
+  assert_contains "$(cat "$cfg")" "hasCompletedOnboarding" \
+    "the seed must preserve unrelated top-level config"
+  [ "$(claude_trusts "$cfg" "$w/sm")" = yes ] \
+    || fail "the seed must preserve a workspace the secondmate had already accepted"
+  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/1b27f869c922/01KY55KZ6B")" = yes ] \
+    || fail "the seed must still add the gate-worktree grant when merging"
+  pass "spawn: the gate-trust seed merges into the shared guest config instead of replacing it"
+}
+
+test_claude_gate_trust_seed_is_idempotent() {
+  local w fb out gh cfg before
+  w=$(new_world gate-trust-idem); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  # Respawns and resurrections over a kept sandbox re-run the seed against a
+  # config that already carries the grant; an entry already marked trusted is
+  # left byte-for-byte alone, matching the codex trust seed's grep-then-append.
+  cat > "$cfg" <<JSON
+{
+  "projects": {
+    "$gh/.no-mistakes/worktrees": {"hasTrustDialogAccepted": true, "projectOnboardingSeenCount": 3}
+  }
+}
+JSON
+  before="$w/claude-json.before"
+  cp "$cfg" "$before"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  cmp -s "$before" "$cfg" \
+    || fail "a re-run over an already-granted config must not rewrite it: $(diff "$before" "$cfg")"
+  pass "spawn: the gate-trust seed is a no-op once the grant is already present"
+}
+
+test_codex_spawn_seeds_no_claude_gate_trust() {
+  local w fb out
+  w=$(new_world gate-trust-codex); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) \
+    || fail "codex sbx secondmate spawn failed: $out"
+  [ ! -e "$w/guest-user-home/.claude.json" ] \
+    || fail "a codex spawn must not write claude state into the guest"
+  pass "spawn: a codex spawn seeds codex trust only, never claude's"
+}
+
+test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
+  local w fb out rc=0
+  w=$(new_world gate-trust-soft); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # Not seeding costs one recoverable park on the first validation run; failing
+  # the spawn costs the whole task. The seed is deliberately the weaker of the
+  # two, so a guest that cannot run it still launches, and says so.
+  out=$(FM_FAKE_SBX_TRUST_SEED_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a failed gate-trust seed must not fail the spawn: $out"
+  assert_contains "$out" "gate-trust seed" \
+    "a skipped seed must say so, naming the park it leaves possible"
+  assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
+    "the launch must still be delivered when only the gate-trust seed failed"
+  pass "spawn: a failed gate-trust seed warns and launches anyway"
+}
+
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
+test_claude_spawn_seeds_gate_trust_for_the_worktree_root_only
+test_claude_gate_trust_seed_merges_into_the_shared_config
+test_claude_gate_trust_seed_is_idempotent
+test_codex_spawn_seeds_no_claude_gate_trust
+test_claude_gate_trust_seed_failure_does_not_fail_the_spawn
 test_claude_spawn_wires_signal_bridge
 test_codex_launch_carries_mount_notify
 test_refuses_worktree_home
