@@ -50,6 +50,9 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
     config-load-denied)
       printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
       exit 1 ;;
+    config-load-hang)
+      printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
+      exec perl -e 'sleep 300' ;;
     config-read-denied)
       printf '%s\n' 'failed to create root command: failed to read configuration: open /h/.config/gh/config.yml: operation not permitted' >&2
       exit 1 ;;
@@ -898,6 +901,7 @@ an unreadable config store load is not a sign-out^config-load-denied^yes^0^notco
 an unreadable config store read is not a sign-out^config-read-denied^yes^0^notcontains^NEEDS_GH_AUTH^
 an unreadable config is a no-action fact when asked for facts^config-load-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
 an unreadable config with no usable credential blocks dispatch^config-read-denied^no^0^exact^NEEDS_GH_AUTH^
+a hanging gh status fails closed despite config-error output^config-load-hang^yes^0^exact^NEEDS_GH_AUTH^
 a keyring migration failure blocks dispatch^keyring-migration-failure^yes^0^exact^NEEDS_GH_AUTH^
 a generic root-command failure blocks dispatch^root-command-failure^yes^0^exact^NEEDS_GH_AUTH^
 a signed-out session blocks dispatch even with a git credential present^logged-out^yes^1^grep^NEEDS_GH_AUTH^
