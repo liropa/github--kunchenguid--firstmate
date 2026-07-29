@@ -53,6 +53,12 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
     config-load-hang)
       printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
       exec perl -e 'sleep 300' ;;
+    config-load-term-ignoring-hang)
+      printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
+      exec perl -e '$SIG{TERM} = "IGNORE"; sleep 300' ;;
+    config-load-signal-killed)
+      printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
+      kill -KILL "$$" ;;
     config-read-denied)
       printf '%s\n' 'failed to create root command: failed to read configuration: open /h/.config/gh/config.yml: operation not permitted' >&2
       exit 1 ;;
@@ -158,12 +164,17 @@ add_credential_git() {
 #!/usr/bin/env bash
 if [ "\${1:-}" = credential ] && [ "\${2:-}" = fill ]; then
   cat >/dev/null
-  if [ "\${FM_FAKE_GIT_CREDENTIAL:-yes}" = yes ]; then
-    printf 'protocol=https\nhost=github.com\nusername=tester\npassword=fake-token\n'
-    exit 0
-  fi
-  printf '%s\n' 'fatal: could not read Username for https://github.com: terminal prompts disabled' >&2
-  exit 128
+  case "\${FM_FAKE_GIT_CREDENTIAL:-yes}" in
+    yes)
+      printf 'protocol=https\nhost=github.com\nusername=tester\npassword=fake-token\n'
+      exit 0 ;;
+    empty)
+      printf 'protocol=https\nhost=github.com\nusername=tester\npassword=\n'
+      exit 0 ;;
+    *)
+      printf '%s\n' 'fatal: could not read Username for https://github.com: terminal prompts disabled' >&2
+      exit 128 ;;
+  esac
 fi
 exec '$real_git' "\$@"
 SH
@@ -901,7 +912,10 @@ an unreadable config store load is not a sign-out^config-load-denied^yes^0^notco
 an unreadable config store read is not a sign-out^config-read-denied^yes^0^notcontains^NEEDS_GH_AUTH^
 an unreadable config is a no-action fact when asked for facts^config-load-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
 an unreadable config with no usable credential blocks dispatch^config-read-denied^no^0^exact^NEEDS_GH_AUTH^
+a config failure with an empty password blocks dispatch^config-load-denied^empty^0^exact^NEEDS_GH_AUTH^
 a hanging gh status fails closed despite config-error output^config-load-hang^yes^0^exact^NEEDS_GH_AUTH^
+a TERM-ignoring gh status is killed and blocks dispatch^config-load-term-ignoring-hang^yes^0^exact^NEEDS_GH_AUTH^
+a signal-killed gh status blocks dispatch^config-load-signal-killed^yes^0^exact^NEEDS_GH_AUTH^
 a keyring migration failure blocks dispatch^keyring-migration-failure^yes^0^exact^NEEDS_GH_AUTH^
 a generic root-command failure blocks dispatch^root-command-failure^yes^0^exact^NEEDS_GH_AUTH^
 a signed-out session blocks dispatch even with a git credential present^logged-out^yes^1^grep^NEEDS_GH_AUTH^
