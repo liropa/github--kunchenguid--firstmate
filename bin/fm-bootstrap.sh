@@ -654,13 +654,12 @@ github_credential_resolves() {
 
 # Did gh fail because it could not reach its OWN store, rather than because the
 # account is not usable? gh loads its config before dispatching any subcommand,
-# so a denied config read or an unreachable keyring aborts during startup with
-# one of these, and never reaches a per-host verdict. Matched narrowly on
-# purpose: an unrecognized failure must fall through to the sign-in report.
+# so a denied config read aborts during startup with one of these, and never
+# reaches a per-host verdict. Matched narrowly on purpose: an unrecognized
+# failure must fall through to the sign-in report.
 gh_auth_store_unreadable() {  # <gh auth status output>
   case "$1" in
-    *'failed to read configuration'*|*'failed to load config'*|\
-    *'failed to migrate config'*|*'failed to create root command'*) return 0 ;;
+    *'failed to read configuration'*|*'failed to load config'*) return 0 ;;
   esac
   return 1
 }

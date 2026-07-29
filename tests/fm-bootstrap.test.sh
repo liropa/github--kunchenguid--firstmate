@@ -47,12 +47,17 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
     logged-out)
       printf '%s\n' 'You are not logged into any GitHub hosts. To log in, run: gh auth login' >&2
       exit 1 ;;
-    config-denied)
+    config-load-denied)
       printf '%s\n' 'warning: failed to load config: open /h/.config/gh/config.yml: operation not permitted' >&2
+      exit 1 ;;
+    config-read-denied)
       printf '%s\n' 'failed to create root command: failed to read configuration: open /h/.config/gh/config.yml: operation not permitted' >&2
       exit 1 ;;
-    keyring-denied)
+    migration-failure)
       printf '%s\n' 'failed to migrate config: cowardly refusing to continue with multi account migration: could not migrate oauth token for "github.com": exit status 161' >&2
+      exit 1 ;;
+    root-command-failure)
+      printf '%s\n' 'failed to create root command: unsupported extension configuration' >&2
       exit 1 ;;
     invalid-token)
       printf '%s\n' 'github.com' >&2
@@ -857,8 +862,9 @@ ROWS
 # must block dispatch, the second must not, because signing in again neither fixes
 # nor is needed for an unreadable store. Missing a real sign-in problem is the
 # worse failure, so the rows also pin the cases that must keep reporting: an
-# unreadable store that yields no GitHub credential at all, an invalid token
-# (which never says "not logged in"), and wording this probe does not recognise.
+# unreadable store that yields no GitHub credential at all, generic startup
+# failures, an invalid token (which never says "not logged in"), and wording
+# this probe does not recognise.
 test_gh_auth_probe_separates_sign_out_from_unreadable_store() {
   local label gh_auth cred verbose mode expect notcontains case_dir fakebin out n
   n=0
@@ -888,10 +894,12 @@ test_gh_auth_probe_separates_sign_out_from_unreadable_store() {
   done <<'ROWS'
 a readable store with valid credentials stays silent^ok^yes^0^exact^^
 a signed-out session still blocks dispatch^logged-out^yes^0^exact^NEEDS_GH_AUTH^
-an unreadable config store is not a sign-out^config-denied^yes^0^notcontains^NEEDS_GH_AUTH^
-an unreadable keyring is not a sign-out^keyring-denied^yes^0^notcontains^NEEDS_GH_AUTH^
-an unreadable store is a no-action fact when asked for facts^config-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its credential store in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
-an unreadable store with no usable credential blocks dispatch^config-denied^no^0^exact^NEEDS_GH_AUTH^
+an unreadable config store load is not a sign-out^config-load-denied^yes^0^notcontains^NEEDS_GH_AUTH^
+an unreadable config store read is not a sign-out^config-read-denied^yes^0^notcontains^NEEDS_GH_AUTH^
+an unreadable store is a no-action fact when asked for facts^config-load-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its credential store in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
+an unreadable store with no usable credential blocks dispatch^config-read-denied^no^0^exact^NEEDS_GH_AUTH^
+a config migration failure blocks dispatch^migration-failure^yes^0^exact^NEEDS_GH_AUTH^
+a generic root-command failure blocks dispatch^root-command-failure^yes^0^exact^NEEDS_GH_AUTH^
 a signed-out session blocks dispatch even with a git credential present^logged-out^yes^1^grep^NEEDS_GH_AUTH^
 an invalid token blocks dispatch even with a git credential present^invalid-token^yes^0^exact^NEEDS_GH_AUTH^
 an unrecognised gh failure blocks dispatch rather than passing silently^mystery-failure^yes^0^exact^NEEDS_GH_AUTH^
