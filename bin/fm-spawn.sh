@@ -1487,9 +1487,10 @@ if [ "$BACKEND" = sbx ]; then
       # Idempotent for respawns over a kept sandbox: an entry already marked
       # trusted is left untouched, and every other key in the guest's shared
       # ~/.claude.json is preserved. A guest with no python3, or an existing
-      # config that does not parse, warns and continues rather than failing the
-      # spawn or overwriting claude's own state - the cost of not seeding is the
-      # original recoverable park, which is strictly better than a lost config.
+      # config that does not parse or has malformed project state, warns and
+      # continues rather than failing the spawn or overwriting claude's own
+      # state - the cost of not seeding is the original recoverable park, which
+      # is strictly better than a lost config.
       # shellcheck disable=SC2016  # single quotes deliberate: $HOME and the heredoc body expand in the guest sh, not here
       sbx exec "$W" -- sh -c '
         home=${HOME:-}
@@ -1500,43 +1501,71 @@ if [ "$BACKEND" = sbx ]; then
           exit 0
         fi
         FM_TRUST_KEY=$home/.no-mistakes/worktrees FM_TRUST_CFG=$home/.claude.json python3 - <<"FMPY"
-import json, os, stat, sys
+import json, os, stat, sys, tempfile
 
 cfg = os.environ["FM_TRUST_CFG"]
 key = os.environ["FM_TRUST_KEY"]
 mode = None
-try:
-    mode = stat.S_IMODE(os.stat(cfg).st_mode)
-    with open(cfg) as fh:
-        doc = json.load(fh)
-    if not isinstance(doc, dict):
-        raise ValueError("top level is not an object")
-except FileNotFoundError:
-    doc = {}
-except Exception as exc:
+
+def skip(reason):
     sys.stderr.write(
         "firstmate sbx: %s did not parse (%s); left it untouched and skipped the "
-        "claude gate-trust seed\n" % (cfg, exc)
+        "claude gate-trust seed\n" % (cfg, reason)
     )
     raise SystemExit(0)
 
-projects = doc.get("projects")
-if not isinstance(projects, dict):
+try:
+    with open(cfg) as fh:
+        mode = stat.S_IMODE(os.fstat(fh.fileno()).st_mode)
+        doc = json.load(fh)
+    if not isinstance(doc, dict):
+        skip("top level is not an object")
+except FileNotFoundError:
+    doc = {}
+except Exception as exc:
+    skip(exc)
+
+if "projects" not in doc:
     projects = {}
-entry = projects.get(key)
-if not isinstance(entry, dict):
+else:
+    projects = doc["projects"]
+    if not isinstance(projects, dict):
+        skip("projects is not an object")
+if key not in projects:
     entry = {}
+else:
+    entry = projects[key]
+    if not isinstance(entry, dict):
+        skip("projects[%r] is not an object" % key)
 if entry.get("hasTrustDialogAccepted") is True:
     raise SystemExit(0)
 
 entry["hasTrustDialogAccepted"] = True
 projects[key] = entry
 doc["projects"] = projects
-tmp = cfg + ".fm-trust-tmp"
-with open(tmp, "w") as fh:
-    json.dump(doc, fh, indent=2)
-os.chmod(tmp, mode if mode is not None else 0o600)
-os.replace(tmp, cfg)
+fd = None
+tmp = None
+try:
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(cfg) or ".",
+        prefix=os.path.basename(cfg) + ".fm-trust-",
+    )
+    fh = os.fdopen(fd, "w")
+    fd = None
+    with fh:
+        json.dump(doc, fh, indent=2)
+    os.replace(tmp, cfg)
+    if mode is not None:
+        os.chmod(cfg, mode)
+    tmp = None
+finally:
+    if fd is not None:
+        os.close(fd)
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 FMPY
       ' || echo "firstmate sbx: the claude gate-trust seed did not complete in sandbox $W (the first no-mistakes run may park on the trust dialog)" >&2
       ;;

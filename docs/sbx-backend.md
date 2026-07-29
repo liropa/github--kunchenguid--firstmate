@@ -200,7 +200,8 @@ The narrow grant is thus strictly weaker than "trust the gate worktree", not mer
 
 Merge, not replace: `~/.claude.json` is shared with the secondmate's own claude sessions and holds its credentials and accepted-workspace history.
 An entry already marked trusted is left byte-for-byte alone, so respawns and resurrections over a kept sandbox converge, matching the codex trust seed's grep-then-append.
-A guest without `python3`, or an existing config that does not parse, prints a stderr diagnostic and continues: not seeding costs one recoverable park on the first validation run, while failing the spawn or overwriting claude's own state costs the whole task.
+A guest without `python3`, an existing config that does not parse, or a parseable config whose `projects` map or gate-worktree entry is not an object prints a stderr diagnostic and continues.
+Malformed state is left byte-for-byte untouched: not seeding costs one recoverable park on the first validation run, while failing the spawn or overwriting claude's own state costs the whole task.
 The seed hard-codes no-mistakes' `worktrees/` layout, so an upstream layout change makes the grant inert and the park returns - the safe direction, never a wider grant.
 
 ### Verification (2026-07-29, claude 2.1.220, macOS 26.5.2 arm64)
