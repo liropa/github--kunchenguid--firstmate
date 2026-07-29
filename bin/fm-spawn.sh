@@ -30,6 +30,9 @@
 #   state/<id>.turn-ended become host symlinks onto it); supported harnesses
 #   are claude and codex, and ship/scout sbx spawns are refused
 #   (docs/sbx-backend.md).
+#   A claude sbx spawn fail-soft merges only the guest user's
+#   $HOME/.no-mistakes/worktrees trust key into ~/.claude.json; the sbx guide
+#   owns the narrowness rationale and verification.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1463,34 +1466,12 @@ if [ "$BACKEND" = sbx ]; then
       }
       # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
       sbx exec "$W" -- sh -c 'printf "%s\n" ".claude/settings.local.json" >> "$1/.git/info/exclude"' _ "$PROJ_ABS" || true
-      # Pre-accept workspace trust for the no-mistakes gate's worktree ROOT, so
-      # the first in-guest validation run does not park the review agent on the
-      # trust dialog (fork issue #17: diagnosed and hand-fixed in-guest
-      # 2026-07-23, costing a full pipeline restart).
-      #
-      # The gate checks out each run into its own directory,
-      # <no-mistakes home>/worktrees/<repo id>/<run id>, so the per-run path is
-      # unknowable at provisioning time and no fixed exact-path grant can cover
-      # it. What makes a narrow grant possible is that claude's workspace-trust
-      # check walks the cwd's ANCESTORS: a grant on any ancestor directory
-      # satisfies it (verified against claude 2.1.220, see
-      # docs/sbx-backend.md "Guest claude gate trust"). Granting the worktree
-      # root therefore covers every future run and nothing else - the walk only
-      # ever moves UP from cwd, so a grant here never trusts $HOME, the
-      # secondmate's own home, the project clones, or /.
-      #
-      # Deliberately NOT the exact per-worktree key: only that key would make
-      # claude honour a `.claude/settings.json` carried by the branch under
-      # review, and a gate reviewing a pull request must not adopt permissions,
-      # hooks, or MCP servers from the code it is reviewing. Those stay dropped.
-      #
-      # Idempotent for respawns over a kept sandbox: an entry already marked
-      # trusted is left untouched, and every other key in the guest's shared
-      # ~/.claude.json is preserved. A guest with no python3, or an existing
-      # config that does not parse or has malformed project state, warns and
-      # continues rather than failing the spawn or overwriting claude's own
-      # state - the cost of not seeding is the original recoverable park, which
-      # is strictly better than a lost config.
+      # Pre-accept only the no-mistakes worktree ROOT: claude's ancestor-based
+      # workspace check clears the launch blocker there without enabling the
+      # branch-controlled project settings that require an exact-worktree key.
+      # Merge fail-soft into the shared config because losing claude's state is
+      # worse than leaving one recoverable park. docs/sbx-backend.md "Guest
+      # claude gate trust" owns the full contract and empirical evidence.
       # shellcheck disable=SC2016  # single quotes deliberate: $HOME and the heredoc body expand in the guest sh, not here
       sbx exec "$W" -- sh -c '
         home=${HOME:-}
