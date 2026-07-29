@@ -7,7 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
-#                 "BOOTSTRAP_INFO: gh cannot read its credential store ..." (verbose only),
+#                 "BOOTSTRAP_INFO: gh cannot read its configuration ..." (verbose only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -684,7 +684,7 @@ gh_auth_diagnostic() {
   [ "$rc" -eq 0 ] && return 0
   if gh_auth_store_unreadable "$report" && github_credential_resolves; then
     if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-      echo "BOOTSTRAP_INFO: gh cannot read its credential store in this session; GitHub credentials still resolve, so authentication is fine"
+      echo "BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine"
     fi
     return 0
   fi
