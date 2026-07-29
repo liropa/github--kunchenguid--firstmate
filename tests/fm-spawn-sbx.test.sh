@@ -549,7 +549,7 @@ test_spawn_fails_when_provision_exec_fails() {
 
 # --- claude gate trust (fork issue #17) ---------------------------------------
 
-test_claude_spawn_seeds_gate_trust_for_the_worktree_root_only() {
+test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only() {
   local w fb out gh cfg
   w=$(new_world gate-trust); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes"
@@ -560,8 +560,65 @@ test_claude_spawn_seeds_gate_trust_for_the_worktree_root_only() {
     || fail "a claude spawn must pre-accept gate-worktree trust (the first validation run parks otherwise)"
   assert_contains "$(cat "$cfg")" "$gh/.no-mistakes/worktrees" \
     "the seeded key must name the no-mistakes gate worktree ROOT, the only ancestor every run shares"
+  [ "$(fm_file_mode "$cfg")" = 600 ] \
+    || fail "a newly created claude config must be private"
   assert_gate_trust_is_narrow "$cfg" "$gh" "$w/sm"
   pass "spawn: the claude gate-trust seed covers every gate worktree and nothing outside it"
+}
+
+test_claude_gate_trust_seed_adds_absent_projects_map() {
+  local w fb out gh cfg
+  w=$(new_world gate-trust-no-projects); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  printf '%s\n' '{"oauthAccount":{"accountUuid":"must-survive"}}' > "$cfg"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$cfg")" "must-survive" \
+    "adding an absent projects map must preserve unrelated claude state"
+  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/repo/run")" = yes ] \
+    || fail "an absent projects map must be created with the gate-worktree grant"
+  pass "spawn: the claude gate-trust seed creates an absent projects map"
+}
+
+test_claude_gate_trust_seed_skips_malformed_projects_map() {
+  local w fb out gh cfg before rc=0
+  w=$(new_world gate-trust-bad-projects); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"; before="$w/claude-json.before"
+  printf '%s\n' '{"oauthAccount":{"accountUuid":"must-survive"},"projects":["wrong-shape"]}' > "$cfg"
+  cp "$cfg" "$before"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -eq 0 ] || fail "malformed projects state must not fail the spawn: $out"
+  cmp -s "$before" "$cfg" \
+    || fail "malformed projects state must remain byte-identical: $(diff "$before" "$cfg")"
+  assert_contains "$out" "$cfg did not parse (projects is not an object)" \
+    "a skipped malformed projects map must name the config and reason"
+  assert_not_contains "$out" "did not complete in sandbox" \
+    "skipping malformed projects state must return success from the guest seed"
+  assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
+    "the launch must still be delivered when malformed projects state is skipped"
+  pass "spawn: malformed claude projects state is diagnosed and preserved"
+}
+
+test_claude_gate_trust_seed_skips_malformed_gate_entry() {
+  local w fb out gh cfg before rc=0
+  w=$(new_world gate-trust-bad-entry); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"; before="$w/claude-json.before"
+  printf '{"projects":{"%s":"wrong-shape"}}\n' "$gh/.no-mistakes/worktrees" > "$cfg"
+  cp "$cfg" "$before"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a malformed gate entry must not fail the spawn: $out"
+  cmp -s "$before" "$cfg" \
+    || fail "a malformed gate entry must remain byte-identical: $(diff "$before" "$cfg")"
+  assert_contains "$out" "$cfg did not parse (projects['$gh/.no-mistakes/worktrees'] is not an object)" \
+    "a skipped malformed gate entry must name the config and reason"
+  assert_not_contains "$out" "did not complete in sandbox" \
+    "skipping a malformed gate entry must return success from the guest seed"
+  assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
+    "the launch must still be delivered when a malformed gate entry is skipped"
+  pass "spawn: a malformed claude gate entry is diagnosed and preserved"
 }
 
 test_claude_gate_trust_seed_merges_into_the_shared_config() {
@@ -582,6 +639,7 @@ test_claude_gate_trust_seed_merges_into_the_shared_config() {
   }
 }
 JSON
+  chmod 0644 "$cfg"
   out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
     || fail "claude sbx secondmate spawn failed: $out"
   assert_contains "$(cat "$cfg")" "must-survive" \
@@ -592,7 +650,29 @@ JSON
     || fail "the seed must preserve a workspace the secondmate had already accepted"
   [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/1b27f869c922/01KY55KZ6B")" = yes ] \
     || fail "the seed must still add the gate-worktree grant when merging"
+  [ "$(fm_file_mode "$cfg")" = 644 ] \
+    || fail "merging gate trust must preserve the existing claude config mode"
   pass "spawn: the gate-trust seed merges into the shared guest config instead of replacing it"
+}
+
+test_claude_gate_trust_seed_uses_an_exclusive_tempfile() {
+  local w fb out gh cfg victim legacy_tmp leftovers
+  w=$(new_world gate-trust-tempfile); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  victim="$w/tempfile-victim"; legacy_tmp="$cfg.fm-trust-tmp"
+  printf '%s\n' "must-survive" > "$victim"
+  ln -s "$victim" "$legacy_tmp"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  [ "$(cat "$victim")" = "must-survive" ] \
+    || fail "the gate-trust seed must not follow a pre-existing predictable temp symlink"
+  [ -L "$legacy_tmp" ] \
+    || fail "the gate-trust seed must leave an unrelated legacy temp symlink untouched"
+  leftovers=$(find "$gh" -maxdepth 1 -type f -name '.claude.json.fm-trust-*' -print)
+  [ -z "$leftovers" ] \
+    || fail "the gate-trust seed must not leave credential-bearing temp files: $leftovers"
+  pass "spawn: the claude gate-trust seed uses an exclusive temporary file"
 }
 
 test_claude_gate_trust_seed_is_idempotent() {
@@ -648,8 +728,12 @@ test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
 
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
-test_claude_spawn_seeds_gate_trust_for_the_worktree_root_only
+test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only
+test_claude_gate_trust_seed_adds_absent_projects_map
+test_claude_gate_trust_seed_skips_malformed_projects_map
+test_claude_gate_trust_seed_skips_malformed_gate_entry
 test_claude_gate_trust_seed_merges_into_the_shared_config
+test_claude_gate_trust_seed_uses_an_exclusive_tempfile
 test_claude_gate_trust_seed_is_idempotent
 test_codex_spawn_seeds_no_claude_gate_trust
 test_claude_gate_trust_seed_failure_does_not_fail_the_spawn
