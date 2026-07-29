@@ -178,6 +178,73 @@ Nothing here hot-applies to a live guest, and `~/.bash_login` is not handled (th
 
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh` and `tests/fm-spawn-sbx.test.sh` (a fake `sbx` CLI plus a plain-directory guest-user-home fixture, per this doc's testing convention) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
 
+## Guest claude gate trust (`~/.no-mistakes/worktrees`)
+
+A fresh guest's first in-guest no-mistakes run parked because the pipeline's review agent needed the gate clone trust-accepted in the guest's shared `~/.claude.json`; the secondmate diagnosed and set it by hand on 2026-07-23, costing one full pipeline restart (fork issue #17).
+Spawn's `claude*` guest-provisioning branch now pre-accepts that trust before launch, alongside the Stop hook.
+
+The gate checks out every run into its own directory, `<no-mistakes home>/worktrees/<repo id>/<run id>`, so no fixed exact-path grant can cover a future run.
+Path shape read from real host run logs 2026-07-29 (`/Users/lp1/.no-mistakes/worktrees/1b27f869c922/01KXY39H7YT9CT9YM5VCB395YG/bin/fm-supervise-daemon.sh`); the repo id is stable per gated repo (no-mistakes' own `repos` table keys it by working path) and the run id is a per-run ULID.
+
+What makes a narrow grant possible is that claude resolves **workspace** trust by walking the cwd's ancestors, so a grant on any ancestor directory satisfies it.
+Firstmate therefore grants exactly one key, the guest's gate worktree ROOT, which is the only ancestor every future run shares.
+The walk only ever moves UP from cwd, so that grant never reaches `$HOME`, the secondmate's own home, its project clones, or `/`; `tests/fm-spawn-sbx.test.sh` asserts each of those stays untrusted by re-running claude's own resolution rule against the seeded file.
+
+The exact per-worktree key is deliberately NOT granted, because trust is not one switch:
+
+- **Workspace** trust (the launch-blocking dialog) walks ancestors.
+- **Project-settings** loading (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized exact key and does **not** walk.
+
+A gate worktree is its own git root, so the ancestor grant clears the dialog while leaving settings carried by the branch under review dropped - a gate reviewing a pull request must not adopt permissions or hooks from the code it is reviewing.
+The narrow grant is thus strictly weaker than "trust the gate worktree", not merely narrower than "trust everything".
+
+Merge, not replace: `~/.claude.json` is shared with the secondmate's own claude sessions and holds its credentials and accepted-workspace history.
+An entry already marked trusted is left byte-for-byte alone, so respawns and resurrections over a kept sandbox converge, matching the codex trust seed's grep-then-append.
+A guest without `python3`, or an existing config that does not parse, prints a stderr diagnostic and continues: not seeding costs one recoverable park on the first validation run, while failing the spawn or overwriting claude's own state costs the whole task.
+The seed hard-codes no-mistakes' `worktrees/` layout, so an upstream layout change makes the grant inert and the park returns - the safe direction, never a wider grant.
+
+### Verification (2026-07-29, claude 2.1.220, macOS 26.5.2 arm64)
+
+Host-side, against throwaway fixtures and a scratch `HOME` - a real PTY under `tmux`, because the dialog is an interactive TUI component.
+Each workspace below is its own git root, matching a gate worktree.
+
+The seed's own guest script was extracted from `bin/fm-spawn.sh` and run under `dash` (the Debian templates' `/bin/sh`, stricter than the bash the host tests use) against a scratch `HOME`, then the `~/.claude.json` it produced was handed to a real `claude` at real gate-worktree paths.
+Inside the granted root, `.../.no-mistakes/worktrees/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ`, no dialog - the session reached its normal banner:
+
+```
+│                  Welcome back!                  │
+│   ~/…/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ   │
+```
+
+Outside it, `$HOME/work/repo` and `$HOME/.no-mistakes/repos/1b27f869c922.git` (a sibling of `worktrees/`, one level below the same `.no-mistakes` parent) both still park:
+
+```
+ Accessing workspace:
+ ❯ 1. Yes, I trust this folder
+```
+
+That is the narrowness assertion measured rather than reasoned: the grant reaches every gate worktree and stops at the worktree root.
+The same `dash` run also covered the seed's other branches - fresh file created, merge preserving an unrelated `oauthAccount` and a pre-existing project entry, byte-identical no-op on re-run, unparseable config left untouched with a diagnostic and a zero exit, and file mode preserved at 0644.
+
+Print mode reports the settings half separately, and shows it does not walk.
+With `.claude/settings.json` carrying one `permissions.allow` rule, `claude -p` printed `Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has not been trusted.` for a workspace whose ancestor was granted, and printed nothing for the same workspace granted by exact key, or for a plain subdirectory inside a granted git root.
+`claude --help` additionally documents that the workspace trust dialog is skipped entirely in non-interactive mode (`-p`, or a non-TTY stdout), which is how no-mistakes invokes its agent - so on 2.1.220 the seed removes a dialog the interactive path still shows, and is inert rather than widening anything on the print path.
+
+Behavior-level, against the real scripts with a faked `sbx` CLI:
+
+```
+$ bash tests/fm-spawn-sbx.test.sh | tail -1
+# all fm-spawn-sbx tests passed
+$ bin/fm-lint.sh; echo "exit=$?"
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+exit=0
+```
+
+**Not verified end to end against a real sandbox VM.**
+The only guest on this host is the captain's running secondmate, which this change must not disturb, so the in-guest half - that `python3` resolves on the `sbx exec` PATH, and that a fresh guest's first validation run now starts clean - remains unproven until the next guest is built.
+The `python3` expectation comes from the templates' own build-time assertion (`agent-dotfiles scripts/sbx-templates/lib.sh` asserts `python3 --version` through `sbx exec`, with mise shims symlinked into `~/.local/bin` ahead of the exec PATH), not from a measurement made here.
+Also unmeasured in-guest: `agent-dotfiles scripts/sbx-templates/seed/claude-state.json` seeds `projects["/"].hasTrustDialogAccepted`, which given the ancestor walk would trust the entire guest filesystem; whether that key survives `sbx create`'s regeneration of the active agent's config is unknown, and the narrow seed here is correct either way (a no-op if it survives, the actual fix if it does not).
+
 ## Tracked-file sync (guest clone fast-forward)
 
 Clone mode snapshots the host home's committed files into the VM exactly once, at provisioning, so the guest clone's tracked surface (`AGENTS.md`, `bin/`, `.agents/skills/`) froze at spawn HEAD while every host-side sync path - `/updatefirstmate`, the bootstrap secondmate sweep, `fm-spawn`'s pre-launch fast-forward - advanced only the HOST clone and reported updated/current from the host's point of view (fork issue #20).
