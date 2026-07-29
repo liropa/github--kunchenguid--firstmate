@@ -171,6 +171,9 @@ if [ "\${1:-}" = credential ] && [ "\${2:-}" = fill ]; then
     empty)
       printf 'protocol=https\nhost=github.com\nusername=tester\npassword=\n'
       exit 0 ;;
+    emit-then-signal-killed)
+      printf 'protocol=https\nhost=github.com\nusername=tester\npassword=fake-token\n'
+      kill -KILL "\$\$" ;;
     *)
       printf '%s\n' 'fatal: could not read Username for https://github.com: terminal prompts disabled' >&2
       exit 128 ;;
@@ -913,6 +916,7 @@ an unreadable config store read is not a sign-out^config-read-denied^yes^0^notco
 an unreadable config is a no-action fact when asked for facts^config-load-denied^yes^1^grep^BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
 an unreadable config with no usable credential blocks dispatch^config-read-denied^no^0^exact^NEEDS_GH_AUTH^
 a config failure with an empty password blocks dispatch^config-load-denied^empty^0^exact^NEEDS_GH_AUTH^
+a signal-killed credential probe blocks after emitting a password^config-load-denied^emit-then-signal-killed^0^exact^NEEDS_GH_AUTH^
 a hanging gh status fails closed despite config-error output^config-load-hang^yes^0^exact^NEEDS_GH_AUTH^
 a TERM-ignoring gh status is killed and blocks dispatch^config-load-term-ignoring-hang^yes^0^exact^NEEDS_GH_AUTH^
 a signal-killed gh status blocks dispatch^config-load-signal-killed^yes^0^exact^NEEDS_GH_AUTH^

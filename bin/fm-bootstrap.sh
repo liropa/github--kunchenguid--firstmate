@@ -647,9 +647,14 @@ gh_auth_run_bounded() {  # <seconds> <command...>
 # waiting on a locked keychain would otherwise wedge session start. The
 # credential itself is only matched, never printed.
 github_credential_resolves() {
-  printf 'protocol=https\nhost=github.com\n\n' \
-    | gh_auth_run_bounded 5 env GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null \
-    | grep -q '^password=.'
+  local credential_output rc
+  credential_output=$(
+    printf 'protocol=https\nhost=github.com\n\n' \
+      | gh_auth_run_bounded 5 env GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null
+  )
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$credential_output" | grep -q '^password=.'
 }
 
 # Did gh fail because it could not read its configuration, rather than because
