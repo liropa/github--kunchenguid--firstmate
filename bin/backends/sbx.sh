@@ -661,6 +661,10 @@ fm_backend_sbx_ensure_stack() {  # <target>
     echo "error: cannot resurrect $name: guest-home provisioning re-assert failed" >&2
     return 1
   }
+  # Re-assert the guest's claude workspace-trust shape alongside it (fork issue
+  # #40): harness-gated inside, fail-soft, and never a reason to abandon a
+  # steer. Resurrect-only, like the pass above.
+  fm_backend_sbx_reconcile_claude_trust "$name" "$home" "$harness"
   # Tracked-file sync (fork issue #20): advance the guest clone's tracked
   # files to the host clone's default-branch tip before the agent relaunches -
   # the one point in the VM lifecycle where nothing in-guest can be mid-turn.
@@ -1064,6 +1068,175 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     fi
     exit 0
   ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" $FM_INHERITABLE_CONFIG
+}
+
+# fm_backend_sbx_reconcile_claude_trust: bring the guest's shared
+# ~/.claude.json to firstmate's intended claude workspace-trust shape - revoke
+# the guest-wide grant, then grant the roots a guest genuinely launches under.
+# docs/sbx-backend.md "Guest claude workspace trust" owns the contract and evidence.
+#
+# `sbx create` on a CLAUDE-flavor sandbox writes the guest's ~/.claude.json
+# itself and grants projects["/"] (fork issue #40, measured 2026-07-30). Since
+# workspace trust resolves by walking the cwd's ancestors, that one key trusts
+# every path in the guest, and it lands after any template-side seed - so it
+# can only be undone from here, on the host side, after create.
+#
+# Revoking alone would be a regression, not a fix: the guest's own firstmate
+# home was riding that same root grant, so a bare revoke parks a secondmate on
+# the trust dialog at its own home - exactly the failure fork issue #17 closed.
+# The revoke therefore ships with the grants that replace it, and each grant is
+# a ROOT whose descendants are separate git roots, so the ancestor walk clears
+# the launch dialog while the exact-key-only settings gate still drops
+# permissions, hooks, and MCP servers carried by the code under review.
+#
+# Run from BOTH spawn and resurrection. `sbx` was measured to write projects["/"]
+# at create only - a revoke survives ordinary stop/start - so spawn alone would
+# hold today; re-asserting on resurrection makes that independent of upstream
+# behaviour we do not control, and lets a guest that skipped the pass (no
+# python3 yet, transient exec failure) heal on its next resurrection.
+#
+# Fail-soft by contract, so this always returns 0: not reconciling costs one
+# recoverable park, while failing a spawn or a steer costs the whole task.
+# Malformed state is diagnosed and left byte-for-byte alone, never replaced.
+fm_backend_sbx_reconcile_claude_trust() {  # <name> <home-abs> <harness>
+  local name=$1 home_abs=$2 harness=$3
+  case "$harness" in
+    claude*) ;;
+    *) return 0 ;;
+  esac
+  # shellcheck disable=SC2016  # single quotes deliberate: $1, $HOME and the heredoc body expand in the guest sh, not here
+  sbx exec "$name" -- sh -c '
+    fmhome=$1
+    home=${HOME:-}
+    for p in "$fmhome" "$home"; do
+      case $p in /*) ;; *) echo "firstmate sbx: guest path \"$p\" is not absolute; skipped the claude gate-trust reconcile" >&2; exit 0 ;; esac
+    done
+    while :; do case $fmhome in */) fmhome=${fmhome%/} ;; *) break ;; esac; done
+    while :; do case $home in */) home=${home%/} ;; *) break ;; esac; done
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "firstmate sbx: no python3 in the guest; skipped the claude gate-trust reconcile (the guest keeps whatever trust sbx left it)" >&2
+      exit 0
+    fi
+    FM_TRUST_REVOKE=/ FM_TRUST_HOME=$fmhome FM_TRUST_GATE=$home/.no-mistakes/worktrees \
+      FM_TRUST_TREEHOUSE=$home/.treehouse FM_TRUST_CFG=$home/.claude.json python3 - <<"FMPY"
+import json, os, stat, sys, tempfile
+
+cfg = os.environ["FM_TRUST_CFG"]
+revoke = os.environ["FM_TRUST_REVOKE"]
+# The roots a guest actually launches claude under: its own firstmate home
+# (which covers its projects/ clones by the ancestor walk), the no-mistakes
+# gate worktree root, and the treehouse pool root its in-guest crewmates use.
+grants = [os.environ[n] for n in ("FM_TRUST_HOME", "FM_TRUST_GATE", "FM_TRUST_TREEHOUSE")]
+mode = None
+
+
+def note(msg):
+    sys.stderr.write("firstmate sbx: %s\n" % msg)
+
+
+def skip(reason):
+    note(
+        "%s did not parse (%s); left it untouched and skipped the claude "
+        "gate-trust reconcile" % (cfg, reason)
+    )
+    raise SystemExit(0)
+
+
+try:
+    with open(cfg) as fh:
+        mode = stat.S_IMODE(os.fstat(fh.fileno()).st_mode)
+        doc = json.load(fh)
+    if not isinstance(doc, dict):
+        skip("top level is not an object")
+except FileNotFoundError:
+    doc = {}
+except Exception as exc:
+    skip(exc)
+
+if "projects" not in doc:
+    projects = {}
+else:
+    projects = doc["projects"]
+    if not isinstance(projects, dict):
+        skip("projects is not an object")
+
+changed = False
+
+# Revoke first: an entry that is not an object is state firstmate did not write
+# and does not understand, so it is reported rather than replaced.
+if revoke in projects:
+    entry = projects[revoke]
+    if not isinstance(entry, dict):
+        note(
+            "%s: projects[%r] is not an object; left it untouched and did not "
+            "revoke the guest-wide trust grant" % (cfg, revoke)
+        )
+    elif entry.get("hasTrustDialogAccepted") is True:
+        # Drop only the flag firstmate is revoking; anything else claude keeps
+        # under that key survives. An entry left with nothing in it is dropped.
+        del entry["hasTrustDialogAccepted"]
+        if entry:
+            projects[revoke] = entry
+        else:
+            del projects[revoke]
+        changed = True
+
+for key in grants:
+    if not key or key == revoke:
+        note("refusing to grant claude workspace trust on %r; skipped that grant" % (key,))
+        continue
+    if key not in projects:
+        entry = {}
+    else:
+        entry = projects[key]
+        if not isinstance(entry, dict):
+            note(
+                "%s: projects[%r] is not an object; left it untouched and "
+                "skipped that grant" % (cfg, key)
+            )
+            continue
+    if entry.get("hasTrustDialogAccepted") is True:
+        continue
+    entry["hasTrustDialogAccepted"] = True
+    projects[key] = entry
+    changed = True
+
+# Nothing to do means nothing written, so a re-run over an already-reconciled
+# config is byte-identical. That matters because this file is shared with the
+# claude sessions the guest runs for itself, and carries their credentials and
+# accepted-workspace history. No apostrophes below: the whole program is a
+# single-quoted argument to the guest sh, and one would close it early.
+if not changed:
+    raise SystemExit(0)
+
+doc["projects"] = projects
+fd = None
+tmp = None
+try:
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(cfg) or ".",
+        prefix=os.path.basename(cfg) + ".fm-trust-",
+    )
+    fh = os.fdopen(fd, "w")
+    fd = None
+    with fh:
+        json.dump(doc, fh, indent=2)
+    os.replace(tmp, cfg)
+    if mode is not None:
+        os.chmod(cfg, mode)
+    tmp = None
+finally:
+    if fd is not None:
+        os.close(fd)
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+FMPY
+  ' _ "$home_abs" \
+    || echo "firstmate sbx: the claude gate-trust reconcile did not complete in sandbox $name (the guest keeps whatever trust sbx left it)" >&2
+  return 0
 }
 
 # --- tracked-file sync (guest clone fast-forward) -----------------------------

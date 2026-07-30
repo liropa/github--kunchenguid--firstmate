@@ -443,6 +443,59 @@ test_resurrection_reasserts_guest_home() {
   pass "send path: resurrection re-asserts the guest home's read path (links + marker) before relaunch"
 }
 
+test_resurrection_reasserts_claude_trust() {
+  local w fb home guest_user cfg
+  w=$(new_sbx_world reassert-trust); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  # `sbx` was measured to write projects["/"] at CREATE only, so a spawn-time
+  # revoke holds today (docs/sbx-backend.md, fork issue #40). Re-asserting on
+  # resurrection is what makes that independent of upstream behaviour firstmate
+  # does not control, and lets a guest that skipped the pass heal later. The
+  # fixture therefore plants the root grant back and expects it gone again.
+  printf '%s\n' '{"projects":{"/":{"hasTrustDialogAccepted":true}}}' > "$guest_user/.claude.json"
+  cfg="$guest_user/.claude.json"
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  assert_not_contains "$(cat "$cfg")" '"/"' \
+    "resurrection must revoke a guest-wide root grant it finds, not only spawn"
+  assert_contains "$(cat "$cfg")" "$home" \
+    "resurrection must (re)grant the guest home, or the relaunch parks on the trust dialog"
+  assert_contains "$(cat "$cfg")" "$guest_user/.no-mistakes/worktrees" \
+    "resurrection must (re)grant the gate worktree root"
+  pass "send path: resurrection re-asserts the claude workspace-trust shape before relaunch"
+}
+
+test_resurrection_skips_claude_trust_for_a_codex_guest() {
+  local w fb home guest_user
+  w=$(new_sbx_world reassert-trust-codex); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  [ ! -e "$guest_user/.claude.json" ] \
+    || fail "resurrecting a codex guest must not write claude state into it"
+  assert_not_contains "$(cat "$w/sbx.log")" ".no-mistakes/worktrees" \
+    "the reconcile must be gated on the harness, not spent on every resurrection"
+  pass "send path: resurrecting a codex guest spends no claude trust reconcile"
+}
+
 # --- guest shell-profile env (docs/sbx-backend.md "Guest shell-profile env") -
 #
 # sbx plants CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox
@@ -1733,6 +1786,8 @@ test_resume_template_quoting
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
+test_resurrection_reasserts_claude_trust
+test_resurrection_skips_claude_trust_for_a_codex_guest
 test_guest_profiles_reinject_placeholder_into_agent_children
 test_guest_profile_seed_is_idempotent_and_yields_to_the_operator
 test_guest_profile_seed_reports_unowned_source_without_touching_profile
