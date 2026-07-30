@@ -30,9 +30,11 @@
 #   state/<id>.turn-ended become host symlinks onto it); supported harnesses
 #   are claude and codex, and ship/scout sbx spawns are refused
 #   (docs/sbx-backend.md).
-#   A claude sbx spawn fail-soft merges only the guest user's
-#   $HOME/.no-mistakes/worktrees trust key into ~/.claude.json; the sbx guide
-#   owns the narrowness rationale and verification.
+#   A claude sbx spawn fail-soft reconciles ~/.claude.json to firstmate's
+#   intended workspace-trust shape (revoke the guest-wide grant sbx's own
+#   claude-flavor create writes, grant the roots a guest launches under);
+#   fm_backend_sbx_reconcile_claude_trust owns it and resurrection re-asserts
+#   it, and the sbx guide owns the narrowness rationale and verification.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1452,6 +1454,12 @@ if [ "$BACKEND" = sbx ]; then
     echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
     exit 1
   }
+  # claude workspace trust, paired with the pass above and shared with
+  # resurrection's re-assert (bin/backends/sbx.sh). Harness-gated inside, and
+  # fail-soft: a guest that cannot be reconciled still launches. It runs HERE
+  # rather than in the claude* branch below so spawn and resurrection reconcile
+  # through one call shape.
+  fm_backend_sbx_reconcile_claude_trust "$W" "$PROJ_ABS" "$HARNESS"
   case "$HARNESS" in
     claude*)
       # claude's turn-end signal cannot ride the launch command; write its
@@ -1466,89 +1474,6 @@ if [ "$BACKEND" = sbx ]; then
       }
       # shellcheck disable=SC2016  # single quotes deliberate: $1 expands in the guest sh, not here
       sbx exec "$W" -- sh -c 'printf "%s\n" ".claude/settings.local.json" >> "$1/.git/info/exclude"' _ "$PROJ_ABS" || true
-      # Pre-accept only the no-mistakes worktree ROOT: claude's ancestor-based
-      # workspace check clears the launch blocker there without enabling the
-      # branch-controlled project settings that require an exact-worktree key.
-      # Merge fail-soft into the shared config because losing claude's state is
-      # worse than leaving one recoverable park. docs/sbx-backend.md "Guest
-      # claude gate trust" owns the full contract and empirical evidence.
-      # shellcheck disable=SC2016  # single quotes deliberate: $HOME and the heredoc body expand in the guest sh, not here
-      sbx exec "$W" -- sh -c '
-        home=${HOME:-}
-        case $home in /*) ;; *) echo "firstmate sbx: guest $HOME is not absolute; skipped the claude gate-trust seed" >&2; exit 0 ;; esac
-        while :; do case $home in */) home=${home%/} ;; *) break ;; esac; done
-        if ! command -v python3 >/dev/null 2>&1; then
-          echo "firstmate sbx: no python3 in the guest; skipped the claude gate-trust seed (the first no-mistakes run may park on the trust dialog)" >&2
-          exit 0
-        fi
-        FM_TRUST_KEY=$home/.no-mistakes/worktrees FM_TRUST_CFG=$home/.claude.json python3 - <<"FMPY"
-import json, os, stat, sys, tempfile
-
-cfg = os.environ["FM_TRUST_CFG"]
-key = os.environ["FM_TRUST_KEY"]
-mode = None
-
-def skip(reason):
-    sys.stderr.write(
-        "firstmate sbx: %s did not parse (%s); left it untouched and skipped the "
-        "claude gate-trust seed\n" % (cfg, reason)
-    )
-    raise SystemExit(0)
-
-try:
-    with open(cfg) as fh:
-        mode = stat.S_IMODE(os.fstat(fh.fileno()).st_mode)
-        doc = json.load(fh)
-    if not isinstance(doc, dict):
-        skip("top level is not an object")
-except FileNotFoundError:
-    doc = {}
-except Exception as exc:
-    skip(exc)
-
-if "projects" not in doc:
-    projects = {}
-else:
-    projects = doc["projects"]
-    if not isinstance(projects, dict):
-        skip("projects is not an object")
-if key not in projects:
-    entry = {}
-else:
-    entry = projects[key]
-    if not isinstance(entry, dict):
-        skip("projects[%r] is not an object" % key)
-if entry.get("hasTrustDialogAccepted") is True:
-    raise SystemExit(0)
-
-entry["hasTrustDialogAccepted"] = True
-projects[key] = entry
-doc["projects"] = projects
-fd = None
-tmp = None
-try:
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(cfg) or ".",
-        prefix=os.path.basename(cfg) + ".fm-trust-",
-    )
-    fh = os.fdopen(fd, "w")
-    fd = None
-    with fh:
-        json.dump(doc, fh, indent=2)
-    os.replace(tmp, cfg)
-    if mode is not None:
-        os.chmod(cfg, mode)
-    tmp = None
-finally:
-    if fd is not None:
-        os.close(fd)
-    if tmp is not None:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-FMPY
-      ' || echo "firstmate sbx: the claude gate-trust seed did not complete in sandbox $W (the first no-mistakes run may park on the trust dialog)" >&2
       ;;
     codex*)
       # codex's directory-trust TUI gate blocks a non-interactive first

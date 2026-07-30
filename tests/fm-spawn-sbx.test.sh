@@ -98,11 +98,11 @@ guest_write_file() {  # <world> <guest-path>
 }
 
 # claude_trusts <claude.json> <abs-path> -> "yes" | "no". Re-implements claude's
-# workspace-trust resolution so the narrowness of the gate-trust seed is
-# asserted against the ACTUAL rule rather than against the shape of the file we
+# workspace-trust resolution so the shape of the reconciled grants is asserted
+# against the ACTUAL rule rather than against the shape of the file we
 # just wrote: normalize the path, then test it and every ancestor for a projects
 # entry with hasTrustDialogAccepted true. Verified against claude 2.1.220 -
-# docs/sbx-backend.md "Guest claude gate trust" owns the evidence.
+# docs/sbx-backend.md "Guest claude workspace trust" owns the evidence.
 claude_trusts() {  # <claude.json> <abs-path>
   python3 - "$1" "$2" <<'PY'
 import json, posixpath, sys
@@ -127,20 +127,25 @@ while True:
 PY
 }
 
-# assert_gate_trust_is_narrow <claude.json> <guest-home> <secondmate-home>: every
-# per-run gate worktree is trusted, and nothing outside the gate worktree root
-# is. A grant that widened past that root would be invisible and permanent, so
-# each out-of-scope path is a hard assertion, not a spot check.
+# assert_gate_trust_is_narrow <claude.json> <guest-home> <secondmate-home>: the
+# reconcile leaves exactly the roots a guest launches under trusted, and
+# everything else untrusted. Both halves are hard assertions because both
+# directions of failure are real: a grant that widened would be invisible and
+# permanent, and a grant that narrowed too far parks a launch (fork issues #17,
+# #40). Live in-guest evidence for each path is in docs/sbx-backend.md.
 assert_gate_trust_is_narrow() {  # <claude.json> <guest-home> <secondmate-home>
-  local cfg=$1 gh=$2 sm=$3 outside
-  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ")" = yes ] \
-    || fail "a per-run gate worktree must resolve as trusted - that is the whole point of the seed"
-  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/cd66f62cf067/01KYMKM0Y9G1KDDFBGVKD9KQK5")" = yes ] \
-    || fail "a gate worktree for a SECOND gated repo must resolve as trusted too"
-  for outside in / "$gh" "$gh/.no-mistakes" "$gh/.no-mistakes/repos/1b27f869c922.git" \
-                 "$gh/work" "$sm" "$sm/projects/alpha"; do
-    [ "$(claude_trusts "$cfg" "$outside")" = no ] \
-      || fail "the gate-trust seed must leave $outside untrusted"
+  local cfg=$1 gh=$2 sm=$3 path
+  for path in "$gh/.no-mistakes/worktrees/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ" \
+              "$gh/.no-mistakes/worktrees/cd66f62cf067/01KYMKM0Y9G1KDDFBGVKD9KQK5" \
+              "$gh/.treehouse/firstmate-92834d/1/firstmate" \
+              "$sm" "$sm/projects/alpha"; do
+    [ "$(claude_trusts "$cfg" "$path")" = yes ] \
+      || fail "the reconcile must leave $path trusted - a guest launches there and would park"
+  done
+  for path in / "$gh" "$gh/.no-mistakes" "$gh/.no-mistakes/repos/1b27f869c922.git" \
+              "$gh/work" /tmp /etc; do
+    [ "$(claude_trusts "$cfg" "$path")" = no ] \
+      || fail "the reconcile must leave $path untrusted"
   done
 }
 
@@ -547,7 +552,25 @@ test_spawn_fails_when_provision_exec_fails() {
   pass "spawn: a failed guest-home provisioning exec fails the spawn before launch"
 }
 
-# --- claude gate trust (fork issue #17) ---------------------------------------
+# --- claude gate trust (fork issues #17, #40) ---------------------------------
+
+# sbx_created_claude_json <cfg>: the config a CLAUDE-flavor `sbx create` leaves
+# behind, read from a real guest 2026-07-30 (fork issue #40). The root grant is
+# sbx's own, written after any template-side seed, so the reconcile is the only
+# thing that can remove it.
+sbx_created_claude_json() {  # <cfg>
+  cat > "$1" <<'JSON'
+{
+  "numStartups": 0,
+  "installMethod": "unknown",
+  "projects": {
+    "/": {
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
+JSON
+}
 
 test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only() {
   local w fb out gh cfg
@@ -559,11 +582,66 @@ test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only() {
   [ -f "$cfg" ] \
     || fail "a claude spawn must pre-accept gate-worktree trust (the first validation run parks otherwise)"
   assert_contains "$(cat "$cfg")" "$gh/.no-mistakes/worktrees" \
-    "the seeded key must name the no-mistakes gate worktree ROOT, the only ancestor every run shares"
+    "the granted key must name the no-mistakes gate worktree ROOT, the only ancestor every run shares"
   [ "$(fm_file_mode "$cfg")" = 600 ] \
     || fail "a newly created claude config must be private"
   assert_gate_trust_is_narrow "$cfg" "$gh" "$w/sm"
-  pass "spawn: the claude gate-trust seed covers every gate worktree and nothing outside it"
+  pass "spawn: the claude gate-trust reconcile covers every launch root and nothing outside it"
+}
+
+test_claude_trust_reconcile_revokes_the_sbx_root_grant() {
+  local w fb out gh cfg
+  w=$(new_world gate-trust-revoke); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  sbx_created_claude_json "$cfg"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  # projects["/"] is an ancestor of everything, so leaving it trusts the whole
+  # guest filesystem - the finding this reconcile exists to close.
+  assert_not_contains "$(cat "$cfg")" '"/"' \
+    "the reconcile must remove the guest-wide root grant sbx wrote"
+  assert_contains "$(cat "$cfg")" "numStartups" \
+    "revoking must not discard the session state sbx and claude keep in the same file"
+  # Revoking without granting what the guest launches under would park a
+  # secondmate at its OWN home - the regression fork issue #17 closed.
+  assert_gate_trust_is_narrow "$cfg" "$gh" "$w/sm"
+  pass "spawn: the reconcile revokes sbx's guest-wide root grant and grants the launch roots instead"
+}
+
+test_claude_trust_reconcile_preserves_other_state_under_the_root_key() {
+  local w fb out gh cfg
+  w=$(new_world gate-trust-root-extras); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  # Only the trust flag is firstmate's to revoke; anything else claude chose to
+  # record under that key is state this reconcile does not own.
+  printf '%s\n' '{"projects":{"/":{"hasTrustDialogAccepted":true,"projectOnboardingSeenCount":4}}}' > "$cfg"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "claude sbx secondmate spawn failed: $out"
+  [ "$(claude_trusts "$cfg" /)" = no ] \
+    || fail "the root grant must be revoked even when the entry carries other keys"
+  assert_contains "$(cat "$cfg")" "projectOnboardingSeenCount" \
+    "revoking the trust flag must leave the rest of the root entry alone"
+  pass "spawn: revoking the root grant removes only the trust flag, not the whole entry"
+}
+
+test_claude_trust_reconcile_skips_malformed_root_entry() {
+  local w fb out gh cfg rc=0
+  w=$(new_world gate-trust-bad-root); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes" "$w/guest-user-home"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
+  printf '%s\n' '{"projects":{"/":"wrong-shape"}}' > "$cfg"
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a malformed root entry must not fail the spawn: $out"
+  assert_contains "$(cat "$cfg")" "wrong-shape" \
+    "a malformed root entry must be left byte-for-byte alone, never replaced"
+  assert_contains "$out" "did not revoke the guest-wide trust grant" \
+    "a skipped revoke must say so, so the over-broad grant is not silently kept"
+  # The grants are independent of the revoke, so they still land.
+  [ "$(claude_trusts "$cfg" "$w/sm")" = yes ] \
+    || fail "a malformed root entry must not block the grants the guest needs to launch"
+  pass "spawn: a malformed root entry is diagnosed and preserved, and the grants still land"
 }
 
 test_claude_gate_trust_seed_adds_absent_projects_map() {
@@ -602,23 +680,29 @@ test_claude_gate_trust_seed_skips_malformed_projects_map() {
 }
 
 test_claude_gate_trust_seed_skips_malformed_gate_entry() {
-  local w fb out gh cfg before rc=0
+  local w fb out gh cfg rc=0
   w=$(new_world gate-trust-bad-entry); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes" "$w/guest-user-home"
-  gh="$w/guest-user-home"; cfg="$gh/.claude.json"; before="$w/claude-json.before"
+  gh="$w/guest-user-home"; cfg="$gh/.claude.json"
   printf '{"projects":{"%s":"wrong-shape"}}\n' "$gh/.no-mistakes/worktrees" > "$cfg"
-  cp "$cfg" "$before"
   out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
   [ "$rc" -eq 0 ] || fail "a malformed gate entry must not fail the spawn: $out"
-  cmp -s "$before" "$cfg" \
-    || fail "a malformed gate entry must remain byte-identical: $(diff "$before" "$cfg")"
-  assert_contains "$out" "$cfg did not parse (projects['$gh/.no-mistakes/worktrees'] is not an object)" \
+  # One unreadable entry is skipped on its own, not treated as a reason to
+  # abandon the others: the grants are independent, and dropping the home grant
+  # over an unrelated malformed key would park the guest at its own home.
+  assert_contains "$(cat "$cfg")" "wrong-shape" \
+    "a malformed gate entry must be preserved, never replaced"
+  [ "$(claude_trusts "$cfg" "$gh/.no-mistakes/worktrees/repo/run")" = no ] \
+    || fail "a malformed gate entry must not be repaired into a grant behind the operator's back"
+  [ "$(claude_trusts "$cfg" "$w/sm")" = yes ] \
+    || fail "the remaining grants must still land when one entry is malformed"
+  assert_contains "$out" "$cfg: projects['$gh/.no-mistakes/worktrees'] is not an object" \
     "a skipped malformed gate entry must name the config and reason"
   assert_not_contains "$out" "did not complete in sandbox" \
-    "skipping a malformed gate entry must return success from the guest seed"
+    "skipping a malformed gate entry must return success from the guest reconcile"
   assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
     "the launch must still be delivered when a malformed gate entry is skipped"
-  pass "spawn: a malformed claude gate entry is diagnosed and preserved"
+  pass "spawn: a malformed claude gate entry is diagnosed and preserved, and the other grants still land"
 }
 
 test_claude_gate_trust_seed_merges_into_the_shared_config() {
@@ -680,13 +764,16 @@ test_claude_gate_trust_seed_is_idempotent() {
   w=$(new_world gate-trust-idem); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes" "$w/guest-user-home"
   gh="$w/guest-user-home"; cfg="$gh/.claude.json"
-  # Respawns and resurrections over a kept sandbox re-run the seed against a
-  # config that already carries the grant; an entry already marked trusted is
-  # left byte-for-byte alone, matching the codex trust seed's grep-then-append.
+  # Respawns and resurrections over a kept sandbox re-run the reconcile against
+  # a config that is already in its intended shape: no root grant to revoke and
+  # every grant already present. That must write nothing at all, because the
+  # file is shared with the claude sessions the guest runs for itself.
   cat > "$cfg" <<JSON
 {
   "projects": {
-    "$gh/.no-mistakes/worktrees": {"hasTrustDialogAccepted": true, "projectOnboardingSeenCount": 3}
+    "$gh/.no-mistakes/worktrees": {"hasTrustDialogAccepted": true, "projectOnboardingSeenCount": 3},
+    "$gh/.treehouse": {"hasTrustDialogAccepted": true},
+    "$w/sm": {"hasTrustDialogAccepted": true}
   }
 }
 JSON
@@ -695,8 +782,8 @@ JSON
   out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
     || fail "claude sbx secondmate spawn failed: $out"
   cmp -s "$before" "$cfg" \
-    || fail "a re-run over an already-granted config must not rewrite it: $(diff "$before" "$cfg")"
-  pass "spawn: the gate-trust seed is a no-op once the grant is already present"
+    || fail "a re-run over an already-reconciled config must not rewrite it: $(diff "$before" "$cfg")"
+  pass "spawn: the gate-trust reconcile is a byte-identical no-op once the shape is already right"
 }
 
 test_codex_spawn_seeds_no_claude_gate_trust() {
@@ -714,21 +801,24 @@ test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
   local w fb out rc=0
   w=$(new_world gate-trust-soft); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes"
-  # Not seeding costs one recoverable park on the first validation run; failing
-  # the spawn costs the whole task. The seed is deliberately the weaker of the
-  # two, so a guest that cannot run it still launches, and says so.
+  # Not reconciling costs one recoverable park on the first validation run;
+  # failing the spawn costs the whole task. The reconcile is deliberately the
+  # weaker of the two, so a guest that cannot run it still launches, and says so.
   out=$(FM_FAKE_SBX_TRUST_SEED_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
-  [ "$rc" -eq 0 ] || fail "a failed gate-trust seed must not fail the spawn: $out"
-  assert_contains "$out" "gate-trust seed" \
-    "a skipped seed must say so, naming the park it leaves possible"
+  [ "$rc" -eq 0 ] || fail "a failed gate-trust reconcile must not fail the spawn: $out"
+  assert_contains "$out" "gate-trust reconcile did not complete" \
+    "a skipped reconcile must say so, naming the trust state it leaves behind"
   assert_contains "$(cat "$w/sbx.log")" "claude --dangerously-skip-permissions" \
-    "the launch must still be delivered when only the gate-trust seed failed"
-  pass "spawn: a failed gate-trust seed warns and launches anyway"
+    "the launch must still be delivered when only the gate-trust reconcile failed"
+  pass "spawn: a failed gate-trust reconcile warns and launches anyway"
 }
 
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
 test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only
+test_claude_trust_reconcile_revokes_the_sbx_root_grant
+test_claude_trust_reconcile_preserves_other_state_under_the_root_key
+test_claude_trust_reconcile_skips_malformed_root_entry
 test_claude_gate_trust_seed_adds_absent_projects_map
 test_claude_gate_trust_seed_skips_malformed_projects_map
 test_claude_gate_trust_seed_skips_malformed_gate_entry

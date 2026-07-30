@@ -120,7 +120,7 @@ Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon
 4. Runs guest-home provisioning: read-through symlinks for inherited local material and markers as described in "Guest-home provisioning" below, plus the credential-placeholder shell profile snippet described in "Guest shell-profile env" below.
 5. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
-6. Seeds harness-specific trust before launch: a claude harness gets the fail-soft gate-worktree-root seed owned by "Guest claude gate trust" below, while a codex harness gets the guest home's project-trust entry and carries `--dangerously-bypass-hook-trust` for its separate hooks gate.
+6. Reconciles harness-specific trust before launch: a claude harness gets the fail-soft workspace-trust reconcile owned by "Guest claude workspace trust" below, while a codex harness gets the guest home's project-trust entry and carries `--dangerously-bypass-hook-trust` for its separate hooks gate.
 7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend).
 8. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
@@ -178,33 +178,65 @@ Nothing here hot-applies to a live guest, and `~/.bash_login` is not handled (th
 
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh` and `tests/fm-spawn-sbx.test.sh` (a fake `sbx` CLI plus a plain-directory guest-user-home fixture, per this doc's testing convention) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
 
-## Guest claude gate trust (`~/.no-mistakes/worktrees`)
+## Guest claude workspace trust
 
-A fresh guest's first in-guest no-mistakes run parked because the pipeline's review agent needed the gate clone trust-accepted in the guest's shared `~/.claude.json`; the secondmate diagnosed and set it by hand on 2026-07-23, costing one full pipeline restart (fork issue #17).
-Spawn's `claude*` guest-provisioning branch now pre-accepts that trust before launch, alongside the Stop hook.
+`fm_backend_sbx_reconcile_claude_trust` (`bin/backends/sbx.sh`) brings a claude guest's shared `~/.claude.json` to firstmate's intended workspace-trust shape: revoke the guest-wide grant, grant the roots a guest genuinely launches under.
+Spawn calls it right after guest-home provisioning, and resurrection re-asserts it through the same call.
 
-The gate checks out every run into its own directory, `<no-mistakes home>/worktrees/<repo id>/<run id>`, so no fixed exact-path grant can cover a future run.
-Path shape read from real host run logs 2026-07-29 (`/Users/lp1/.no-mistakes/worktrees/1b27f869c922/01KXY39H7YT9CT9YM5VCB395YG/bin/fm-supervise-daemon.sh`); the repo id is stable per gated repo (no-mistakes' own `repos` table keys it by working path) and the run id is a per-run ULID.
+Two findings drive it, and they pull in opposite directions.
 
-What makes a narrow grant possible is that claude resolves **workspace** trust by walking the cwd's ancestors, so a grant on any ancestor directory satisfies it.
-Firstmate therefore grants exactly one key, the guest's gate worktree ROOT, which is the only ancestor every future run shares.
-The walk only ever moves UP from cwd, so that grant never reaches `$HOME`, the secondmate's own home, its project clones, or `/`; `tests/fm-spawn-sbx.test.sh` asserts each of those stays untrusted by re-running claude's own resolution rule against the seeded file.
+A fresh guest's first in-guest no-mistakes run parked because the pipeline's review agent needed the gate clone trust-accepted; the secondmate diagnosed and set it by hand on 2026-07-23, costing one full pipeline restart (fork issue #17).
+Separately, `sbx create` on a **claude-flavor** sandbox writes the guest's `~/.claude.json` itself and grants `projects["/"]`, which the ancestor walk below turns into trust over the entire guest filesystem (fork issue #40).
+That write lands after any template-side seed, so narrowing the template cannot reach it and the host side must undo it after create.
 
-The exact per-worktree key is deliberately NOT granted, because trust is not one switch:
+Revoking alone would be a regression rather than a fix.
+The guest's own firstmate home was riding that same root grant, so a bare revoke parks a secondmate on the trust dialog **at its own home** - precisely the failure issue #17 closed.
+The revoke therefore ships together with the grants that replace it, and both directions are asserted.
 
-- **Workspace** trust (the launch-blocking dialog) walks ancestors.
-- **Project-settings** loading (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized exact key and does **not** walk.
+### What is granted, and why each root
 
-A gate worktree is its own git root, so the ancestor grant clears the dialog while leaving settings carried by the branch under review dropped - a gate reviewing a pull request must not adopt permissions or hooks from the code it is reviewing.
-The narrow grant is thus strictly weaker than "trust the gate worktree", not merely narrower than "trust everything".
+Trust is not one switch:
 
-Merge, not replace: `~/.claude.json` is shared with the secondmate's own claude sessions and holds its credentials and accepted-workspace history.
-An entry already marked trusted makes a later spawn a byte-for-byte no-op, and a successful grant persists on guest disk across ordinary VM stop/resurrection.
-Resurrection does not rerun a previously skipped or removed seed; a full respawn does.
-A guest without `python3`, an existing config that does not parse, or a parseable config whose `projects` map or gate-worktree entry is not an object prints a stderr diagnostic and continues.
-Malformed state is left byte-for-byte untouched: not seeding costs one recoverable park on the first validation run, while failing the spawn or overwriting claude's own state costs the whole task.
-When a write is needed, the seed uses an exclusive same-directory temporary file and rename, creates a missing config with mode 0600, and restores an existing config's mode after replacement.
-The seed hard-codes no-mistakes' `worktrees/` layout, so an upstream layout change makes the grant inert and the park returns - the safe direction, never a wider grant.
+- **Workspace** trust (the launch-blocking dialog) walks the cwd's **ancestors**.
+- **Project-settings** loading (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized **exact** key and does **not** walk.
+
+Three keys are granted, each a ROOT whose interesting descendants are separate git roots:
+
+| Key | Covers | Why a root, not an exact key |
+|---|---|---|
+| the guest's firstmate home (`home=` in meta) | the home itself and its `projects/*` clones | each clone is its own git root, so its branch-carried settings are still dropped |
+| `$HOME/.no-mistakes/worktrees` | every gate run, `<repo id>/<run id>` | the run id is a per-run ULID, so no fixed exact key can cover a future run |
+| `$HOME/.treehouse` | in-guest crewmate worktrees | treehouse's default `root = ""` places its pool at `$HOME/.treehouse` (read from `treehouse init` in a guest, 2026-07-30) |
+
+The gate path shape was read from real host run logs 2026-07-29 (`/Users/lp1/.no-mistakes/worktrees/1b27f869c922/01KXY39H7YT9CT9YM5VCB395YG/bin/fm-supervise-daemon.sh`); the repo id is stable per gated repo (no-mistakes' own `repos` table keys it by working path).
+
+Because the walk only ever moves UP from cwd, these three grants leave `/`, the guest account home `$HOME`, `$HOME/.no-mistakes` and its sibling `repos/`, and everything else in the VM untrusted.
+`tests/fm-spawn-sbx.test.sh` asserts both directions by re-running claude's own resolution rule against the reconciled file - a widened grant would be invisible and permanent, and a narrowed one parks a launch.
+
+The exact per-worktree key is still deliberately withheld.
+A gate worktree is its own git root, so the ancestor grant clears the dialog while settings carried by the branch under review stay dropped - a gate reviewing a pull request must not adopt permissions or hooks from the code it is reviewing.
+The grant is thus strictly weaker than "trust the gate worktree", not merely narrower than "trust everything".
+Granting the firstmate home by exact key does make that repo's own `.claude/` settings eligible to load, which is firstmate's own reviewed material rather than code under review, and it does **not** extend to the project clones underneath it.
+Whether the guest Stop hook itself depends on that exact key was not measured; the hook worked before this change, when only the root grant was present.
+
+### Safety properties
+
+Merge, not replace: `~/.claude.json` is shared with the claude sessions the guest runs for itself and holds their credentials and accepted-workspace history.
+A config already in its intended shape is a byte-for-byte no-op, so respawns and resurrections never rewrite it.
+When a write is needed, the reconcile uses an exclusive same-directory temporary file and rename, creates a missing config with mode 0600, and restores an existing config's mode after replacement.
+
+Revocation removes only the `hasTrustDialogAccepted` flag from `projects["/"]`, dropping the key entirely only when nothing else remains under it; anything else claude recorded there is state this reconcile does not own.
+
+Fail-soft throughout, and the call always returns success: a guest without `python3`, a config that does not parse, or a `projects` map that is not an object prints a stderr diagnostic and continues.
+An individual entry that is not an object is skipped on its own and the remaining keys are still reconciled - dropping the home grant over an unrelated malformed key would park the guest.
+Malformed state is left byte-for-byte untouched and reported, never replaced: not reconciling costs one recoverable park, while failing a spawn or a steer, or overwriting claude's own state, costs the whole task.
+The gate grant hard-codes no-mistakes' `worktrees/` layout, so an upstream layout change makes that grant inert and the park returns - the safe direction, never a wider grant.
+
+### Why it runs on resurrection too
+
+`sbx` was measured to write `projects["/"]` at **create only**; a revoke survives ordinary stop/start, so a spawn-time revoke alone would hold today (evidence below).
+Re-asserting on resurrection makes the property independent of upstream behaviour firstmate does not control, and lets a guest that skipped the pass - no `python3` yet, a transient exec failure - heal on its next resurrection instead of staying wide open until a full respawn.
+The cost is one guest exec on the resurrect path only, which already spends several; the live-stack fast path never reaches it.
 
 ### Verification (2026-07-29, claude 2.1.220, macOS 26.5.2 arm64)
 
@@ -244,10 +276,37 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 exit=0
 ```
 
-**Not verified end to end against a real sandbox VM.**
-The only guest on this host is the captain's running secondmate, which this change must not disturb, so the in-guest half - that `python3` resolves on the `sbx exec` PATH, and that a fresh guest's first validation run now starts clean - remains unproven until the next guest is built.
-The `python3` expectation comes from the templates' own build-time assertion (`agent-dotfiles scripts/sbx-templates/lib.sh` asserts `python3 --version` through `sbx exec`, with mise shims symlinked into `~/.local/bin` ahead of the exec PATH), not from a measurement made here.
-Also unmeasured in-guest: `agent-dotfiles scripts/sbx-templates/seed/claude-state.json` seeds `projects["/"].hasTrustDialogAccepted`, which given the ancestor walk would trust the entire guest filesystem; whether that key survives `sbx create`'s regeneration of the active agent's config is unknown, and the narrow seed here is correct either way (a no-op if it survives, the actual fix if it does not).
+### Verification (2026-07-30, in-guest, claude 2.1.220, template `adf-claude:v4`)
+
+This round closes the in-guest half the 2026-07-29 entry left open, and answers the `projects["/"]` question it recorded as unknown (fork issue #40).
+Run against throwaway sandboxes (`trustprobe40-claude`, `trustprobe40-fresh`) created from a disposable git repo; the captain's running secondmate was never written to.
+
+`python3` does resolve on the `sbx exec` PATH (`/home/agent/.local/bin/python3`), so the 2026-07-29 expectation is now a measurement.
+
+**The root grant is sbx's own, and it is written at create only.**
+A fresh claude-flavor `sbx create` left `projects` as exactly `['/']`.
+Removing `/` by hand and then stopping and restarting the sandbox left it removed - `sbx` did not re-assert it, across repeated stop/start cycles.
+So a spawn-time revoke holds; resurrection re-asserts it anyway for the reasons above.
+
+**Both directions, against a real guest running the shipped `fm_backend_sbx_reconcile_claude_trust`.**
+Trust was classified by launching `claude` under in-guest `tmux` with `ANTHROPIC_API_KEY=sk-ant-invalid-probe40`: reaching `Detected a custom API key` means the path was trusted, `Accessing workspace` / `Quick safety check` means it parked.
+
+| Path | With sbx's `projects["/"]` | After the reconcile |
+|---|---|---|
+| the guest firstmate home | trusted | **trusted** |
+| `<home>/projects/alpha` | trusted | **trusted** |
+| `~/.no-mistakes/worktrees/1b27f869c922/01KYPG4E22ZN03GF19NXV2KRDQ` | trusted | **trusted** |
+| `~/.treehouse/probe-slug/1/repo` | trusted | **trusted** |
+| `/home/agent` | trusted | **parks** |
+| `/tmp/elsewhere` | trusted | **parks** |
+| `/` | trusted | **parks** |
+
+The left column is why the issue was filed; the right column is both acceptance directions at once - the guest-wide grant is gone, and every path a guest actually launches under still starts clean.
+
+Against that same fresh guest the reconcile turned `['/']` into the three intended keys while preserving the other top-level state in the file, re-running it was byte-identical (`sha256` unchanged), the config survived a stop/start cycle byte-identical, a further re-assert after that restart was again byte-identical, and a `codex` harness argument returned success without touching the guest at all.
+
+Still unproven: no in-guest crewmate has launched from `~/.treehouse` under a real secondmate, so that root is verified by the probe above and by treehouse's own default config rather than by an observed crewmate spawn.
+A project that commits its own `treehouse.toml` with a relative `root` places its pool inside the repo instead, which stays covered by the home grant.
 
 ## Tracked-file sync (guest clone fast-forward)
 
