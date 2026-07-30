@@ -222,7 +222,7 @@ Whether the guest Stop hook itself depends on that exact key was not measured; t
 ### Safety properties
 
 Merge, not replace: `~/.claude.json` is shared with the claude sessions the guest runs for itself and holds their credentials and accepted-workspace history.
-A config already in its intended shape is a byte-for-byte no-op, so respawns and resurrections never rewrite it.
+A reconcile against a config already in its intended shape is a byte-for-byte no-op, so routine re-assertion does not rewrite it.
 When a write is needed, the reconcile uses an exclusive same-directory temporary file and rename, creates a missing config with mode 0600, and restores an existing config's mode after replacement.
 
 Revocation removes only the `hasTrustDialogAccepted` flag from `projects["/"]`, dropping the key entirely only when nothing else remains under it; anything else claude recorded there is state this reconcile does not own.
@@ -339,7 +339,7 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent sandbox, or one whose inventory this caller cannot read (the two are reported apart - see "Caller reachability" below).
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), then new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then re-assert claude workspace trust when the harness is claude ("Guest claude workspace trust" above; fail-soft), run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), then create a new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), and wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures - the watcher's own stability idiom - then let the caller deliver.
 
