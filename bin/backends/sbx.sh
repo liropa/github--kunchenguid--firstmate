@@ -611,9 +611,10 @@ fm_backend_sbx_guest_tmux_ready() {  # <name>
 #   3. no tmux server -> rebuild: new tmux session at the recorded home,
 #      relaunch the agent with its harness's RESUME command, wait
 #      FM_SBX_RESURRECT_SETTLE for the composer, then let the caller deliver.
-# In-guest daemons a workflow needs (e.g. the no-mistakes daemon) do NOT come
-# back on VM start; the resumed agent restarts them on demand - its brief owns
-# that knowledge, not this transport.
+# In-guest daemons do NOT come back on VM start. The one the workflow depends
+# on - the no-mistakes daemon - is restored here before the relaunch by
+# fm_backend_sbx_restore_nomistakes_daemon; anything else an in-guest workflow
+# needs is still the resumed agent's own job, and its brief owns that.
 fm_backend_sbx_ensure_stack() {  # <target>
   local target=$1 name id meta harness home turnend beat resume fg signals_dir
   local ready_prev ready_now ready_i
@@ -672,6 +673,13 @@ fm_backend_sbx_ensure_stack() {  # <target>
   # steer is the priority, and the sweep paths (fm-update.sh, the bootstrap
   # secondmate sweep) report guest staleness durably.
   fm_backend_sbx_tracked_sync "sandbox $name guest" "$name" "$id" "$home" "$meta" resurrect >&2 || true
+  # Restore the guest's own no-mistakes daemon, which the stop killed along
+  # with the rest of the process tree. Same pre-agent safe
+  # point as the sync, and for the same reason: nothing in-guest can be
+  # mid-turn here, so a daemon read as down really is down. Fail-soft - see
+  # the function's header for why it only ever starts a positively-dead
+  # daemon and never touches the socket.
+  fm_backend_sbx_restore_nomistakes_daemon "$name"
   sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$resume" || return 1
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" Enter || return 1
@@ -1236,6 +1244,97 @@ finally:
 FMPY
   ' _ "$home_abs" \
     || echo "firstmate sbx: the claude gate-trust reconcile did not complete in sandbox $name (the guest keeps whatever trust sbx left it)" >&2
+  return 0
+}
+
+# fm_backend_sbx_restore_nomistakes_daemon: bring the guest's own no-mistakes
+# daemon back up after a VM stop killed it. docs/sbx-backend.md "Guest
+# no-mistakes daemon restore" owns the contract, the probe truth table, and the
+# bounds; this header owns the mechanics.
+#
+# Auto-stop kills the guest PROCESS TREE, so a resurrected guest came back with
+# its in-guest daemon dead and its socket left behind. Every `no-mistakes axi`
+# call then failed with `connect: connection refused`, and the in-guest worker
+# correctly refused to touch daemon lifecycle itself (bin/fm-brief.sh rule 7)
+# and parked - safe, but it cost a full supervision round trip every time.
+#
+# RESURRECTION-ONLY, and only from the rebuild branch of ensure_stack, which is
+# entered exactly when the guest tmux server is gone. That entry condition is
+# the primary safety guarantee: the whole guest process tree is dead there, so
+# there is no live daemon and no in-flight pipeline run to disturb, and it runs
+# before the agent relaunch so the resumed agent finds a live daemon on its
+# first validation call. The live-stack fast path never reaches this exec.
+#
+# The in-guest probe is the second guarantee, and it is fail-closed toward NOT
+# acting: only two positively recognized outputs count as down, and everything
+# else - a running daemon, an unrecognized line, a missing binary - is left
+# strictly alone. That direction is deliberate and asymmetric. One daemon
+# instance serves every lane in its VM, so wrongly restarting a LIVE one
+# destroys other lanes' in-flight runs, while leaving a dead one dead merely
+# restores today's manual round trip.
+#
+# `no-mistakes daemon status` EXITS 0 whether the daemon is up or down
+# (measured 2026-07-31, v1.40.2), so the exit code carries no verdict at all
+# and the classification has to read the text. The stale-socket case does not
+# even reach that wording: status connects to the socket first and errors out
+# with `connect: connection refused`, which is why a naive "not running" match
+# would miss the exact condition this exists for.
+#
+# firstmate NEVER unlinks the guest socket. `no-mistakes daemon start` owns
+# that file under its own daemon lock, and the reported manual recovery was
+# precisely that command against precisely this state. A firstmate-side unlink
+# is the only thing that could race a concurrently starting daemon, so the fix
+# declines to create the race rather than trying to win it.
+#
+# Fail-soft by contract, so this always returns 0: a steer must never be
+# abandoned over a daemon that can be restarted by hand.
+fm_backend_sbx_restore_nomistakes_daemon() {  # <name>
+  local name=$1
+  # shellcheck disable=SC2016  # single quotes deliberate: $HOME and the probe expand in the guest sh, not here
+  sbx exec "$name" -- sh -c '
+    # The daemon root is per guest USER, not per repo, and `daemon status` is
+    # cwd-independent (measured). Its absence means this guest has never run
+    # the gate, so there is no dead daemon to restore and nothing stale to
+    # clear - stay narrower than "start a daemon in every guest".
+    [ -n "${HOME:-}" ] && [ -d "$HOME/.no-mistakes" ] || exit 0
+    # Root present but no CLI on the exec PATH: this guest DOES use the gate,
+    # so a silent skip would hide the restore never firing. Checked after the
+    # root so a guest with neither stays quiet.
+    if ! command -v no-mistakes >/dev/null 2>&1; then
+      printf "%s\n" "firstmate sbx: the guest has a no-mistakes root but no no-mistakes on the exec PATH; left the daemon alone" >&2
+      exit 0
+    fi
+    NO_MISTAKES_NO_UPDATE_CHECK=1; export NO_MISTAKES_NO_UPDATE_CHECK
+    out=$(no-mistakes daemon status 2>&1)
+    case $out in
+      # LIVE first, and deliberately so: if a future status line ever carried
+      # both shapes, the running arm has to win.
+      *"daemon running"*) exit 0 ;;
+      # Down, socket already gone.
+      *"daemon not running"*) ;;
+      # Down, socket left behind by the killed process tree - the reported
+      # condition. Both halves are required so an unrelated refused connection
+      # can never read as a dead gate daemon.
+      *"connect to daemon socket"*"connection refused"*) ;;
+      *)
+        printf "%s\n" "firstmate sbx: unrecognized no-mistakes daemon status in the guest; left the daemon alone: $out" >&2
+        exit 0
+        ;;
+    esac
+    if ! start_out=$(no-mistakes daemon start 2>&1); then
+      printf "%s\n" "firstmate sbx: could not restore the guest no-mistakes daemon: $start_out" >&2
+      exit 0
+    fi
+    # Report what actually happened rather than what was attempted: a start
+    # that did not produce a serving daemon leaves the guest exactly as parked
+    # as before, and the operator should hear that here, not from the worker.
+    case $(no-mistakes daemon status 2>&1) in
+      *"daemon running"*) exit 0 ;;
+      *) printf "%s\n" "firstmate sbx: started the guest no-mistakes daemon but it is still not answering" >&2 ;;
+    esac
+    exit 0
+  ' _ \
+    || echo "firstmate sbx: the guest no-mistakes daemon restore did not complete in sandbox $name (an in-guest validation call may still refuse until the daemon is started by hand)" >&2
   return 0
 }
 

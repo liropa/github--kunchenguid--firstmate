@@ -496,6 +496,236 @@ test_resurrection_skips_claude_trust_for_a_codex_guest() {
   pass "send path: resurrecting a codex guest spends no claude trust reconcile"
 }
 
+# --- guest no-mistakes daemon restore ----------------------------------------
+#
+# Auto-stop kills the guest process tree, so a resurrected guest came back with
+# its in-guest no-mistakes daemon dead and its socket left behind; every
+# validation call then failed with `connect: connection refused` until
+# firstmate started the daemon by hand. Resurrection now restores it at the
+# pre-agent safe point (docs/sbx-backend.md "Guest no-mistakes daemon
+# restore").
+#
+# The two directions are NOT equally costly, and the suite is weighted the way
+# the risk is. One daemon instance serves every lane in its VM, so wrongly
+# restarting a LIVE one destroys other lanes' in-flight runs, while leaving a
+# dead one dead merely restores the manual round trip we had. The
+# leave-a-live-daemon-alone cases therefore assert the DAMAGE (an in-flight run
+# file the fake deletes on any lifecycle command) rather than only the absence
+# of a log line.
+
+# nm_world <name>: an sbx world with a guest-user $HOME whose gate root exists,
+# a fake no-mistakes in the given state, and a codex secondmate meta ready to
+# resurrect. Echoes "<world> <fakebin> <nmbin> <guest-user-home>".
+nm_world() {  # <name> <state>
+  local w fb nmbin home guest_user
+  w=$(new_sbx_world "$1"); fb=$(make_fake_sbx "$w"); nmbin=$(make_fake_no_mistakes "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user/.no-mistakes"
+  printf '%s\n' "$2" > "$w/nm.state"
+  : > "$w/nm.log"
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  printf '%s %s %s %s\n' "$w" "$fb" "$nmbin" "$guest_user"
+}
+
+# nm_steer <world> <fakebin> <nmbin> <guest-user-home> [extra env...]: resurrect
+# and steer fm-x (FM_FAKE_SBX_TMUX_HAS_RC=1 is the post-auto-stop guest).
+nm_steer() {
+  local w=$1 fb=$2 nmbin=$3 guest_user=$4
+  shift 4
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
+    FM_FAKE_NM_STATE_FILE="$w/nm.state" FM_FAKE_NM_LOG="$w/nm.log" "$@"
+}
+
+test_resurrection_restores_dead_gate_daemon_with_stale_socket() {
+  local w fb nmbin guest_user restore_line resume_line
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-stale stale-socket)"
+  # The exact reported shape: the daemon is gone but its socket file is not,
+  # so `no-mistakes daemon status` never reaches its "not running" wording and
+  # errors out on the refused connection instead. A classifier that only
+  # matched "daemon not running" would miss precisely this case.
+  : > "$guest_user/.no-mistakes/socket"
+
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  assert_contains "$(cat "$w/nm.log")" "daemon start" \
+    "a guest whose daemon is down behind a stale socket must be restored, not left for a manual repair"
+  [ "$(cat "$w/nm.state")" = running ] \
+    || fail "the restore must leave the guest daemon actually serving, got '$(cat "$w/nm.state")'"
+  restore_line=$(grep -n 'no-mistakes daemon status' "$w/sbx.log" | head -1 | cut -d: -f1)
+  resume_line=$(grep -n 'codex resume' "$w/sbx.log" | head -1 | cut -d: -f1)
+  [ -n "$restore_line" ] && [ "$restore_line" -lt "$resume_line" ] \
+    || fail "the restore must run before the agent relaunch, so the resumed agent finds a live daemon"
+  pass "resurrection: a daemon down behind a stale socket is restored before the relaunch"
+}
+
+test_resurrection_never_unlinks_the_guest_daemon_socket() {
+  local w fb nmbin guest_user
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-socket stale-socket)"
+  : > "$guest_user/.no-mistakes/socket"
+
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  # A firstmate-side unlink is the ONLY thing here that could race a daemon
+  # coming up concurrently - removing the inode out from under a listener
+  # leaves it serving a socket no client can reach. The fix declines to create
+  # that race: `no-mistakes daemon start` owns the file under its own lock.
+  [ -e "$guest_user/.no-mistakes/socket" ] \
+    || fail "firstmate must never unlink the guest daemon socket; only no-mistakes may, under its own lock"
+  pass "resurrection: the guest daemon socket is never unlinked host-side (no cleanup, no race)"
+}
+
+test_resurrection_restores_dead_gate_daemon_with_no_socket() {
+  local w fb nmbin guest_user
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-down down)"
+
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  assert_contains "$(cat "$w/nm.log")" "daemon start" \
+    "a plainly down daemon is the same stranded guest, just without the leftover socket"
+  [ "$(cat "$w/nm.state")" = running ] \
+    || fail "the restore must leave the guest daemon actually serving, got '$(cat "$w/nm.state")'"
+  pass "resurrection: a daemon reported plainly not-running is restored too"
+}
+
+# THE case that matters most. A wrongly-restarted daemon destroys every lane's
+# in-flight run in that VM; a daemon left down costs one supervision round
+# trip. Both sub-cases assert the run file, so a regression fails on the
+# damage, not on a log string that could be silently reworded.
+test_resurrection_never_restarts_a_running_gate_daemon() {
+  local w fb nmbin guest_user log
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-live running)"
+
+  # (a) a live daemon serving nothing in particular
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  log=$(cat "$w/nm.log")
+  assert_contains "$log" "daemon status" \
+    "the restore must probe before deciding anything"
+  assert_not_contains "$log" "daemon start" \
+    "a LIVE daemon must never be started/restarted - that kills every other lane in the VM"
+  assert_not_contains "$log" "daemon stop" \
+    "the restore must never stop a daemon"
+  assert_not_contains "$log" "daemon restart" \
+    "the restore must never restart a daemon"
+
+  # (b) the same live daemon with a pipeline run in flight. The fake deletes
+  # the run file on ANY lifecycle command, so this asserts the consequence.
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-live-inflight running)"
+  printf 'run 01KYPG4E22ZN03GF19NXV2KRDQ\n' > "$w/nm.run"
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" FM_FAKE_NM_RUN_FILE="$w/nm.run" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+  [ -e "$w/nm.run" ] \
+    || fail "resurrection destroyed an in-flight pipeline run by restarting a live daemon"
+  assert_not_contains "$(cat "$w/nm.log")" "daemon start" \
+    "an in-flight run must not even be exposed to a lifecycle command"
+  [ "$(cat "$w/nm.state")" = running ] \
+    || fail "a live daemon's state must come out exactly as it went in"
+  pass "resurrection: a running daemon is left untouched, in-flight run intact"
+}
+
+test_resurrection_leaves_an_unrecognized_daemon_status_alone() {
+  local w fb nmbin guest_user err
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-garbage garbage)"
+  printf 'run 01KYPG4E22ZN03GF19NXV2KRDQ\n' > "$w/nm.run"
+
+  err=$(nm_steer "$w" "$fb" "$nmbin" "$guest_user" FM_FAKE_NM_RUN_FILE="$w/nm.run" 2>&1 >/dev/null) \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  # Only two outputs positively mean "down". An upstream rewording must fall
+  # through to leaving the daemon alone and saying so, never to guessing.
+  assert_not_contains "$(cat "$w/nm.log")" "daemon start" \
+    "an unreadable verdict must not be acted on; it could be a live daemon"
+  [ -e "$w/nm.run" ] || fail "an unreadable verdict must not cost an in-flight run"
+  assert_contains "$err" "unrecognized no-mistakes daemon status" \
+    "an unreadable verdict must be reported, not swallowed"
+  pass "resurrection: an unrecognized daemon status is reported and left strictly alone"
+}
+
+test_resurrection_skips_the_daemon_restore_without_a_gate_root() {
+  local w fb nmbin guest_user
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-nogate down)"
+  # A guest that has never run the gate has no dead daemon to restore and
+  # nothing stale to clear, so the pass stays narrower than "start a daemon in
+  # every guest" - it must not even probe.
+  rmdir "$guest_user/.no-mistakes"
+
+  nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  [ ! -s "$w/nm.log" ] \
+    || fail "a guest with no gate root must not be probed or started: $(cat "$w/nm.log")"
+  pass "resurrection: a guest that never ran the gate gets no daemon probe at all"
+}
+
+test_resurrection_reports_a_gate_root_with_no_cli() {
+  local w fb nmbin guest_user err
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-nocli down)"
+  # A guest with a gate root but no reachable CLI genuinely uses the gate, so a
+  # silent skip would hide the restore never firing at all.
+  nmbin="$w/absent-nmbin"
+
+  err=$(nm_steer "$w" "$fb" "$nmbin" "$guest_user" 2>&1 >/dev/null) \
+    || fail "a steer of a resurrectable sandbox should succeed"
+
+  assert_contains "$err" "no no-mistakes on the exec PATH" \
+    "a gate-using guest whose CLI cannot be reached must say so, not skip silently"
+  pass "resurrection: a gate root with no reachable CLI is reported, not silently skipped"
+}
+
+test_resurrection_survives_a_failed_daemon_restore() {
+  local w fb nmbin guest_user err
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-execfail down)"
+
+  # The steer is the priority: a guest that cannot be probed is exactly the
+  # guest we have today, and refusing the steer over it would be a regression.
+  err=$(nm_steer "$w" "$fb" "$nmbin" "$guest_user" FM_FAKE_SBX_NM_RC=1 2>&1 >/dev/null) \
+    || fail "a daemon restore that cannot run must not abandon the steer"
+  assert_contains "$err" "daemon restore did not complete" \
+    "a failed restore must name itself, so the round trip it costs is not a mystery"
+  assert_contains "$(cat "$w/sbx.log")" "codex resume" \
+    "the agent must still be relaunched after a failed restore"
+
+  # A start that runs but yields no serving daemon is the same honesty rule.
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-inert down)"
+  err=$(nm_steer "$w" "$fb" "$nmbin" "$guest_user" FM_FAKE_NM_START_INERT=1 2>&1 >/dev/null) \
+    || fail "an ineffective start must not abandon the steer"
+  assert_contains "$err" "still not answering" \
+    "a start that did not produce a serving daemon must be reported as such"
+  pass "resurrection: a failed or ineffective daemon restore is reported, never fatal to the steer"
+}
+
+test_live_stack_delivery_spends_no_daemon_restore() {
+  local w fb nmbin guest_user
+  read -r w fb nmbin guest_user <<<"$(nm_world nm-livestack running)"
+  printf 'run 01KYPG4E22ZN03GF19NXV2KRDQ\n' > "$w/nm.run"
+
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=0 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
+    FM_FAKE_NM_STATE_FILE="$w/nm.state" FM_FAKE_NM_LOG="$w/nm.log" \
+    FM_FAKE_NM_RUN_FILE="$w/nm.run" \
+    || fail "a steer of a live stack should succeed"
+
+  # Resurrect-only cost, and resurrect-only reach: a guest whose stack is up is
+  # running its daemon and possibly a pipeline run, and routine delivery must
+  # not go near either.
+  assert_not_contains "$(cat "$w/sbx.log")" "no-mistakes daemon status" \
+    "the daemon restore is resurrect-only; routine delivery must not spend the exec"
+  [ ! -s "$w/nm.log" ] || fail "routine delivery must not touch the guest daemon: $(cat "$w/nm.log")"
+  [ -e "$w/nm.run" ] || fail "routine delivery must never disturb an in-flight run"
+  pass "send path: a live guest stack spends no daemon restore and never touches the daemon"
+}
+
 # --- guest shell-profile env (docs/sbx-backend.md "Guest shell-profile env") -
 #
 # sbx plants CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox
@@ -1788,6 +2018,15 @@ test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
 test_resurrection_reasserts_claude_trust
 test_resurrection_skips_claude_trust_for_a_codex_guest
+test_resurrection_restores_dead_gate_daemon_with_stale_socket
+test_resurrection_never_unlinks_the_guest_daemon_socket
+test_resurrection_restores_dead_gate_daemon_with_no_socket
+test_resurrection_never_restarts_a_running_gate_daemon
+test_resurrection_leaves_an_unrecognized_daemon_status_alone
+test_resurrection_skips_the_daemon_restore_without_a_gate_root
+test_resurrection_reports_a_gate_root_with_no_cli
+test_resurrection_survives_a_failed_daemon_restore
+test_live_stack_delivery_spends_no_daemon_restore
 test_guest_profiles_reinject_placeholder_into_agent_children
 test_guest_profile_seed_is_idempotent_and_yields_to_the_operator
 test_guest_profile_seed_reports_unowned_source_without_touching_profile
