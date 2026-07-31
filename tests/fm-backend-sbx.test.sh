@@ -1302,14 +1302,25 @@ test_send_to_foreign_name_records_no_breadcrumb() {
 # these tests execute it directly ON THE HOST with a fake tmux and real files -
 # no sandbox, no fake sbx - unit-testing the exact loop the guest runs.
 
-# make_fake_guest_tmux <fakebin>: a one-pane guest tmux whose visible pane
-# content is the file named by FAKE_TMUX_PANE (empty/unset = idle pane).
+# make_fake_guest_tmux <fakebin>: a guest tmux whose secondmate pane (fm:1.0)
+# shows the file named by FAKE_TMUX_PANE (empty/unset = idle pane). Setting
+# FAKE_TMUX_PANE2 adds the in-guest crewmate's pane in its own session, the
+# real layout: bin/backends/tmux.sh puts crewmate windows in session
+# "firstmate" while the sbx guest agent runs in session FM_SBX_GUEST_SESSION.
 make_fake_guest_tmux() {  # <fakebin>
   cat > "$1/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-panes) printf 'fm:1.0\n' ;;
-  capture-pane) cat "${FAKE_TMUX_PANE:-/dev/null}" 2>/dev/null ;;
+  list-panes)
+    printf 'fm:1.0\n'
+    [ -n "${FAKE_TMUX_PANE2:-}" ] && printf 'firstmate:1.0\n'
+    ;;
+  capture-pane)
+    case " $* " in
+      *" firstmate:1.0 "*) cat "${FAKE_TMUX_PANE2:-/dev/null}" 2>/dev/null ;;
+      *) cat "${FAKE_TMUX_PANE:-/dev/null}" 2>/dev/null ;;
+    esac
+    ;;
 esac
 exit 0
 SH
@@ -1427,6 +1438,114 @@ test_keepalive_script_releases_idle_guest_on_turn_end() {
     "a genuinely idle guest should release as released-idle"
   [ ! -e "$w/signals/x/x.guest-active" ] || fail "an idle guest must not touch the guest-active breadcrumb"
   pass "keep-alive loop: a genuinely idle guest still releases on the turn-end (auto-stop preserved)"
+}
+
+# THE 2026-07-31 recurrence of fork issue #12, after its fix had already
+# shipped: the keeper was alive and pinning,
+# then released as idle at the secondmate's own turn-end while an in-guest
+# crewmate was genuinely running - it had committed and was driving a
+# no-mistakes run, so it appended no signal for far longer than the activity
+# window and its pane tail did not carry the busy idiom at the polled instant.
+# A redrawing crewmate pane is the third activity arm and must hold the pin.
+test_keepalive_script_pins_redrawing_crewmate_with_quiet_tail() {
+  local w fb script te pid wid i
+  w=$(new_sbx_world keeper-redraw); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  # A crewmate task is registered in the guest home and its only signal file is
+  # far older than the activity window: the worker is inside one long
+  # operation, exactly the state the VM died on top of.
+  : > "$w/home/state/w1.meta"
+  : > "$w/home/state/w1.status"
+  touch -t 202001010000 "$w/home/state/w1.status"
+  : > "$w/pane.txt"
+  printf 'running tests\n' > "$w/worker.txt"
+  # The crewmate's pane redraws while its tail never carries the busy idiom.
+  ( i=0
+    while [ "$i" -lt 300 ]; do
+      printf 'running tests %s\n' "$i" > "$w/worker.txt"
+      i=$((i + 1))
+      sleep 0.2
+    done ) &
+  wid=$!
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" FAKE_TMUX_PANE2="$w/worker.txt" \
+    sh -c "$script" _ "$te" 60 1 120 "$w/home" 'esc (to )?interrupt' > "$w/verdict.txt" &
+  pid=$!
+  sleep 0.5
+  touch "$te"
+  # The secondmate's turn just ended; the working crewmate must keep the pin.
+  sleep 3
+  if ! kill -0 "$pid" 2>/dev/null; then
+    kill "$wid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "the keeper released on the turn-end while a crewmate was still working: $(cat "$w/verdict.txt")"
+  fi
+  # The crewmate's pane goes static: the pin must release, auto-stop re-engages.
+  kill "$wid" 2>/dev/null || true
+  wait "$wid" 2>/dev/null || true
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "the keeper did not release after the crewmate's pane went static"
+  fi
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$(cat "$w/verdict.txt")" "fm-keepalive released-idle" \
+    "a quiescent guest after the turn-end should release the pin"
+  [ -e "$w/signals/x/x.guest-active" ] || fail "the redrawing stretch should have touched the guest-active breadcrumb"
+  pass "keep-alive loop: a redrawing crewmate pins across the turn-end despite a quiet tail and stale signals"
+}
+
+test_keepalive_script_releases_static_crewmate_pane() {
+  # The other direction of the same arm: a crewmate that is registered but done
+  # - reported and awaiting cleanup - has a static pane and is NOT work, so an
+  # unlanded task registration alone can never defeat auto-stop.
+  local w fb te out
+  w=$(new_sbx_world keeper-static); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  : > "$w/home/state/w1.meta"
+  printf 'ready for review\n' > "$w/worker.txt"
+  export FAKE_TMUX_PANE2="$w/worker.txt"
+  out=$(run_keepalive_script "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  unset FAKE_TMUX_PANE2
+  [ "$out" = "fm-keepalive capped-idle" ] || fail "a registered but static crewmate pane must not pin, got '$out'"
+  [ ! -e "$w/signals/x/x.guest-active" ] || fail "a static crewmate pane must not touch the guest-active breadcrumb"
+  pass "keep-alive loop: a registered crewmate with a static pane stays idle (auto-stop preserved)"
+}
+
+test_keepalive_script_change_arm_needs_a_registered_crewmate() {
+  # The arm is gated on a registered crewmate task so the ordinary idle
+  # secondmate - the common case, and the one stopped-is-healthy rests on -
+  # keeps exactly its pre-fix auto-stop behaviour whatever its panes redraw.
+  local w fb te out wid i
+  w=$(new_sbx_world keeper-gate); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  printf 'boot\n' > "$w/worker.txt"
+  ( i=0
+    while [ "$i" -lt 60 ]; do
+      printf 'line %s\n' "$i" > "$w/worker.txt"
+      i=$((i + 1))
+      sleep 0.1
+    done ) &
+  wid=$!
+  export FAKE_TMUX_PANE2="$w/worker.txt"
+  out=$(run_keepalive_script "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  unset FAKE_TMUX_PANE2
+  kill "$wid" 2>/dev/null || true
+  wait "$wid" 2>/dev/null || true
+  [ "$out" = "fm-keepalive capped-idle" ] || fail "a changing pane with no registered crewmate must not pin, got '$out'"
+  pass "keep-alive loop: the pane-change arm stays off for an ordinary idle secondmate"
 }
 
 # --- keep-alive wrapper: mid-task-stop classification ------------------------
@@ -2054,6 +2173,9 @@ test_send_to_foreign_name_records_no_breadcrumb
 test_keepalive_script_capped_verdicts
 test_keepalive_script_pins_busy_worker_across_turn_end
 test_keepalive_script_releases_idle_guest_on_turn_end
+test_keepalive_script_pins_redrawing_crewmate_with_quiet_tail
+test_keepalive_script_releases_static_crewmate_pane
+test_keepalive_script_change_arm_needs_a_registered_crewmate
 test_keepalive_wrapper_marks_midtask_stop_on_capped_active
 test_keepalive_wrapper_skips_marker_when_vm_still_running
 test_keepalive_wrapper_marks_dropped_connection_with_fresh_breadcrumb
