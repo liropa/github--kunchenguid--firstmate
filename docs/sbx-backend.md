@@ -316,14 +316,13 @@ A project that commits its own `treehouse.toml` with a relative `root` places it
 
 The first in-guest crewmate ever launched under the agent-dotfiles secondmate confirmed the `$HOME/.treehouse` grant and exposed the second gate in the same launch.
 
-- **Workspace trust behaved as designed.** The crewmate started under `/home/agent/.treehouse` and raised no workspace dialog, so the narrowed grant held under a real secondmate rather than only under the probe paths above.
-- **The project-settings gate parked the launch anyway.** The crewmate's worktree carried the repo's own committed `.claude/settings.json`, read at file level inside the live guest worktree: `permissions.allow` 18 entries, `permissions.deny` 12, plus a `hooks` block.
-- **One keypress cleared it.** `bin/fm-send.sh <id> --key Enter` from the supervising firstmate released the launch and the worker proceeded immediately.
+- **Workspace trust behaved as designed:** The crewmate started under `/home/agent/.treehouse` and raised no workspace dialog, so the narrowed grant held under a real secondmate rather than only under the probe paths above.
+- **The project-settings gate parked the launch anyway:** The crewmate's worktree carried the repo's own committed `.claude/settings.json`, read at file level inside the live guest worktree: `permissions.allow` 18 entries, `permissions.deny` 12, plus a `hooks` block.
+- **One keypress cleared it:** `bin/fm-send.sh <id> --key Enter` from the supervising firstmate released the launch and the worker proceeded immediately.
 
-That is the operational consequence: the workspace grant removes its own dialog and cannot remove the other one, so a first claude launch in a fresh worktree still needs a supervised answer.
-Because the settings key is per worktree, that cost is per worktree rather than per guest, and an unattended in-guest dispatch parks until someone answers it.
+This run is the measurement behind the once-per-worktree dispatch contract and keypress owned by `.agents/skills/harness-adapters/SKILL.md`'s claude section.
 
-Re-derived host-side on 2026-07-31 from this repo's worktree: `agent-dotfiles`'s `.claude/settings.json` is tracked (`git ls-files --error-unmatch .claude/settings.json`) and carries exactly `permissions.allow` 18, `permissions.deny` 12, and a `hooks` block, so the settings that gate asked about were branch-controlled rather than local operator state.
+Re-derived host-side on 2026-07-31 inside the separate external `agent-dotfiles` repository at commit `9f9d163`: `git show 9f9d163:.claude/settings.json` shows exactly `permissions.allow` 18, `permissions.deny` 12, and a `hooks` block, so the settings that gate asked about were branch-controlled rather than local operator state.
 Not captured during the guest run: the guest claude version and the exact dialog text, so this entry records an observed outcome rather than a replayable transcript.
 The 2026-07-29 print-mode observation above cannot substitute for one: `claude -p` prints the dropped-settings notice instead of asking, so print mode cannot reproduce this park at all.
 
