@@ -428,7 +428,7 @@ A start that runs but leaves the daemon not answering is reported as such rather
 Bounds, deliberately not covered:
 
 - A guest with `no-mistakes` installed but no `$HOME/.no-mistakes` root yet is skipped. It has no dead daemon to restore and nothing stale to clear, and the alternative is starting a daemon in every guest that happens to ship the binary.
-- Preventing the auto-stop itself is separate work (`sbx-keepalive-inguest-recurrence`); this only makes the guest come back complete after a stop that already happened.
+- Preventing the false-idle auto-stop recurrence is the keep-alive's pane-change arm above; resurrection only makes the guest come back complete after a stop that still happens.
 - Whether a daemon started from inside an `sbx exec` survives that exec's exit is **not yet observed on a live guest**. The reported manual recovery ran from the guest's own tmux pane, not from an exec, and no-mistakes detaches the process itself, but the exec-parented case is the one live gap here - if it does not hold, the honest "still not answering" diagnostic above is what surfaces, and the guest is no worse off than before.
 
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (the real guest script executed against a fixture `$HOME` and a fake `no-mistakes` whose status wording is byte-accurate to the measurements above) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
