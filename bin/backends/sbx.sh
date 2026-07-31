@@ -467,21 +467,34 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # exec runs, factored out so tests can exercise the pin/release logic directly
 # (a fake tmux plus real files) without a sandbox. Args after the _ argv0:
 #   $1 turn-ended mount file    $2 max pin seconds   $3 poll seconds
-#   $4 activity window seconds  $5 guest home path ('' skips the state probe)
+#   $4 activity window seconds  $5 guest home path ('' skips the state probes)
 #   $6 busy-pane regex
 # Pin/release contract (docs/sbx-backend.md "Steering and resurrection"):
 #   - Pin at least until the turn-ended mount file advances past its delivery
 #     baseline (the original v1 condition: the delivered turn must not die).
-#   - Past that, keep pinning while the guest shows WORK: any tmux pane whose
-#     visible tail matches the busy regex (the same busy idiom the watcher and
-#     the submit verify use), or a status/turn-ended file under the guest
-#     home's state/ (an in-guest child worker's signals) touched within the
-#     activity window. An in-guest crewmate therefore keeps the VM alive
-#     across the secondmate's own turn boundaries (fork issue #12).
+#   - Past that, keep pinning while the guest shows WORK, read from three
+#     independent arms: any tmux pane whose visible tail matches the busy regex
+#     (the same busy idiom the watcher and the submit verify use); a
+#     status/turn-ended file under the guest home's state/ (an in-guest child
+#     worker's signals) touched within the activity window; or, WHILE A
+#     CREWMATE TASK IS REGISTERED in the guest home's state/, any change in the
+#     captured pane set since the previous poll. An in-guest crewmate therefore
+#     keeps the VM alive across the secondmate's own turn boundaries (fork
+#     issue #12).
+#   - The third arm exists because the first two both read idle while a
+#     crewmate was genuinely running (2026-07-31, fork issue #12 recurring
+#     after its fix shipped): a worker inside one long operation - there,
+#     driving a no-mistakes run - appends no signal for far longer than the
+#     activity window, and its busy tail is not
+#     continuously present the way the v2 contract assumed. A redrawing pane is
+#     direct evidence of guest work; a static pane set is direct evidence of
+#     quiescence. Gating it on a registered crewmate task keeps the arm off for
+#     the ordinary idle secondmate, whose auto-stop behaviour is unchanged.
 #   - Release ("released-idle") once the turn ended AND no work is visible: a
 #     genuinely idle guest still auto-stops (stopped-is-healthy stays true).
-#     An idle-parked worker TUI - no busy tail, no recent signals - is NOT
-#     work and never pins, exactly like the secondmate's own idle TUI.
+#     An idle-parked worker TUI - no busy tail, no recent signals, a static
+#     pane - is NOT work and never pins, exactly like the secondmate's own idle
+#     TUI, so a finished worker awaiting teardown still lets the VM stop.
 #   - The cap bounds everything ("capped-active"/"capped-idle"): a wedged or
 #     forever-busy-looking guest can never pin the VM past the cap.
 #   - While work is visible, touch the mount's <id>.guest-active breadcrumb so
@@ -497,13 +510,25 @@ fm_backend_sbx_keepalive_script() {
     mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
     start=$(date +%s)
     base=$(mt "$t")
+    prev=
     while :; do
       now=$(date +%s)
       work=0
-      for p in $(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null); do
-        if tmux capture-pane -p -t "$p" 2>/dev/null | grep -v "^[[:space:]]*$" | tail -6 | grep -qiE "$regex"; then
-          work=1
+      crew=0
+      snap=
+      if [ -n "$home" ]; then
+        for f in "$home"/state/*.meta; do
+          [ -e "$f" ] || continue
+          crew=1
           break
+        done
+      fi
+      for p in $(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null); do
+        pane=$(tmux capture-pane -p -t "$p" 2>/dev/null)
+        snap="$snap|$p|$pane"
+        if [ "$work" = 0 ] \
+          && printf "%s\n" "$pane" | grep -v "^[[:space:]]*$" | tail -6 | grep -qiE "$regex"; then
+          work=1
         fi
       done
       if [ "$work" = 0 ] && [ -n "$home" ]; then
@@ -514,6 +539,11 @@ fm_backend_sbx_keepalive_script() {
           break
         done
       fi
+      sig=$(printf "%s" "$snap" | cksum 2>/dev/null) || sig=
+      if [ "$work" = 0 ] && [ "$crew" = 1 ] && [ -n "$prev" ] && [ "$sig" != "$prev" ]; then
+        work=1
+      fi
+      prev=$sig
       if [ "$work" = 1 ]; then touch "$act" 2>/dev/null; fi
       if [ $((now - start)) -ge "$max" ]; then
         if [ "$work" = 1 ]; then echo "fm-keepalive capped-active"; else echo "fm-keepalive capped-idle"; fi
