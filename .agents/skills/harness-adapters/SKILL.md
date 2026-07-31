@@ -132,7 +132,18 @@ Natural language is acceptable if uncertain.
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+Two independent gates can park a claude launch, and a machine's first ever run may add a bypass-permissions confirmation on top of them.
+
+- **Workspace** trust ("Accessing workspace" / "Quick safety check") resolves by walking the cwd's **ancestors**, so a single grant over a pool root clears it for every worktree beneath that root.
+- **Project-settings** trust resolves by the **exact** git-root-canonicalized key and does **not** walk, so no ancestor grant ever clears it, and it is asked once per worktree whenever that worktree carries a committed `.claude/settings.json`.
+
+For any repo that commits `.claude/settings.json`, including firstmate's own, the project-settings gate is the one a launch actually hits.
+Pre-seeding its per-worktree key is refused on purpose rather than merely unimplemented: that file is controlled by the branch the agent was sent to work on, so granting the key would make the agent adopt permissions, hooks, and MCP servers carried by the code under review.
+The prompt is that boundary working, not a gap to close; `docs/sbx-backend.md`'s "Guest claude workspace trust" owns the full rationale and the grant shape firstmate does seed.
+
+Budget one supervised answer for the FIRST claude launch in each new worktree - once per worktree, not once per machine or per sandbox.
+An unattended or away-mode dispatch into a fresh worktree therefore sits parked until someone answers it, so treat that keypress as part of dispatching the task rather than an occasional surprise.
+
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 

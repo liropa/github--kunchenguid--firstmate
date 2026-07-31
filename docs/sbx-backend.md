@@ -197,8 +197,11 @@ The revoke therefore ships together with the grants that replace it, and both di
 
 Trust is not one switch:
 
-- **Workspace** trust (the launch-blocking dialog) walks the cwd's **ancestors**.
-- **Project-settings** loading (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized **exact** key and does **not** walk.
+- **Workspace** trust walks the cwd's **ancestors**.
+- **Project-settings** trust (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized **exact** key and does **not** walk.
+
+Both gates can park an interactive launch, and the grants below clear only the first of them.
+`.agents/skills/harness-adapters/SKILL.md`'s claude section owns what firstmate does about the second one at spawn time, because it is a property of claude everywhere rather than of this backend.
 
 Three keys are granted, each a ROOT whose interesting descendants are separate git roots:
 
@@ -214,8 +217,9 @@ Because the walk only ever moves UP from cwd, these three grants leave `/`, the 
 `tests/fm-spawn-sbx.test.sh` asserts both directions by re-running claude's own resolution rule against the reconciled file - a widened grant would be invisible and permanent, and a narrowed one parks a launch.
 
 The exact per-worktree key is still deliberately withheld.
-A gate worktree is its own git root, so the ancestor grant clears the dialog while settings carried by the branch under review stay dropped - a gate reviewing a pull request must not adopt permissions or hooks from the code it is reviewing.
+A gate worktree and a crewmate worktree are each their own git root, so the ancestor grant clears the workspace dialog while settings carried by the branch stay dropped - a gate reviewing a pull request must not adopt permissions or hooks from the code it is reviewing, and a crewmate must not adopt them from the branch it was sent to work on.
 The grant is thus strictly weaker than "trust the gate worktree", not merely narrower than "trust everything".
+The cost of that refusal is the per-worktree project-settings prompt on a first launch, owned by `.agents/skills/harness-adapters/SKILL.md` and measured below on 2026-07-31; paying it is the point, so a future reader should not close it by granting the exact key.
 Granting the firstmate home by exact key does make that repo's own `.claude/` settings eligible to load, which is firstmate's own reviewed material rather than code under review, and it does **not** extend to the project clones underneath it.
 Whether the guest Stop hook itself depends on that exact key was not measured; the hook worked before this change, when only the root grant was present.
 
@@ -305,8 +309,23 @@ The left column is why the issue was filed; the right column is both acceptance 
 
 Against that same fresh guest the reconcile turned `['/']` into the three intended keys while preserving the other top-level state in the file, re-running it was byte-identical (`sha256` unchanged), the config survived a stop/start cycle byte-identical, a further re-assert after that restart was again byte-identical, and a `codex` harness argument returned success without touching the guest at all.
 
-Still unproven: no in-guest crewmate has launched from `~/.treehouse` under a real secondmate, so that root is verified by the probe above and by treehouse's own default config rather than by an observed crewmate spawn.
+At the time of this round no in-guest crewmate had launched from `~/.treehouse` under a real secondmate, so that root rested on the probe above and on treehouse's own default config; the 2026-07-31 entry below closes that with an observed crewmate spawn.
 A project that commits its own `treehouse.toml` with a relative `root` places its pool inside the repo instead, which stays covered by the home grant.
+
+### Verification (2026-07-31, in-guest, first real crewmate launch)
+
+The first in-guest crewmate ever launched under the agent-dotfiles secondmate confirmed the `$HOME/.treehouse` grant and exposed the second gate in the same launch.
+
+- **Workspace trust behaved as designed.** The crewmate started under `/home/agent/.treehouse` and raised no workspace dialog, so the narrowed grant held under a real secondmate rather than only under the probe paths above.
+- **The project-settings gate parked the launch anyway.** The crewmate's worktree carried the repo's own committed `.claude/settings.json`, read at file level inside the live guest worktree: `permissions.allow` 18 entries, `permissions.deny` 12, plus a `hooks` block.
+- **One keypress cleared it.** `bin/fm-send.sh <id> --key Enter` from the supervising firstmate released the launch and the worker proceeded immediately.
+
+That is the operational consequence: the workspace grant removes its own dialog and cannot remove the other one, so a first claude launch in a fresh worktree still needs a supervised answer.
+Because the settings key is per worktree, that cost is per worktree rather than per guest, and an unattended in-guest dispatch parks until someone answers it.
+
+Re-derived host-side on 2026-07-31 from this repo's worktree: `agent-dotfiles`'s `.claude/settings.json` is tracked (`git ls-files --error-unmatch .claude/settings.json`) and carries exactly `permissions.allow` 18, `permissions.deny` 12, and a `hooks` block, so the settings that gate asked about were branch-controlled rather than local operator state.
+Not captured during the guest run: the guest claude version and the exact dialog text, so this entry records an observed outcome rather than a replayable transcript.
+The 2026-07-29 print-mode observation above cannot substitute for one: `claude -p` prints the dropped-settings notice instead of asking, so print mode cannot reproduce this park at all.
 
 ## Tracked-file sync (guest clone fast-forward)
 
