@@ -22,7 +22,7 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
 - `sbx stop <name>` stops the VM; disk state stays intact and the sandbox restarts on the next `exec` (~1.5-2 s).
   sbx also auto-stops idle sandboxes on its own - an idle-stopped secondmate is a HEALTHY state, not a failure.
 - Auto-stop (and `sbx stop`) kill the guest **process tree**: the agent, its tmux server, and any in-guest daemons die; only disk survives.
-  Empirical corroboration from agent-dotfiles: the in-guest no-mistakes daemon does not come back on VM restart.
+  Empirical corroboration from agent-dotfiles: the in-guest no-mistakes daemon does not come back on VM restart, which is why resurrection restores it ("Guest no-mistakes daemon restore" below).
 - `sbx rm` requires `--force` non-interactively (the confirmation prompt dies on "stdin is not a terminal").
   `sbx rm --force` destroys the VM **including its disk** - the in-guest home clone's private `data/` and any unlanded work, which is why teardown probes the guest first (see "Teardown" below).
 - `sbx exec` against an absent name fails rc 1 with `ERROR: no sandbox named '...'`.
@@ -357,7 +357,7 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent sandbox, or one whose inventory this caller cannot read (the two are reported apart - see "Caller reachability" below).
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then re-assert claude workspace trust when the harness is claude ("Guest claude workspace trust" above; fail-soft), run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), then create a new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), and wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then re-assert claude workspace trust when the harness is claude ("Guest claude workspace trust" above; fail-soft), run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), restore the guest's own no-mistakes daemon at that same safe point ("Guest no-mistakes daemon restore" below; fail-soft), then create a new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), and wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures - the watcher's own stability idiom - then let the caller deliver.
 
@@ -375,8 +375,58 @@ While work is visible, the loop touches the mount's `<id>.guest-active` breadcru
 When the exec ends, the keep-alive's host-side wrapper classifies the outcome: an idle release or an idle cap expiry is silent, while a cap expiry with work still active - or an exec death while the breadcrumb was fresh (an explicit `sbx stop`, a crash) - waits `FM_SBX_MIDTASK_STOP_SETTLE` (default 120 s, covering the measured auto-stop grace), reads the sandbox state once (the only sbx CLI cost, spent per rare suspicious exit, never per poll), and on `stopped`/`absent` records the `state/.sbx-midtask-stop-` marker the watcher surfaces as a named mid-task-stop alarm (below).
 The keep-alive loop, its release/pin decisions, and the wrapper's marker classification are verified against the fixtures in `tests/fm-backend-sbx.test.sh` (the loop executed directly with a fake tmux, the wrapper against the fake `sbx` CLI) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
 
-In-guest daemons a workflow needs (e.g. the no-mistakes daemon) do not come back on VM start; the resumed agent restarts them on demand - its brief owns that knowledge.
+In-guest daemons do not come back on VM start.
+The one an in-guest workflow depends on - the no-mistakes daemon - is restored by resurrection itself (below); anything else remains the resumed agent's own job, and its brief owns that knowledge.
 Such a daemon inherits its credentials from the guest shell profiles ("Guest shell-profile env" above), not from the agent's own env.
+
+### Guest no-mistakes daemon restore (`fm_backend_sbx_restore_nomistakes_daemon`)
+
+Auto-stop kills the guest process tree, so a resurrected guest used to come back with its in-guest no-mistakes daemon dead and its socket left behind at `<guest home>/.no-mistakes/socket`.
+Every `no-mistakes axi` call then failed with `connect: connection refused`.
+The in-guest worker correctly refused to touch daemon lifecycle itself (`bin/fm-brief.sh` rule 7 reserves that to firstmate) and parked as `blocked` rather than wedging, so the failure was safe - it just cost a full supervision round trip every time, and the manual repair was always the same command.
+Reported by the agent-dotfiles secondmate 2026-07-31 while recovering from an auto-stop that killed its worker mid-run; that report and its own successful `no-mistakes daemon start` recovery are the provenance for the shape below.
+
+Resurrection now runs one guest exec at the pre-agent safe point, between the tracked-file sync and the tmux session, so the resumed agent finds a live daemon on its first validation call.
+`bin/fm-brief.sh` rule 7 is deliberately **unchanged**: daemon lifecycle stays firstmate's, and this is firstmate exercising it.
+
+**The safety direction is asymmetric, and the design leans the whole way toward inaction.**
+One daemon instance serves every lane in its VM, so wrongly restarting a live one destroys other lanes' in-flight pipeline runs, while leaving a dead one dead merely restores the manual round trip.
+Three properties keep it on the safe side:
+
+- **Resurrect-only, from the rebuild branch alone.** That branch is entered exactly when the guest tmux server is gone, which means the whole guest process tree is dead - so there is structurally no live daemon and no in-flight run to disturb. The live-stack fast path never reaches this exec, and never spends it either.
+- **Only a positively recognized down reading acts.** A running daemon, an unrecognized status line, a guest with no `no-mistakes` on the exec PATH, and a guest whose `$HOME/.no-mistakes` root does not exist are all left strictly alone. An upstream rewording therefore degrades to today's manual round trip, never to a restarted live daemon. Two of those skips are reported on stderr rather than staying silent - an unrecognized status line, and a gate root whose CLI the exec cannot reach - because both mean a gate-using guest was not restored; a guest with neither root nor CLI is silent, since it has no gate to restore.
+- **Only `daemon start` is ever issued.** `daemon stop`, `daemon restart`, and `--force` are not in this path at all.
+
+The classification has to read the status **text**, because the exit code carries no verdict:
+
+| Guest condition | `no-mistakes daemon status` exit | Output | Verdict |
+|---|---|---|---|
+| daemon running | 0 | `  ● daemon running (pid <n>)` | live - leave alone |
+| daemon down, socket already gone | 0 | `  ○ daemon not running` | down - start it |
+| daemon down, stale socket left behind | 1 | `connect to daemon socket: dial ipc: dial unix <home>/.no-mistakes/socket: connect: connection refused` | down - start it |
+| anything else | any | any | unknown - leave alone, report it |
+
+Measured host-side 2026-07-31 against no-mistakes v1.40.2 on macOS 26.5.2 arm64, using a scratch `HOME` so the live daemon was never touched.
+The exit-0-either-way result is the reason the exit code is not consulted, and the third row is the reason a "not running" match alone would miss the exact condition this exists for: `status` connects to the socket before it reaches that wording.
+A stale pidfile naming a dead pid does not fool the probe - with only `daemon.pid`/`daemon.lock` present the same scratch home still reported `○ daemon not running`.
+
+**Firstmate never unlinks the guest socket.**
+`no-mistakes daemon start` owns that file under its own daemon lock, and the reported manual recovery was precisely that command against precisely this state.
+A firstmate-side unlink is the only thing in this path that could race a daemon coming up concurrently - removing the inode out from under a listener would leave it serving a socket no client can reach - so the fix declines to create the race rather than trying to win it.
+Two concurrent host steers to the same guest are covered by the same ownership: both would issue `daemon start`, and no-mistakes' own lock and `daemon already running` refusal arbitrate.
+
+Fail-soft throughout, and the call always returns success: a steer must never be abandoned over a daemon that can still be started by hand.
+A start that runs but leaves the daemon not answering is reported as such rather than claimed as a recovery.
+
+Bounds, deliberately not covered:
+
+- A guest with `no-mistakes` installed but no `$HOME/.no-mistakes` root yet is skipped. It has no dead daemon to restore and nothing stale to clear, and the alternative is starting a daemon in every guest that happens to ship the binary.
+- Preventing the auto-stop itself is separate work (`sbx-keepalive-inguest-recurrence`); this only makes the guest come back complete after a stop that already happened.
+- Whether a daemon started from inside an `sbx exec` survives that exec's exit is **not yet observed on a live guest**. The reported manual recovery ran from the guest's own tmux pane, not from an exec, and no-mistakes detaches the process itself, but the exec-parented case is the one live gap here - if it does not hold, the honest "still not answering" diagnostic above is what surfaces, and the guest is no worse off than before.
+
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (the real guest script executed against a fixture `$HOME` and a fake `no-mistakes` whose status wording is byte-accurate to the measurements above) - not yet re-verified end to end against a real sandbox VM the way the "Live verification status" section is.
+The leave-a-live-daemon-alone cases assert an in-flight run file the fake deletes on any lifecycle command, so a regression fails on the damage rather than on a log string.
+Each case was confirmed failing against broken logic before being accepted as passing: removing the call, dropping the live-daemon guard, dropping the stale-socket arm, letting an unrecognized status fall through to a start, and adding a host-side socket unlink each fail their own test.
 
 Triage protection (design doc §7.3): `bin/fm-crew-state.sh`'s `pane_readable` uses the state probe for sbx (a stopped sandbox is present, classified from the status log), and the adapter's capture refuses outright unless the sandbox is already running - so routine triage can never churn an idle-stopped VM.
 

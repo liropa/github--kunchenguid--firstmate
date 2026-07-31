@@ -98,6 +98,18 @@
 #                            That exec writes the guest USER's ~/.claude.json,
 #                            so it uses FM_FAKE_SBX_GUEST_USER_HOME and the same
 #                            always-override $HOME rule.
+#   FM_FAKE_SBX_NM_BIN       directory prepended to PATH for the no-mistakes
+#                            daemon-restore exec (the `sh -c` pass naming
+#                            `no-mistakes daemon status`). Put a fake
+#                            `no-mistakes` there to pose a running / down /
+#                            stale-socket / unrecognized guest; unset = the
+#                            guest has no gate binary at all. That exec reads
+#                            $HOME/.no-mistakes, so it uses
+#                            FM_FAKE_SBX_GUEST_USER_HOME and the same
+#                            always-override $HOME rule - a suite must never
+#                            probe the developer's real daemon root.
+#   FM_FAKE_SBX_NM_RC        non-zero fails that exec outright (the transport
+#                            failure case) instead of executing it
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -289,6 +301,25 @@ case "$cmd" in
         sh -c "$script" "$@"
         exit $?
         ;;
+      "sh -c "*"no-mistakes daemon status"*)
+        # The guest no-mistakes daemon restore
+        # (fm_backend_sbx_restore_nomistakes_daemon), driven by resurrection.
+        # Executed for real against a fixture $HOME and a fixture PATH, so
+        # suites assert what the probe DECIDED (was `daemon start` invoked, or
+        # was a live daemon left alone) rather than grepping script text.
+        [ "${FM_FAKE_SBX_NM_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_NM_RC}"
+        script=$3
+        shift 3
+        guest_user_home=${FM_FAKE_SBX_GUEST_USER_HOME:-${FM_FAKE_SBX_LOG:-/dev/null}.guest-user-home}
+        mkdir -p "$guest_user_home" 2>/dev/null || true
+        # HERMETIC PATH, not a prepend: the guest script would otherwise be one
+        # inherited PATH entry away from invoking the developer's REAL
+        # `no-mistakes daemon start` against their own daemon. The script needs
+        # only shell builtins plus `command -v`, so the system dirs suffice.
+        env HOME="$guest_user_home" \
+          PATH="${FM_FAKE_SBX_NM_BIN:-/nonexistent}:/usr/bin:/bin" sh -c "$script" "$@"
+        exit $?
+        ;;
       "sh -c "*".no-mistakes/worktrees"*)
         # The claude workspace-trust reconcile (fork issues #17, #40), driven by
         # both fm-spawn and resurrection. Executed for real against a fixture
@@ -371,6 +402,58 @@ SH
 # this library, exactly like SBX_LS_EMPTY below.
 # shellcheck disable=SC2034
 SBX_FAKE_PLACEHOLDER=sk-ant-oat01-fixtureplaceholder
+
+# make_fake_no_mistakes <dir>: install a fake `no-mistakes` into <dir>/nmbin
+# (echoed) for the guest daemon-restore exec. Its `daemon status` output is
+# byte-accurate to the real CLI measured 2026-07-31 (v1.40.2) - including that
+# status EXITS 0 whether the daemon is up or DOWN, so a fake that leaned on the
+# exit code would let a broken classifier pass. Behavior is driven by env at
+# call time:
+#   FM_FAKE_NM_STATE_FILE   file holding one of running|down|stale-socket|
+#                           garbage; the fake reads it fresh per call, so a
+#                           successful `daemon start` can flip it to running
+#   FM_FAKE_NM_LOG          every invocation appended as one "$*" line
+#   FM_FAKE_NM_RUN_FILE     an in-flight pipeline run. ANY daemon lifecycle
+#                           command other than `status` deletes it, modelling
+#                           the real consequence of restarting a daemon that
+#                           serves live lanes. A suite asserts the file, not
+#                           just the log, so a regression fails on the damage
+#                           rather than on a string.
+#   FM_FAKE_NM_START_FAILS  non-empty makes `daemon start` fail
+#   FM_FAKE_NM_START_INERT  non-empty leaves the state unchanged after a
+#                           successful-looking start (a start that did not
+#                           produce a serving daemon)
+make_fake_no_mistakes() {  # <dir>
+  local nmbin="$1/nmbin"
+  mkdir -p "$nmbin"
+  cat > "$nmbin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_FAKE_NM_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_NM_LOG"
+state=$(cat "${FM_FAKE_NM_STATE_FILE:?FM_FAKE_NM_STATE_FILE unset}" 2>/dev/null || echo down)
+case "${1:-} ${2:-}" in
+  "daemon status")
+    case "$state" in
+      running)      printf '  \342\227\217 daemon running (pid 4242)\n'; exit 0 ;;
+      down)         printf '  \342\227\213 daemon not running\n'; exit 0 ;;
+      stale-socket) printf 'connect to daemon socket: dial ipc: dial unix %s/.no-mistakes/socket: connect: connection refused\n' "$HOME"; exit 1 ;;
+      *)            printf 'some future status wording nobody has seen\n'; exit 0 ;;
+    esac
+    ;;
+  "daemon start"|"daemon stop"|"daemon restart")
+    # The damage a wrongly-issued lifecycle command does, made observable.
+    [ -n "${FM_FAKE_NM_RUN_FILE:-}" ] && rm -f "$FM_FAKE_NM_RUN_FILE"
+    [ -z "${FM_FAKE_NM_START_FAILS:-}" ] || { printf 'daemon start failed\n' >&2; exit 1; }
+    [ -n "${FM_FAKE_NM_START_INERT:-}" ] || printf 'running\n' > "$FM_FAKE_NM_STATE_FILE"
+    printf 'daemon process started\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$nmbin/no-mistakes"
+  printf '%s\n' "$nmbin"
+}
 
 fm_sbx_guest_env_source_line() {
   printf '%s\n' "if [ -r \"\$HOME/.fm-sbx-env.sh\" ]; then . \"\$HOME/.fm-sbx-env.sh\"; fi  # firstmate sbx guest env"
