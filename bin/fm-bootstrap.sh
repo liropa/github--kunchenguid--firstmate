@@ -450,14 +450,14 @@ secondmate_sync() {
     fi
     if ! validate_secondmate_home "$id" "$home"; then
       echo "SECONDMATE_SYNC: secondmate $id guest: skipped: unsafe home: $VALIDATION_ERROR"
-      continue
+    else
+      guest_line=$(fm_backend_sbx_tracked_sync "secondmate $id guest" "fm-$id" "$id" "$VALIDATED_HOME" "$meta" sweep)
+      case "$guest_line" in
+        *': updated '*) echo "BOOTSTRAP_INFO: $guest_line" ;;
+        *': already current') ;;
+        *) echo "SECONDMATE_SYNC: $guest_line" ;;
+      esac
     fi
-    guest_line=$(fm_backend_sbx_tracked_sync "secondmate $id guest" "fm-$id" "$id" "$VALIDATED_HOME" "$meta" sweep)
-    case "$guest_line" in
-      *': updated '*) echo "BOOTSTRAP_INFO: $guest_line" ;;
-      *': already current') ;;
-      *) echo "SECONDMATE_SYNC: $guest_line" ;;
-    esac
     # Cross-vendor gate assertion, as the BACKSTOP to the create and
     # resurrection assertions in bin/backends/sbx.sh (which owns the check and
     # its verdict vocabulary). Resurrection alone is not coverage: the guest

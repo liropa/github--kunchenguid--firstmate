@@ -305,8 +305,13 @@ test_resurrection_reports_without_blocking() {
 
 # --- T11: the session-start sweep is the backstop, and stays quiet when ok --
 test_bootstrap_sweep_classifies() {
-  local w fb nmbin guest_user out
+  local w fb nmbin guest_user out bootstrap_root
   read -r w fb nmbin guest_user <<<"$(new_gate_world bootstrap)"
+  bootstrap_root="$w/firstmate"
+  git clone -q "$ROOT" "$bootstrap_root"
+  cp "$ROOT/bin/fm-bootstrap.sh" "$bootstrap_root/bin/fm-bootstrap.sh"
+  git -C "$bootstrap_root" branch -M main
+  git -C "$bootstrap_root" remote remove origin
   mkdir -p "$w/home/state" "$w/home/data" "$w/signals/x"
   touch "$w/home/state/.last-watcher-beat"
   git init -q -b main "$w/sm"
@@ -333,7 +338,7 @@ test_bootstrap_sweep_classifies() {
     FM_SBX_SIGNALS_ROOT="$w/signals" FM_HOME="$w/home" FM_SEND_SETTLE=0 \
     FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
     FM_FAKE_NM_GATE=claude \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+    "$bootstrap_root/bin/fm-bootstrap.sh" 2>/dev/null)
 
   assert_contains "$out" "GATE_VENDOR: secondmate x guest: same vendor: the gate would review on claude" \
     "a same-vendor guest must surface as one actionable GATE_VENDOR line at session start"
@@ -344,10 +349,26 @@ test_bootstrap_sweep_classifies() {
     FM_SBX_SIGNALS_ROOT="$w/signals" FM_HOME="$w/home" FM_SEND_SETTLE=0 \
     FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
     FM_FAKE_NM_GATE=codex \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+    "$bootstrap_root/bin/fm-bootstrap.sh" 2>/dev/null)
 
   assert_not_contains "$out" "GATE_VENDOR:" "a cross-vendor guest is routine silence, not a diagnostic"
-  pass "T11 the session-start sweep surfaces a same-vendor guest and stays quiet on a healthy one"
+
+  # (c) host-home validation governs tracked sync only. The vendor backstop
+  # reads guest state and must still run when that independent host check fails.
+  sed -i.bak "s|^home=.*|home=$w/missing-home|" "$w/home/state/x.meta"
+  rm "$w/home/state/x.meta.bak"
+  out=$(PATH="$fb:$BASE_PATH" \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" FM_HOME="$w/home" FM_SEND_SETTLE=0 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
+    FM_FAKE_NM_GATE=claude \
+    "$bootstrap_root/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate x guest: skipped: unsafe home:" \
+    "an unsafe host home must still be reported by tracked sync"
+  assert_contains "$out" "GATE_VENDOR: secondmate x guest: same vendor: the gate would review on claude" \
+    "host-home validation must never suppress the independent vendor backstop"
+  pass "T11 the session-start sweep classifies vendors independently of host-home validation"
 }
 
 test_same_vendor_gate_is_caught

@@ -481,8 +481,8 @@ It is never swallowed: the reason is printed at every call site, and the asserti
 Resurrection **never blocks**, following the tracked-file sync's precedent in the same function: a hard refusal there strands a live secondmate mid-task, and the printed line reaches the supervisor either way.
 The session-start sweep is the **backstop**, and it is not optional coverage - the live guest ran 26 gates across 26 hours without a single resurrection, so resurrection alone would never have caught it.
 The sweep classifies the same way the guest tracked-sync sweep beside it does: cross-vendor is routine silence, every other outcome is one actionable `GATE_VENDOR:` line.
-It probes a **running** guest only; `sbx exec` auto-starts a stopped sandbox, and booting every sbx guest at every session start to re-read a value nothing in a stopped VM can change is a cost the backstop does not need to pay.
-A stopped guest is reported as an honest skip and re-asserted at its next start.
+The assertion itself never wakes a stopped guest; `sbx exec` auto-starts a stopped sandbox, and booting every sbx guest solely to re-read a value nothing in a stopped VM can change is a cost the backstop does not need to pay.
+When the preceding tracked-file sync has already woken a guest, the assertion rides that wake at no extra cost; a guest that remains stopped is reported as an honest skip and re-asserted at its next start.
 
 One bounded side effect is worth naming: the probe is the guest's first `no-mistakes` invocation in a fresh VM, so it materializes no-mistakes' **own** default global config when the image baked none.
 That is the same file the guest's first gate run would have written, it is never a firstmate-authored config, and `EnsureDefaultGlobalConfig` never overwrites one that already exists.
