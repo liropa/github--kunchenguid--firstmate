@@ -496,7 +496,7 @@ A throwaway guest `fm-gvproof2` was created through firstmate's own path - `bin/
 No provisioning script was run, no `sbx create` was issued by hand, and the guest's gate config was never edited; it arrived baked in the template.
 Create's assertion passed **silently**, which is its cross-vendor verdict: the gate resolved codex against a claude worker.
 
-On the first gate that guest ever ran - beforehand `~/.no-mistakes/` held only the baked `config.yaml` and no `logs/` directory - `~/.no-mistakes/logs/01KZ1JEMC9NY71H9S871PM4S2D/review.log` recorded:
+On the first gate that guest ever ran - beforehand `~/.no-mistakes/` held the baked `config.yaml` and `update-check.json`, with no `logs/` directory - `~/.no-mistakes/logs/01KZ1JEMC9NY71H9S871PM4S2D/review.log` recorded:
 
 ```
 reviewing changes...
