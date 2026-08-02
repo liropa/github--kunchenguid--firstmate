@@ -1,5 +1,14 @@
 # Claude project-settings trust posture
 
+## Scope
+
+**Claude Code v2.1.220, host/tmux path, measured 2026-08-02.**
+This entire document is a reading of that one version on that one launch path.
+The sbx guest path was not re-probed in that run, so nothing here extends to it.
+Treat the whole document as version-pinned rather than as a standing property of claude, and re-measure before carrying it forward.
+
+Full probe transcripts are in the scout report `data/claude-trust-prompt-scope-reconcile/report.md` (firstmate-private).
+
 Branch-carried claude project settings load in a host pool worktree under the primary checkout's repo-root trust grant, with no prompt of any kind.
 That includes command-executing `PreToolUse` hooks.
 This document records that the fleet accepts that deliberately, the evidence it rests on, and the one claim in the area that is still unverified.
@@ -7,15 +16,6 @@ This document records that the fleet accepts that deliberately, the evidence it 
 `.agents/skills/harness-adapters/SKILL.md`'s claude section owns the operative dispatch rule (which gates fire where, and how many supervised keypresses to budget).
 `docs/sbx-backend.md`'s "Guest claude workspace trust" owns the guest clone case and the grant shape firstmate does seed.
 This document owns only the posture: what executes without being chosen, why that is accepted, and what would change the answer.
-
-## Scope
-
-**Claude Code v2.1.220, host/tmux path, measured 2026-08-02.**
-Everything below is a reading of that one version on that one launch path.
-The sbx guest path was not re-probed in that run, so nothing here extends to it.
-Treat the whole document as version-pinned rather than as a standing property of claude, and re-measure before carrying it forward.
-
-Full probe transcripts are in the scout report `data/claude-trust-prompt-scope-reconcile/report.md` (firstmate-private).
 
 ## What was measured
 
