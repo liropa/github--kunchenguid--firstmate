@@ -1,0 +1,49 @@
+sbx guest gate-vendor proof - capture manifest
+==============================================
+
+sandbox name        fm-gvproof2
+template tag        docker.io/library/adf-codex:v5
+template image id   c5e40c1c8781
+template flavor     codex-docker
+sbx agent flavor    codex          (FM_SBX_AGENT=codex)
+worker harness      claude         (the vendor the guest's worker writes code with)
+guest no-mistakes   v1.40.2
+
+pipeline run id     01KZ1JEMC9NY71H9S871PM4S2D
+gated branch        gate-vendor-proof-rerun
+gated head          a9e19c7e
+review step         completed, 0 findings, 107465 ms
+reviewing pid       1884   (named by review.log; review-cmdline.txt is this pid's argv)
+
+UTC timestamps      run dir created  2026-08-02 15:46:01 UTC
+                    review.log final 2026-08-02 15:47:49 UTC
+                    argv captured    while the review process was still live
+
+guest log tally     run dirs 1, review.log showing codex 1, review.log showing claude 0
+
+Guest state before this gate ran (proving it was the first):
+    ~/.no-mistakes/ contained only config.yaml (baked into the template
+    2026-08-02 03:45:59 UTC) and update-check.json; no logs/ directory existed.
+
+Exact create command (run from the firstmate task worktree):
+
+    FM_HOME=/tmp/claude-501/gvproof2-parent \
+    FM_SBX_TEMPLATE=docker.io/library/adf-codex:v5 \
+    FM_SBX_AGENT=codex \
+    FM_SBX_SIGNALS_ROOT=/Users/lp1/dev/fm-signals-gvproof2 \
+    bin/fm-spawn.sh gvproof2 /Users/lp1/dev/repos/fm-2ndmate-gvproof2 \
+        --harness claude --backend sbx --secondmate
+
+  reaching fm_backend_sbx_create_task in bin/backends/sbx.sh. The throwaway
+  secondmate home was seeded first with bin/fm-home-seed.sh gvproof2 <home>
+  --no-projects. No provisioning script was run, no sbx create was issued by
+  hand, and the guest's gate config was never edited.
+
+Create-time gate-vendor assertion: passed silently, which is its cross-vendor
+verdict (gate resolves codex, worker harness is claude).
+
+Files in this directory:
+    review.log          verbatim copy of ~/.no-mistakes/logs/<run id>/review.log
+    review-cmdline.txt  /proc/1884/cmdline, NUL separators rendered as newlines,
+                        complete and untruncated (82 argv entries)
+    manifest.txt        this file

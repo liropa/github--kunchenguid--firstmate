@@ -491,22 +491,22 @@ The assertion judges whatever the guest would actually resolve, so a generated d
 Verified against the fixtures in `tests/fm-sbx-gate-vendor.test.sh`: the real guest probe script executed against a hermetic PATH and a fake `no-mistakes` whose `doctor` report shape is byte-accurate to the v1.40.2 output above, **including that it exits 0 while reporting a gate it cannot validate**.
 That property has its own fixture guard, so a fake that stopped reproducing the lie fails the suite rather than letting a classifier pass for the wrong reason.
 
-**Verified end to end against a real sandbox VM 2026-08-02** (`fm-gate-config-fresh-guest-proof`).
-A throwaway guest `fm-gvproof` was created through firstmate's own path - `bin/fm-spawn.sh <id> <home> --harness claude --backend sbx --secondmate`, reaching `fm_backend_sbx_create_task` - on `docker.io/library/adf-codex:v5` (image `c5e40c1c8781`) with `FM_SBX_AGENT=codex`, from a throwaway `FM_HOME` outside the captain's fleet.
+**Verified end to end against a real sandbox VM 2026-08-02** (`fm-gate-config-fresh-guest-proof`), with the raw capture retained in [`sbx-gate-vendor-proof/`](sbx-gate-vendor-proof/).
+A throwaway guest `fm-gvproof2` was created through firstmate's own path - `bin/fm-spawn.sh <id> <home> --harness claude --backend sbx --secondmate`, reaching `fm_backend_sbx_create_task` - on `docker.io/library/adf-codex:v5` (image `c5e40c1c8781`) with `FM_SBX_AGENT=codex`, from a throwaway `FM_HOME` outside the captain's fleet.
 No provisioning script was run, no `sbx create` was issued by hand, and the guest's gate config was never edited; it arrived baked in the template.
 Create's assertion passed **silently**, which is its cross-vendor verdict: the gate resolved codex against a claude worker.
 
-On the first gate that guest ever ran - beforehand `~/.no-mistakes/` held only the baked `config.yaml` and no `logs/` directory - `~/.no-mistakes/logs/01KZ1FZMSB167398WQS2F4WZ0V/review.log` recorded:
+On the first gate that guest ever ran - beforehand `~/.no-mistakes/` held only the baked `config.yaml` and no `logs/` directory - `~/.no-mistakes/logs/01KZ1JEMC9NY71H9S871PM4S2D/review.log` recorded:
 
 ```
 reviewing changes...
 
-codex started pid=1937
+codex started pid=1884
 ...
-codex exited pid=1937 status=success
+codex exited pid=1884 status=success
 ```
 
-and that process's own argv, read from `/proc/1937/cmdline` while the review was still live, carries the pins:
+and that same pid's own argv, read from `/proc/1884/cmdline` while the review was still live, carries the pins:
 
 ```
 /home/agent/.local/share/mise/installs/node/26.5.0/bin/node
@@ -518,10 +518,16 @@ gpt-5.6-sol
 model_reasoning_effort="high"
 ```
 
-The review step completed in 90.3 s with zero findings, spanning 2026-08-02 15:02:53 to 15:04:23 UTC, on a real committed change rather than a dry run.
+Both excerpts are quotations from the retained files, not the evidence itself: [`review.log`](sbx-gate-vendor-proof/review.log) is a verbatim copy, [`review-cmdline.txt`](sbx-gate-vendor-proof/review-cmdline.txt) is the complete untruncated argv with NUL separators rendered as newlines, and [`manifest.txt`](sbx-gate-vendor-proof/manifest.txt) records the sandbox, template tag and image id, run id, UTC timestamps, and the exact create command.
+The pid ties them together: the log names 1884 and the retained argv is 1884's.
+
+The review step completed in 107.5 s with zero findings, spanning 2026-08-02 15:46:01 to 15:47:49 UTC, on a real committed change rather than a dry run.
 The guest's whole log tree was 1 run, 1 `review.log`, **codex 1, claude 0** - against the 26-of-26-on-claude regression target above.
 Both CLIs were observed present in that guest, so by the resolution order measured above `auto` would still have reached claude: the baked config is what changed the outcome, not CLI availability.
-The run was aborted after review rather than pushed, and the guest was destroyed once the log was captured.
+The run was aborted after review rather than pushed, and the guest was destroyed once the artifacts were copied out.
+
+An earlier guest `fm-gvproof`, created the same way that day, produced the same result - `codex started pid=1937`, same pins, review clean in 90.3 s.
+Its artifacts were **not** retained and it was destroyed, which is precisely why the run above was redone: an observation only its observer can vouch for is the weak artifact this section exists to reject, and reproducing across two independently created guests is a side benefit, not the reason.
 
 The artifacts this defect family has already produced falsely are recorded as context only, never as the proof: the guest's `agent: codex` config line, `doctor`'s `✓ gate validation  codex is runnable`, and the run's exit status.
 
