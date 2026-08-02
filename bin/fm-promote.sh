@@ -25,11 +25,19 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # refuses a violating record whole, silently disarming the task's merge poll.
 # Same re-emit shape as bin/fm-pr-check.sh, which writes the identity in.
 TMP="$META.tmp"
-{
-  grep -v -E '^(kind|pr|pr_head)=' "$META" || true
-  echo "kind=ship"
-  grep -E '^(pr|pr_head)=' "$META" || true
-} > "$TMP"
+PR_TMP="$META.pr.tmp"
+: > "$TMP"
+: > "$PR_TMP"
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    kind=*) ;;
+    pr=*|pr_head=*) printf '%s\n' "$line" >> "$PR_TMP" || exit 1 ;;
+    *) printf '%s\n' "$line" >> "$TMP" || exit 1 ;;
+  esac
+done < "$META"
+printf 'kind=ship\n' >> "$TMP" || exit 1
+cat "$PR_TMP" >> "$TMP" || exit 1
+rm "$PR_TMP" || exit 1
 mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
