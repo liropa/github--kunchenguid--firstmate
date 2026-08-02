@@ -1455,6 +1455,108 @@ test_ambiguous_failure_accepts_validated_replacement() {
   pass "ambiguous migration recovery accepts an explicitly validated replacement poll"
 }
 
+# A respawn rewrites state/<id>.meta wholesale and used to drop pr= with it. The
+# poll's own artifacts survive that untouched, so reporting the result as an
+# "ambiguous or invalid legacy poll" describes tampering that did not happen and
+# reads as a trust problem. The narrower classification says what actually
+# failed - and the ACTION stays byte-identical: quarantined, unarmed, explicit
+# re-arm required, nothing rebuilt from the surviving sidecar.
+test_missing_pr_identity_is_named_apart_from_legacy_quarantine() {
+  local dir state url identity_message ambiguous_message
+  url=https://github.com/o/r/pull/10
+  identity_message="task task-a: poll artifacts are current and self-consistent; only the task's recorded PR identity is missing or unusable; poll quarantined and unarmed"
+  ambiguous_message='task task-a: ambiguous or invalid legacy poll quarantined and unarmed'
+
+  dir=$(make_case respawn-wiped-pr-identity)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null \
+    || fail "fixture could not arm a poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "fixture poll was not armed"
+  assert_grep "pr=$url" "$state/task-a.meta" "fixture did not record the PR identity"
+
+  # The exact respawn payload: the same spawn field list, with no pr= line.
+  write_task_meta "$dir"
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" \
+    > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration refused a poll whose task metadata lost its PR identity"
+
+  assert_grep "$identity_message" "$state/.pr-check-migration.log" \
+    "migration did not name the missing PR identity as what failed"
+  assert_no_grep "$ambiguous_message" "$state/.pr-check-migration.log" \
+    "migration still called a current, self-consistent poll legacy and invalid"
+  assert_grep "quarantined poll was watching $url" "$state/.pr-check-migration.log" \
+    "migration did not name the PR the quarantined poll was watching"
+  assert_grep "bin/fm-pr-check.sh task-a $url" "$state/.pr-check-migration.log" \
+    "migration did not name the exact re-arm command"
+  assert_grep 'refused while it is unresponsive' "$state/.pr-check-migration.log" \
+    "migration did not explain that re-arming needs a responsive watcher"
+
+  assert_absent "$state/task-a.check.sh" "identity quarantine left the poll armed"
+  assert_absent "$state/task-a.pr-poll" "identity quarantine left the sidecar live"
+  assert_absent "$state/task-a.pr-poll-registration" \
+    "identity quarantine left the registration live"
+  assert_present "$state/.pr-check-quarantine/task-a.diagnostic.identity" \
+    "identity quarantine did not record its terminal outcome"
+  [ -n "$(find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | head -1)" ] \
+    || fail "identity quarantine did not retain the poll for review"
+  assert_contains "$(cat "$dir/migrate.out")" 'quarantined polls remain unarmed' \
+    "identity quarantine did not report the poll as unarmed"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  # A genuinely legacy poll keeps the older, broader description.
+  dir=$(make_case legacy-poll-keeps-ambiguous)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" \
+    > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration refused a legacy poll"
+  assert_grep "$ambiguous_message" "$state/.pr-check-migration.log" \
+    "legacy poll lost its ambiguous classification"
+  assert_no_grep 'poll artifacts are current and self-consistent' \
+    "$state/.pr-check-migration.log" \
+    "legacy poll was wrongly reported as merely missing its PR identity"
+  pass "a poll disarmed only by a lost PR identity is named apart from a legacy quarantine"
+}
+
+# The watcher-pause refusal is accurate about the watcher but says nothing about
+# why a migration was running at all, which is what actually needs fixing. It has
+# that answer - the task whose poll failed validation - so it should say it.
+test_unpausable_watcher_names_the_task_that_forced_the_scan() {
+  local dir state older_pid rc
+  dir=$(make_case migration-unpausable-watcher)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null \
+    || fail "fixture could not arm a poll"
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>&1 \
+    || fail "fixture could not complete a clean migration"
+
+  # A settled home whose recorded PR identity then goes away: the scan is forced
+  # by that task alone, not by anything about the markers or the quarantine.
+  write_task_meta "$dir"
+  ( trap '' TERM; while :; do sleep 1; done ) &
+  older_pid=$!
+  write_watcher_lock "$state" "$dir/home" "$older_pid"
+  set +e
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" \
+    > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  kill -KILL "$older_pid" 2>/dev/null || true
+  wait "$older_pid" 2>/dev/null || true
+
+  [ "$rc" -ne 0 ] || fail "migration continued past a watcher it could not pause"
+  assert_grep 'watcher did not pause; review state/.watch.lock before rearming polls' \
+    "$dir/migrate.err" "the watcher-pause refusal lost its original claim"
+  assert_grep 'scan forced by task task-a' "$dir/migrate.err" \
+    "the watcher-pause refusal did not name the task that forced the scan"
+  assert_present "$state/task-a.check.sh" \
+    "an unpausable watcher still let the migration touch the poll"
+  pass "an unpausable watcher is reported with the task whose poll forced the scan"
+}
+
 test_replacement_provenance_negative_matrix() {
   local case_name dir state donor rc zeros
   zeros=0000000000000000000000000000000000000000000000000000000000000000
@@ -2856,6 +2958,8 @@ test_postrename_marker_and_diagnostic_validation_retries
 test_quarantine_validation_and_retry_contract
 test_failed_outcomes_block_every_retry_until_repaired
 test_ambiguous_failure_accepts_validated_replacement
+test_missing_pr_identity_is_named_apart_from_legacy_quarantine
+test_unpausable_watcher_names_the_task_that_forced_the_scan
 test_replacement_provenance_negative_matrix
 test_complete_single_link_validation
 test_canonical_publication_failure_recovers_only_on_retry

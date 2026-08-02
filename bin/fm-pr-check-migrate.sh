@@ -3,8 +3,12 @@
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
 # Canonical polls are rebuilt from validated metadata, provenance-bound polls
 # and registered custom checks remain armed, and every other task poll is
-# quarantined for private review. A current X-mode shim is preserved by exact
-# content, while the recognized older byte-static shim is refreshed in place.
+# quarantined for private review. A quarantined poll whose own artifacts are
+# current and self-consistent is reported apart from a legacy or ambiguous one,
+# because there the single failed check is the task's recorded PR identity; the
+# action is the same and the surviving sidecar is never authority for a rebuild.
+# A current X-mode shim is preserved by exact content, while the recognized
+# older byte-static shim is refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -75,8 +79,12 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+# The first task whose armed poll failed validation, i.e. what forced this scan.
+# Empty when some other leg failed, or when nothing failed at all.
+MIGRATION_SCAN_TRIGGER=
 current_checks_authenticated() {
   local check id
+  MIGRATION_SCAN_TRIGGER=
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
@@ -85,7 +93,10 @@ current_checks_authenticated() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
+      MIGRATION_SCAN_TRIGGER=$id
+      return 1
+    fi
   done
 }
 
@@ -147,6 +158,9 @@ diagnostic_obligation_message() {
       pending-canonical|pending-ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: migration outcome tracking started before legacy poll handling"
         ;;
+      pending-identity)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: migration outcome tracking started before quarantining a poll whose recorded PR identity is unusable"
+        ;;
       canonical)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll rebuilt and armed"
         ;;
@@ -156,11 +170,23 @@ diagnostic_obligation_message() {
       failure-ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
         ;;
+      failure-identity)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: quarantine of a poll with an unusable PR identity is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
+        ;;
       failure-replacement)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: replacement poll lacks canonical provenance or metadata binding; poll remains unarmed; republish it through fm-pr-check.sh"
         ;;
       ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
+        ;;
+      # Narrower than `ambiguous`, and the difference matters to whoever reads
+      # this: the poll's own artifacts are current-format and internally
+      # consistent, so calling it "legacy" or "invalid" would describe tampering
+      # that did not happen. The single failed check is the task's recorded PR
+      # identity. Same action as `ambiguous` - quarantined, unarmed, re-arm
+      # required - only an accurate name for it.
+      identity)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: poll artifacts are current and self-consistent; only the task's recorded PR identity is missing or unusable; poll quarantined and unarmed"
         ;;
       validated)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: validated replacement poll armed after legacy quarantine"
@@ -234,9 +260,11 @@ migration_complete() {
   if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
     for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
       "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+      "$QUARANTINE"/*.diagnostic.pending-identity \
       "$QUARANTINE"/*.diagnostic.pending-noncanonical \
       "$QUARANTINE"/*.diagnostic.failure-canonical \
       "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+      "$QUARANTINE"/*.diagnostic.failure-identity \
       "$QUARANTINE"/*.diagnostic.failure-replacement; do
       [ -e "$obligation" ] || [ -L "$obligation" ] || continue
       return 1
@@ -281,7 +309,10 @@ if fm_pid_alive "$pid"; then
     i=$((i + 1))
   done
   if fm_pid_alive "$pid"; then
-    echo "PR_CHECK_MIGRATION: watcher did not pause; review state/.watch.lock before rearming polls" >&2
+    # The claim is about the watcher and is exactly what was observed. The
+    # appended clause answers the question it cannot: why a migration was
+    # running at all. Absent when some other leg forced the scan.
+    echo "PR_CHECK_MIGRATION: watcher did not pause; review state/.watch.lock before rearming polls${MIGRATION_SCAN_TRIGGER:+ (scan forced by task $MIGRATION_SCAN_TRIGGER)}" >&2
     exit 1
   fi
 fi
@@ -649,7 +680,7 @@ migrate_legacy_noncanonical_namespace() {
 ensure_diagnostic_obligation() {
   local prefix=$1 kind=$2 message=$3 destination
   case "$kind" in
-    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|failure-replacement|ambiguous|validated|noncanonical) ;;
+    pending-canonical|pending-ambiguous|pending-identity|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|failure-identity|failure-replacement|ambiguous|identity|validated|noncanonical) ;;
     *) return 1 ;;
   esac
   [ "$prefix" = "$NONCANONICAL_PREFIX" ] || fm_pr_task_id_valid "$prefix" || return 1
@@ -720,7 +751,11 @@ canonical_terminal_success() {
     && quarantined_artifact_exists "$id" check
 }
 
-ambiguous_terminal_success() {
+# Terminal state shared by every quarantine-and-leave-unarmed lineage
+# (`ambiguous` and `identity`): the live artifacts are gone and a quarantined
+# copy exists. The lineages differ only in what the diagnostic calls the poll,
+# never in what happens to it, so this predicate is deliberately kind-agnostic.
+quarantined_terminal_success() {
   local id=$1 check data registration
   check="$STATE/$id.check.sh"
   data="$STATE/$id.pr-poll"
@@ -739,22 +774,31 @@ complete_canonical_outcome() {
   remove_diagnostic_obligation "$id" pending-canonical
 }
 
-complete_ambiguous_outcome() {
-  local id=$1
-  ambiguous_terminal_success "$id" || return 1
-  remove_diagnostic_obligation "$id" failure-ambiguous || return 1
-  ensure_outcome_obligation "$id" ambiguous || return 1
-  remove_diagnostic_obligation "$id" pending-ambiguous
+# <id> <terminal-kind>, where terminal-kind is ambiguous or identity. The pending
+# and failure obligation names are derived from it, so the two lineages cannot
+# drift apart in what they do - only in what they are called.
+complete_quarantine_outcome() {
+  local id=$1 kind=$2
+  quarantined_terminal_success "$id" || return 1
+  remove_diagnostic_obligation "$id" "failure-$kind" || return 1
+  ensure_outcome_obligation "$id" "$kind" || return 1
+  remove_diagnostic_obligation "$id" "pending-$kind"
 }
 
+# An operator republished a canonically bound poll, so every obligation from
+# either quarantine lineage is discharged. remove_diagnostic_obligation is a
+# no-op for a name that is absent, so clearing both lineages is safe.
 complete_validated_outcome() {
   local id=$1
   canonical_terminal_success "$id" || return 1
   remove_diagnostic_obligation "$id" failure-ambiguous || return 1
+  remove_diagnostic_obligation "$id" failure-identity || return 1
   remove_diagnostic_obligation "$id" failure-replacement || return 1
   remove_diagnostic_obligation "$id" ambiguous || return 1
+  remove_diagnostic_obligation "$id" identity || return 1
   ensure_outcome_obligation "$id" validated || return 1
-  remove_diagnostic_obligation "$id" pending-ambiguous
+  remove_diagnostic_obligation "$id" pending-ambiguous || return 1
+  remove_diagnostic_obligation "$id" pending-identity
 }
 
 complete_noncanonical_outcome() {
@@ -770,10 +814,10 @@ record_canonical_failure() {
   ensure_outcome_obligation "$id" failure-canonical
 }
 
-record_ambiguous_failure() {
-  local id=$1
-  remove_diagnostic_obligation "$id" ambiguous || return 1
-  ensure_outcome_obligation "$id" failure-ambiguous
+record_quarantine_failure() {
+  local id=$1 kind=$2
+  remove_diagnostic_obligation "$id" "$kind" || return 1
+  ensure_outcome_obligation "$id" "failure-$kind"
 }
 
 canonical_repair_from_pending() {
@@ -799,7 +843,7 @@ canonical_repair_from_pending() {
   canonical_terminal_success "$id"
 }
 
-ambiguous_repair_from_pending() {
+quarantine_repair_from_pending() {
   local id=$1 check data registration
   check="$STATE/$id.check.sh"
   data="$STATE/$id.pr-poll"
@@ -808,7 +852,7 @@ ambiguous_repair_from_pending() {
   quarantined_artifact_exists "$id" check || return 1
   quarantine_artifact "$data" "$id" data || return 1
   quarantine_artifact "$registration" "$id" registration || return 1
-  ambiguous_terminal_success "$id"
+  quarantined_terminal_success "$id"
 }
 
 live_check_matches_quarantined() {
@@ -840,12 +884,61 @@ quarantine_untrusted_replacement() {
   quarantine_artifact "$STATE/$id.pr-poll-registration" "$id" replacement-registration || return 1
 }
 
+# Resume for one quarantine-and-leave-unarmed lineage: <prefix> <terminal-kind>.
+# The classification was decided before the artifacts moved and is carried by the
+# pending obligation's own name, because it cannot be recomputed once they have.
+resume_quarantine_pending() {
+  local prefix=$1 kind=$2 success failure replacement_failure check
+  success="$QUARANTINE/$prefix.diagnostic.$kind"
+  failure="$QUARANTINE/$prefix.diagnostic.failure-$kind"
+  replacement_failure="$QUARANTINE/$prefix.diagnostic.failure-replacement"
+  if canonical_terminal_success "$prefix"; then
+    complete_validated_outcome "$prefix" || return 1
+    return 0
+  fi
+  if [ -e "$replacement_failure" ] || [ -L "$replacement_failure" ]; then
+    if replacement_artifacts_present "$prefix"; then
+      quarantine_untrusted_replacement "$prefix" || return 1
+    fi
+    migration_failed=1
+    return 0
+  fi
+  if quarantined_artifact_exists "$prefix" check \
+    && { [ -e "$STATE/$prefix.check.sh" ] || [ -L "$STATE/$prefix.check.sh" ]; } \
+    && ! live_check_matches_quarantined "$prefix"; then
+    quarantine_untrusted_replacement "$prefix" || return 1
+    migration_failed=1
+    return 0
+  fi
+  if quarantined_terminal_success "$prefix"; then
+    complete_quarantine_outcome "$prefix" "$kind" || return 1
+    return 0
+  fi
+  if [ -e "$success" ] || [ -L "$success" ]; then
+    remove_diagnostic_obligation "$prefix" "$kind" || return 1
+  fi
+  check="$STATE/$prefix.check.sh"
+  if [ ! -e "$check" ] && [ ! -L "$check" ]; then
+    if quarantined_artifact_exists "$prefix" check; then
+      ensure_outcome_obligation "$prefix" "failure-$kind" || return 1
+      if quarantine_repair_from_pending "$prefix"; then
+        complete_quarantine_outcome "$prefix" "$kind" || return 1
+      else
+        migration_failed=1
+      fi
+    elif [ -e "$failure" ] || [ -L "$failure" ]; then
+      migration_failed=1
+    fi
+  fi
+}
+
 recover_pending_outcomes() {
-  local obligation basename prefix kind success failure replacement_failure check
+  local obligation basename prefix kind success failure check
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
     "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-identity \
     "$QUARANTINE"/*.diagnostic.pending-noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
     basename=${obligation##*/}
@@ -878,47 +971,10 @@ recover_pending_outcomes() {
         fi
         ;;
       pending-ambiguous)
-        success="$QUARANTINE/$prefix.diagnostic.ambiguous"
-        failure="$QUARANTINE/$prefix.diagnostic.failure-ambiguous"
-        replacement_failure="$QUARANTINE/$prefix.diagnostic.failure-replacement"
-        if canonical_terminal_success "$prefix"; then
-          complete_validated_outcome "$prefix" || return 1
-          continue
-        fi
-        if [ -e "$replacement_failure" ] || [ -L "$replacement_failure" ]; then
-          if replacement_artifacts_present "$prefix"; then
-            quarantine_untrusted_replacement "$prefix" || return 1
-          fi
-          migration_failed=1
-          continue
-        fi
-        if quarantined_artifact_exists "$prefix" check \
-          && { [ -e "$STATE/$prefix.check.sh" ] || [ -L "$STATE/$prefix.check.sh" ]; } \
-          && ! live_check_matches_quarantined "$prefix"; then
-          quarantine_untrusted_replacement "$prefix" || return 1
-          migration_failed=1
-          continue
-        fi
-        if ambiguous_terminal_success "$prefix"; then
-          complete_ambiguous_outcome "$prefix" || return 1
-          continue
-        fi
-        if [ -e "$success" ] || [ -L "$success" ]; then
-          remove_diagnostic_obligation "$prefix" ambiguous || return 1
-        fi
-        check="$STATE/$prefix.check.sh"
-        if [ ! -e "$check" ] && [ ! -L "$check" ]; then
-          if quarantined_artifact_exists "$prefix" check; then
-            ensure_outcome_obligation "$prefix" failure-ambiguous || return 1
-            if ambiguous_repair_from_pending "$prefix"; then
-              complete_ambiguous_outcome "$prefix" || return 1
-            else
-              migration_failed=1
-            fi
-          elif [ -e "$failure" ] || [ -L "$failure" ]; then
-            migration_failed=1
-          fi
-        fi
+        resume_quarantine_pending "$prefix" ambiguous || return 1
+        ;;
+      pending-identity)
+        resume_quarantine_pending "$prefix" identity || return 1
         ;;
       pending-noncanonical)
         if quarantined_artifact_exists "$prefix" check; then
@@ -934,6 +990,7 @@ failure_obligations_absent() {
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   for failure in "$QUARANTINE"/*.diagnostic.failure-canonical \
     "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-identity \
     "$QUARANTINE"/*.diagnostic.failure-replacement; do
     [ -e "$failure" ] || [ -L "$failure" ] || continue
     return 1
@@ -945,6 +1002,7 @@ pending_outcomes_complete() {
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   for pending in "$QUARANTINE"/*.diagnostic.pending-canonical \
     "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-identity \
     "$QUARANTINE"/*.diagnostic.pending-noncanonical; do
     [ -e "$pending" ] || [ -L "$pending" ] || continue
     return 1
@@ -961,12 +1019,15 @@ process_diagnostic_obligations() {
   diagnostic_namespace_valid || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
     "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-identity \
     "$QUARANTINE"/*.diagnostic.pending-noncanonical \
     "$QUARANTINE"/*.diagnostic.canonical \
     "$QUARANTINE"/*.diagnostic.failure-canonical \
     "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-identity \
     "$QUARANTINE"/*.diagnostic.failure-replacement \
     "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.identity \
     "$QUARANTINE"/*.diagnostic.validated \
     "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
@@ -978,17 +1039,20 @@ process_diagnostic_obligations() {
     case "$MIGRATION_DIAGNOSTIC_KIND" in
       canonical) canonical_rebuilt=1 ;;
       validated) validated_rearmed=1 ;;
-      ambiguous|noncanonical) quarantined_unarmed=1 ;;
+      ambiguous|identity|noncanonical) quarantined_unarmed=1 ;;
     esac
   done
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
     "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-identity \
     "$QUARANTINE"/*.diagnostic.pending-noncanonical \
     "$QUARANTINE"/*.diagnostic.canonical \
     "$QUARANTINE"/*.diagnostic.failure-canonical \
     "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-identity \
     "$QUARANTINE"/*.diagnostic.failure-replacement \
     "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.identity \
     "$QUARANTINE"/*.diagnostic.validated \
     "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
@@ -1056,9 +1120,30 @@ if migration_needed; then
           record_canonical_failure "$id" || diagnostics_failed=1
         fi
       else
-        message="task $id: migration outcome tracking started before legacy poll handling"
-        if ! ensure_diagnostic_obligation "$prefix" pending-ambiguous "$message" \
-          || ! process_diagnostic_obligations; then
+        # The poll is quarantined and left unarmed either way; the only question
+        # is what to call it. When every OTHER leg of its validation passes, the
+        # single failed check is the task's recorded PR identity, and describing
+        # that as an "ambiguous or invalid legacy poll" invents tampering that
+        # did not happen. Classify it accurately instead, and note the URL the
+        # sidecar was watching so re-arming needs no trip to the quarantine
+        # directory. Classification only: the surviving sidecar is never
+        # authority for what a task watches, so nothing is rebuilt from it here.
+        outcome=ambiguous
+        watched_url=
+        if fm_pr_poll_artifacts_self_consistent "$STATE" "$id" "$TEMPLATE"; then
+          outcome=identity
+          watched_url=$FM_PR_DATA_URL
+        fi
+        obligations_ok=1
+        ensure_outcome_obligation "$prefix" "pending-$outcome" || obligations_ok=0
+        if [ "$obligations_ok" -eq 1 ] && [ "$outcome" = identity ]; then
+          record_diagnostic "task $id: quarantined poll was watching $watched_url; re-arm with bin/fm-pr-check.sh $id $watched_url, which pauses the watcher first and is refused while it is unresponsive" \
+            || obligations_ok=0
+        fi
+        if [ "$obligations_ok" -eq 1 ]; then
+          process_diagnostic_obligations || obligations_ok=0
+        fi
+        if [ "$obligations_ok" -eq 0 ]; then
           diagnostics_failed=1
           migration_failed=1
           continue
@@ -1066,11 +1151,11 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && complete_ambiguous_outcome "$id"; then
+          && complete_quarantine_outcome "$id" "$outcome"; then
           :
         else
           migration_failed=1
-          record_ambiguous_failure "$id" || diagnostics_failed=1
+          record_quarantine_failure "$id" "$outcome" || diagnostics_failed=1
         fi
       fi
     else
