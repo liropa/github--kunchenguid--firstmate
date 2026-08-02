@@ -310,7 +310,10 @@ test_bootstrap_sweep_classifies() {
   bootstrap_root="$w/firstmate"
   git clone -q "$ROOT" "$bootstrap_root"
   cp "$ROOT/bin/fm-bootstrap.sh" "$bootstrap_root/bin/fm-bootstrap.sh"
-  git -C "$bootstrap_root" branch -M main
+  # CI checks out the PR at detached HEAD, which a local clone preserves.
+  # Create the fixture branch explicitly instead of trying to rename a branch
+  # that may not exist.
+  git -C "$bootstrap_root" switch -q -C main
   git -C "$bootstrap_root" remote remove origin
   mkdir -p "$w/home/state" "$w/home/data" "$w/signals/x"
   touch "$w/home/state/.last-watcher-beat"
