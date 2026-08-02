@@ -57,8 +57,7 @@ Closing that gap was judged the higher-value fix, and this document is it.
 ## What did not change
 
 Firstmate still refuses to pre-seed a per-worktree project-settings trust key.
-That refusal is the boundary working, not a gap: the settings file is controlled by the branch the agent was sent to work on, so granting the key would make the agent adopt permissions, hooks, and MCP servers carried by the code under review.
-`.agents/skills/harness-adapters/SKILL.md` and `docs/sbx-backend.md` own that rationale in full.
+`.agents/skills/harness-adapters/SKILL.md` owns the rationale for that refusal; `docs/sbx-backend.md` owns the distinct guest-clone grant firstmate does seed.
 Accepting the host posture is not a reason to revisit the refusal, and a future reader should not close one by weakening the other.
 
 No trust grant and no launch flag changed as a result of this record.
