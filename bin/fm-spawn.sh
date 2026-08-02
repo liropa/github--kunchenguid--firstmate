@@ -246,6 +246,42 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_PR_URL=
+SPAWN_PR_HEAD=
+
+# The PR a task is watching belongs to the TASK, not to the worker process: a
+# respawn keeps the same id, worktree, branch, and PR, and a genuinely finished
+# task has its metadata deleted outright by bin/fm-teardown.sh, so a preserved
+# identity cannot outlive its task. Both wholesale metadata writers below would
+# otherwise truncate pr=/pr_head= away and silently disarm the merge poll -
+# every artifact stays on disk and only the validation predicate disagrees.
+#
+# Only a record whose identity already parses is carried forward. A corrupt one
+# (absent, duplicated, unparseable, or displaced by a later field) is left
+# behind so the poll stays refused rather than being silently repaired here.
+spawn_read_pr_identity() {  # <meta>
+  local meta=$1 head
+  SPAWN_PR_URL=
+  SPAWN_PR_HEAD=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  fm_pr_metadata_identity_parse "$meta" || return 0
+  SPAWN_PR_URL=$FM_PR_META_URL
+  head=$(grep '^pr_head=' "$meta" | tail -1)
+  [ -n "$head" ] || return 0
+  head=${head#pr_head=}
+  fm_pr_head_valid "$head" || return 0
+  SPAWN_PR_HEAD=$head
+}
+
+# INVARIANT: pr= and pr_head= are the LAST lines of state/<id>.meta.
+# bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse rejects the whole record when
+# any ordinary field follows pr=, so a field appended after this call disarms the
+# merge poll of every watching task with no other symptom. Add new fields ABOVE
+# the spawn_emit_pr_identity call, never after it.
+spawn_emit_pr_identity() {
+  [ -z "$SPAWN_PR_URL" ] || printf 'pr=%s\n' "$SPAWN_PR_URL"
+  [ -z "$SPAWN_PR_HEAD" ] || printf 'pr_head=%s\n' "$SPAWN_PR_HEAD"
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -307,6 +343,8 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            # Last, always: see spawn_emit_pr_identity's ordering invariant.
+            spawn_emit_pr_identity
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
@@ -394,6 +432,10 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+# Read before either wholesale writer truncates the record. Both writers use the
+# same captured value, and the Orca abort path fires only before the main write,
+# so it never reads back a file this run already rewrote.
+spawn_read_pr_identity "$STATE/$ID.meta"
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1407,6 +1449,10 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # LAST LINES OF THE RECORD - nothing may be emitted below this call.
+  # spawn_emit_pr_identity owns why: any ordinary field after pr= invalidates the
+  # whole record for bin/fm-pr-lib.sh and silently disarms this task's merge poll.
+  spawn_emit_pr_identity
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

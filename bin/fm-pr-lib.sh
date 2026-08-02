@@ -253,6 +253,11 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Owner of the "pr= last" metadata rule: a task record carries exactly one pr=
+# line, and nothing but pr_head= and the x_* link fields may follow it. Anything
+# else after pr= invalidates the WHOLE record, which disarms the task's merge
+# poll with no other symptom, so every writer of state/<id>.meta has to append
+# new fields above the recorded PR identity rather than after it.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -547,7 +552,18 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
-fm_pr_poll_artifacts_valid() {
+# Every leg of an armed poll's validation EXCEPT the task metadata's recorded PR
+# identity: the check file is byte-identical to the current template, the sidecar
+# and registration are private and parse, and their hashes and file identities
+# all agree. Split out so a caller can tell "these artifacts are current and
+# internally consistent, only the metadata binding is gone" apart from a
+# genuinely legacy or tampered poll, and report accordingly.
+#
+# NOT a substitute for fm_pr_poll_artifacts_valid: it deliberately proves nothing
+# about WHAT the task is supposed to be watching, so it must never gate arming,
+# rebuilding, or executing a poll. Its only sanctioned use is choosing a message.
+# On success it leaves FM_PR_DATA_* holding the sidecar's recorded identity.
+fm_pr_poll_artifacts_self_consistent() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -577,7 +593,13 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
-  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
+}
+
+fm_pr_poll_artifacts_valid() {
+  local state=$1 id=$2 template=$3 meta
+  fm_pr_poll_artifacts_self_consistent "$state" "$id" "$template" || return 1
+  meta="$state/$id.meta"
   fm_pr_metadata_identity_parse "$meta" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
