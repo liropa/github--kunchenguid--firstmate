@@ -874,6 +874,55 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   esac
 }
 
+# The deferred-escalation trio below is how the watcher applies a DURATION
+# predicate to a push edge instead of alarming on the edge itself: it defers the
+# escalation with the epoch it observed the block, re-reads that epoch once per
+# poll cycle, and settles the pane once the block has outlived the dwell. A
+# backend's `absorb` (working) edge cancels a deferred escalation as part of
+# clearing its per-pane escalation state, so a block something is actively
+# servicing never reaches the settle step. bin/fm-watch.sh
+# (push_block_dwell_check) owns the dwell policy; the backend owns the state.
+
+# fm_backend_defer_transition: record <epoch> as when <window> was seen blocked
+# and leave its escalation pending.
+fm_backend_defer_transition() {  # <backend> <state_dir> <window> <epoch>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_defer_transition "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_deferred_since: print the epoch <window>'s deferred block was
+# observed at, or return 1 when it has no escalation still pending. A backend
+# with no native push never has one.
+fm_backend_deferred_since() {  # <backend> <state_dir> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_deferred_since "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_settle_transition: mark <window>'s block escalated (or absorbed),
+# holding it to that one wake until a working edge clears it.
+fm_backend_settle_transition() {  # <backend> <state_dir> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_settle_transition "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   local backend=$1
   shift

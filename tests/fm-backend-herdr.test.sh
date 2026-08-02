@@ -2594,6 +2594,46 @@ test_apply_transition_working_clears_marker() {
   pass "fm_backend_herdr_apply_transition: a working edge clears the marker so the next ->blocked re-escalates"
 }
 
+test_marker_carries_deferred_then_settled_states() {
+  local dir state marker since
+  dir="$TMP_ROOT/marker-states"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_defer_transition "$1" "$2" "$3"' "$ROOT" "$state" default:wG:pQ 1700000000
+  [ -e "$marker" ] || fail "defer_transition must write the pane's marker so the event path stops re-delivering it"
+  since=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_deferred_since "$1" "$2"' "$ROOT" "$state" default:wG:pQ)
+  [ "$since" = 1700000000 ] || fail "deferred_since must report the epoch the block was observed at, got '$since'"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_settle_transition "$1" "$2"' "$ROOT" "$state" default:wG:pQ
+  [ -e "$marker" ] || fail "settle_transition must keep the marker so the pane stays held to one wake"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_deferred_since "$1" "$2"' "$ROOT" "$state" default:wG:pQ; then
+    fail "a settled marker must report no escalation still pending"
+  fi
+  pass "the herdr escalation marker carries a deferred epoch and a settled state in one file"
+}
+
+test_working_edge_cancels_a_deferred_escalation() {
+  local dir state working rc
+  dir="$TMP_ROOT/marker-cancel"; state="$dir/state"; mkdir -p "$state"
+  working=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" working claude' "$ROOT")
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_defer_transition "$1" "$2" "$3"' "$ROOT" "$state" default:wG:pQ 1700000000
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$working"; rc=$?
+  [ "$rc" = 1 ] || fail "a working (absorb) edge must return 1 (no wake), got $rc"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_deferred_since "$1" "$2"' "$ROOT" "$state" default:wG:pQ; then
+    fail "a working edge must CANCEL a deferred escalation, not leave it to fire late"
+  fi
+  pass "fm_backend_herdr_apply_transition: a working edge cancels a still-deferred escalation, not just the dedupe"
+}
+
+test_deferred_since_rejects_a_corrupt_marker() {
+  local dir state marker
+  dir="$TMP_ROOT/marker-corrupt"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-$(fm_state_key_encode "default:wG:pQ")"
+  printf 'not-an-epoch' > "$marker"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_deferred_since "$1" "$2"' "$ROOT" "$state" default:wG:pQ; then
+    fail "a non-numeric marker must not be read as a pending escalation"
+  fi
+  pass "fm_backend_herdr_deferred_since treats a corrupt marker as nothing pending, never as a due alarm"
+}
+
 test_clear_transition_removes_task_marker() {
   local dir state marker
   dir="$TMP_ROOT/clear-transition"; state="$dir/state"; mkdir -p "$state"
@@ -2882,6 +2922,9 @@ test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_escalation_marker_separates_fold_colliding_panes
+test_marker_carries_deferred_then_settled_states
+test_working_edge_cancels_a_deferred_escalation
+test_deferred_since_rejects_a_corrupt_marker
 test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
 test_clear_transition_removes_task_marker

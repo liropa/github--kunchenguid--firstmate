@@ -94,11 +94,12 @@ FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
 # presentation path uses one narrowly whitelisted raw-socket request after
 # verifying the exact method and parameter schema.
 FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
-# Per-pane escalation dedupe marker prefix, under the state dir. One marker per
-# window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
-# is enqueued, cleared on any working edge, so exactly one wake fires per
-# ->blocked edge and a reconnect level-reconcile never re-delivers a still-
-# blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
+# Per-pane escalation marker prefix, under the state dir. One marker per window
+# (keyed like the watcher's own .stale-<key>): set when a ->blocked edge is
+# taken up, cleared on any working edge, so a reconnect level-reconcile never
+# re-delivers a pane whose block is already accounted for. Mirrors
+# bin/fm-watch.sh's .stale-<key> naming. See fm_backend_herdr_escalation_marker
+# for the two states its content carries.
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
@@ -1923,10 +1924,13 @@ fm_backend_herdr_list_live() {  # <session>
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event
 # stream and returns the instant a subscribed pane transitions to `blocked`, so
-# a crew waiting on the human wakes its supervisor sub-second instead of after
-# the ~240s stale-pane wedge timer. Everything not `blocked` is streamed too
-# (the policy, not the subscription, makes `blocked` the sole immediate action)
-# so `working` edges clear the per-pane dedupe marker. Polling stays the
+# a crew waiting on the human is DETECTED sub-second rather than after the ~240s
+# stale-pane wedge timer; the watcher then holds that block for its confirmation
+# dwell before escalating (bin/fm-watch.sh's push_block_dwell_check). Everything
+# not `blocked` is streamed too (the policy, not the subscription, makes
+# `blocked` the sole actionable status) so `working` edges clear the per-pane
+# escalation state - which is what cancels a still-deferred escalation for a
+# block something is actively servicing. Polling stays the
 # permanent fail-closed backstop: below-capability, a connect/subscribe failure,
 # or a missing reader all fall back to the caller sleeping the same budget.
 
@@ -1995,24 +1999,74 @@ fm_backend_herdr_event_reader_cmd() {
   printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.py"
 }
 
-# fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
+# fm_backend_herdr_escalation_marker: the per-pane escalation marker path for a
 # <window> ("<session>:<pane_id>"), keyed identically to the watcher's
 # .stale-<key> through bin/fm-state-key-lib.sh, under <state_dir>.
+#
+# The marker is a TWO-STATE record, and both states deliberately live in this
+# ONE file. Its content is:
+#
+#   a numeric epoch - a ->blocked edge was observed then and its escalation is
+#                     DEFERRED, waiting out the watcher's confirmation dwell
+#                     (bin/fm-watch.sh's PUSH_BLOCK_DWELL_SECS).
+#   empty           - that pane has already escalated; hold it to that one wake.
+#
+# Keeping the deferred timestamp in the same file the `absorb` (working) edge
+# already deletes is what makes cancellation exact rather than sampled: a crew
+# that resumes before the dwell expires cancels its pending escalation with the
+# same single unlink that re-arms the dedupe, so nothing is left behind to fire
+# late. A separate pending file would have to be found and removed on that same
+# edge, and any window in which only one of the two was gone would be a wrong
+# answer about whether anything is servicing the block.
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   local state=$1 window=$2 key
   key=$(fm_state_key_encode "$window")
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 
+# fm_backend_herdr_defer_transition: record <epoch> as the moment <window> was
+# seen blocked, leaving its escalation pending. Writes the same marker
+# fm_backend_herdr_settle_transition writes, so the event path stops
+# re-delivering this pane while the dwell runs and the watcher's poll loop owns
+# the re-check.
+fm_backend_herdr_defer_transition() {  # <state_dir> <window> <epoch>
+  local marker
+  marker=$(fm_backend_herdr_escalation_marker "$1" "$2")
+  printf '%s' "$3" > "$marker"
+}
+
+# fm_backend_herdr_deferred_since: print the epoch <window>'s deferred block was
+# observed at, or return 1 when it has none - no marker at all (never blocked,
+# or a working edge cancelled it) or a marker already settled as escalated.
+fm_backend_herdr_deferred_since() {  # <state_dir> <window>
+  local marker since
+  marker=$(fm_backend_herdr_escalation_marker "$1" "$2")
+  since=$(cat "$marker" 2>/dev/null) || return 1
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$since"
+}
+
+# fm_backend_herdr_settle_transition: move <window>'s marker to the escalated
+# state, holding the pane to that one wake until a working edge clears it. THE
+# single owner of that write; fm_backend_herdr_commit_transition is its
+# record-keyed wrapper.
+fm_backend_herdr_settle_transition() {  # <state_dir> <window>
+  local marker
+  marker=$(fm_backend_herdr_escalation_marker "$1" "$2")
+  : > "$marker"
+}
+
 # fm_backend_herdr_apply_transition: route one normalized record through the
-# shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
-# On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
-# it prints the record on stdout and returns 0 (the caller stops and hands the
-# record up). The caller commits the marker only after handling the record.
-# `absorb` (working) clears the marker and
-# returns 1. `defer`/`fallback`, and an already-marked `actionable`, return 1
-# with no output. <session> reconstructs the window ("<session>:<pane_id>") for
-# the marker key, matching the watcher's own key scheme.
+# shared policy table, maintaining the per-pane escalation marker under
+# <state_dir>. On a fresh `actionable` (blocked) edge - policy actionable AND no
+# marker yet - it prints the record on stdout and returns 0 (the caller stops and
+# hands the record up). The caller writes the marker only after taking the record
+# up, either deferred or settled. `absorb` (working) removes the marker - which
+# both re-arms the dedupe AND cancels any escalation still deferred in it - and
+# returns 1. `defer`/`fallback`, and an already-marked `actionable` in either
+# marker state, return 1 with no output. <session> reconstructs the window
+# ("<session>:<pane_id>") for the marker key, matching the watcher's own key
+# scheme.
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
   local state=$1 session=$2 record=$3 pane_id to action window marker
   pane_id=$(fm_transition_pane_id "$record")
@@ -2036,12 +2090,10 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id window marker
+  local state=$1 session=$2 record=$3 pane_id
   pane_id=$(fm_transition_pane_id "$record")
   [ -n "$pane_id" ] || return 1
-  window="$session:$pane_id"
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  : > "$marker"
+  fm_backend_herdr_settle_transition "$state" "$session:$pane_id"
 }
 
 fm_backend_herdr_clear_transition() {  # <state_dir> <window>

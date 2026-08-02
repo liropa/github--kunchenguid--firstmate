@@ -60,9 +60,10 @@ mkdir -p "$STATE"
 # no native event push. tmux always reports unknown busy-state, preserving the
 # original regex path. A push-capable backend (herdr) additionally replaces this
 # watcher's blind terminal sleep with a bounded wait on its native event stream
-# (event_wait_or_sleep below), so a crew entering `blocked` wakes its supervisor
-# sub-second; the poll loop stays live every cycle as the permanent fail-closed
-# backstop. See bin/fm-backend.sh and docs/herdr-backend.md.
+# (event_wait_or_sleep below), so a crew entering `blocked` is seen sub-second
+# and escalates as soon as its confirmation dwell elapses (push_block_dwell_check);
+# the poll loop stays live every cycle as the permanent fail-closed backstop.
+# See bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # Shared normalized-transition accessors and the single-owner status->action
@@ -183,6 +184,12 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Blocked secs a pane on the native push path must sustain before its blocked
+# edge escalates - the same duration predicate STALE_ESCALATE_SECS applies on the
+# poll path, at a much shorter threshold so a genuinely stuck crew is still
+# noticed well inside the wedge timer. See push_block_dwell_check for why an edge
+# alone is not an alarm.
+PUSH_BLOCK_DWELL_SECS=${FM_PUSH_BLOCK_DWELL:-90}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -786,8 +793,9 @@ heartbeat_scan_finds_actionable() {
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
-# `blocked` wakes the supervisor sub-second instead of after the stale-pane
-# wedge timer. For every other home - no push-capable window, backend not
+# `blocked` is detected sub-second and escalates one confirmation dwell later
+# instead of after the stale-pane wedge timer (push_block_dwell_check owns that
+# predicate). For every other home - no push-capable window, backend not
 # capable, or the event path proven unreliable this process - it sleeps POLL,
 # byte-for-byte today's behavior. The poll loop above still runs every cycle, so
 # this only ever SHORTENS latency; it can never drop an escalation (the poll
@@ -860,17 +868,21 @@ event_wait_or_sleep() {
   esac
 }
 
-# handle_push_transition: act on a fresh actionable (blocked) transition record
-# the backend returned. Maps the pane back to its window and task, applies the
+# handle_push_transition: ARM a fresh actionable (blocked) transition record the
+# backend returned. Maps the pane back to its window and task, applies the
 # declared-pause exemption (a crew waiting on a known external dependency is not
 # a surprise block - absorb it on the poll loop's long pause cadence instead),
-# and otherwise enqueues an immediate `stale` wake and wakes the supervisor. The
-# `stale` kind is deliberate: the supervisor's handler for it ("peek the pane to
-# diagnose") is exactly right for a blocked crew, and the drain/dedupe/guard
-# machinery already understands it (queued by key=window, so a later poll-path
-# stale for the same pane collapses on drain).
+# and otherwise records WHEN the pane went blocked and leaves the escalation
+# decision to push_block_dwell_check.
+#
+# The edge alone is deliberately NOT an alarm. herdr reports `blocked` for every
+# approval dialog, so a dialog something answers in seconds is one ->blocked edge
+# per prompt; alarming on the edge made the wake count track how many prompts a
+# crew raised rather than how stuck it is. The poll path never did that - it
+# requires STALE_ESCALATE_SECS of dwell first - and this restores the same
+# predicate here.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -881,10 +893,53 @@ handle_push_transition() {  # <backend> <session> <record>
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
-  reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
-  fm_wake_append stale "$window" "$reason" || exit 1
-  fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-  mark_surfaced "$STATE/$task.status"
+  fm_backend_defer_transition "$backend" "$STATE" "$window" "$(date +%s)" || exit 1
+  triage_log "deferred push $to (${PUSH_BLOCK_DWELL_SECS}s confirmation dwell armed): $window"
+}
+
+# push_block_dwell_check: the push path's duration predicate, and THE only place
+# a blocked edge becomes an alarm. The poll loop calls it once per cycle for
+# every recorded window, so the re-check needs no second process, no background
+# sleep, and no extra wait - the cycle was already running.
+#
+# It escalates only once a pane has been continuously blocked for
+# PUSH_BLOCK_DWELL_SECS. "Continuously" is exact rather than sampled: the
+# backend's working edge DELETES the armed marker the instant a crew resumes
+# (fm_transition_policy's absorb action), so a block that something services
+# inside the window CANCELS its own pending escalation and this check never sees
+# it.
+#
+# Cancelling is why this is not the pre-existing per-pane dedupe marker doing its
+# job. That marker suppressed REPEATS of an alarm which had ALREADY fired, and a
+# clearer's working edge simply cleared it and re-armed the next prompt for
+# another alarm - one alarm per prompt cycle. Cancelling an escalation that has
+# not fired yet and deduping one that has are different operations, and only the
+# first can tell a serviced block from an unserviced one.
+#
+# Nothing is suppressed by category, by task, or by count - only by dwell. A crew
+# genuinely waiting on a human stays blocked indefinitely, so it crosses any
+# finite dwell and escalates exactly once; the settled marker then holds it to
+# that one wake until a working edge proves someone acted. The `stale` kind is
+# unchanged, so away mode consumes it through the same queue as before.
+#
+# The wake is enqueued BEFORE the marker is settled, so a watcher that dies
+# between the two re-escalates on its next run rather than losing the alarm.
+push_block_dwell_check() {  # <window> <last-status-line>
+  local win=$1 last=$2 backend since age reason
+  backend=$(window_backend "$win")
+  since=$(fm_backend_deferred_since "$backend" "$STATE" "$win") || return 0
+  if status_is_paused "$last"; then
+    fm_backend_settle_transition "$backend" "$STATE" "$win" || exit 1
+    triage_log "absorbed push blocked (declared pause during the confirmation dwell): $win"
+    return 0
+  fi
+  age=$(( $(date +%s) - since ))
+  [ "$age" -ge "$PUSH_BLOCK_DWELL_SECS" ] || return 0
+  reason="stale: $win (herdr: agent blocked ${age}s - still waiting on human after the ${PUSH_BLOCK_DWELL_SECS}s confirmation dwell, escalated ahead of the wedge timer)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  fm_backend_settle_transition "$backend" "$STATE" "$win" || exit 1
+  triage_log "escalated push blocked (${age}s, dwell elapsed): $win"
+  mark_surfaced "$STATE/$(window_to_task "$win" "$STATE").status"
   wake "$reason"
 }
 
@@ -1098,6 +1153,9 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
+    # The push path's deferred-escalation re-check, ahead of the pane capture so
+    # a capture failure cannot strand a pending alarm. See push_block_dwell_check.
+    push_block_dwell_check "$w" "$last"
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi

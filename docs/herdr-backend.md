@@ -946,12 +946,41 @@ This is the follow-up the former "No `events.subscribe` native push" gap note de
 **Mechanism (one owner per contract).**
 `bin/fm-transition-lib.sh` owns the backend-neutral normalized-transition record shape and the single-owner status->action policy table (`fm_transition_policy`: `blocked`=actionable, `working`=absorb-and-clear-dedupe, `idle`/`done`=defer, anything else=fall back to polling).
 `bin/backends/herdr.sh` (`fm_backend_herdr_wait_transition`) subscribes to `pane.agent_status_changed` for this home's herdr panes over ONE raw `AF_UNIX` connection via `bin/backends/herdr-eventwait.py`, subscribing to ALL statuses (so `working` edges clear the per-pane dedupe marker) and returning the first fresh `blocked` edge; after the subscription acknowledgement it level-reconciles each pane's current state while the stream remains live, so a pane that went blocked during the gap is caught once and transitions during reconciliation are buffered.
-`bin/fm-watch.sh` splices this in as the watcher's terminal wait (`event_wait_or_sleep`, replacing the blind `sleep POLL` for push-capable homes): on a returned `blocked` it maps `pane_id -> <session>:<pane_id> -> task`, exempts `kind=secondmate` endpoints and declared `paused:` waits, and enqueues an immediate `stale` wake.
+`bin/fm-watch.sh` splices this in as the watcher's terminal wait (`event_wait_or_sleep`, replacing the blind `sleep POLL` for push-capable homes): on a returned `blocked` it maps `pane_id -> <session>:<pane_id> -> task`, exempts `kind=secondmate` endpoints and declared `paused:` waits, and arms the confirmation dwell below.
 There is no second watcher process: the reader is a short-lived subprocess of the single watcher, so the "exactly one live supervision cycle" invariant and every guard/beacon/arm/turn-end mechanism are unchanged.
+
+**A blocked edge is not an alarm on its own: the confirmation dwell.**
+herdr reports `blocked` for every approval dialog, so an edge counts prompts, not stuckness.
+A crew with an automated approval clearer attached answers each dialog in seconds and oscillates `working -> blocked -> working`, and escalating on the edge turned that into one supervisor alarm per prompt.
+`handle_push_transition` therefore only records WHEN the pane went blocked; `push_block_dwell_check` escalates it, and only once the pane has stayed blocked for `FM_PUSH_BLOCK_DWELL` (default 90s, [`configuration.md`](configuration.md)).
+This is the same duration predicate the poll path has always applied through `FM_STALE_ESCALATE_SECS`, at a threshold well inside the 240s wedge timer.
+The re-check runs in the poll loop that already executes every cycle, so it needs no second process, no background sleep, and no extra wait.
+
+"Still blocked" is decided exactly rather than by sampling.
+`fm_transition_policy`'s `absorb` action deletes the pane's escalation marker the instant a `working` edge arrives, and the deferred timestamp lives in that same marker, so a crew that resumes inside the window CANCELS its pending escalation with the one unlink that also re-arms the dedupe.
+Cancelling an escalation that has not fired and deduping one that has are different operations: the pre-existing marker only ever did the second, which is why a clearer's `working` edge simply re-armed the next prompt for another alarm.
+
+Nothing is suppressed by category, by task, or by count - only by dwell.
+A crew genuinely waiting on a human is blocked indefinitely, so it crosses any finite dwell and escalates exactly once, with the settled marker holding it to that one wake until a `working` edge proves someone acted.
+The wake kind is still `stale`, so away mode consumes it through the same queue.
+The only behavior given up is escalation of blocks that resolve themselves inside the window - precisely the blocks for which no human was ever needed - and the cost is that a genuine human-wait is reported up to the dwell later than the 0.129s measured below.
 
 **Polling is the permanent fail-closed backstop.**
 The watcher's poll loop runs every cycle regardless, so the event path only ever shortens latency and can never drop an escalation.
 Three documented triggers fall back to pure polling (`fm_backend_herdr_events_capable` and the watcher's runtime-disable counter): a build below protocol 16 or missing the events surface in `herdr api schema`; a connect/subscribe failure; and repeated runtime failures, which disable the fast path for the rest of that watcher process (a restart re-probes).
+
+**Installed-client re-read (2026-08-02, macOS aarch64 Darwin 25.5.0).**
+The dated evidence below was captured against herdr 0.7.3, protocol 16.
+Read again today through the guarded lab helper, the installed client is newer:
+
+```
+$ bin/fm-herdr-lab.sh run <generated-lab-session> status --json
+{"client":{"version":"0.7.5","channel":"stable","protocol":17,"binary":"/opt/homebrew/bin/herdr","session":"<generated-lab-session>"},"server":{"status":"not_running","running":false,"version":null,"protocol":null,"capabilities":null,"compatible":null,"socket":"/Users/<user>/.config/herdr/sessions/<generated-lab-session>/herdr.sock","session":"<generated-lab-session>","restart_needed":false},"update":{"restart_needed":false}}
+```
+
+`FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL` is 16, so protocol 17 still passes the capability gate.
+This records the CLIENT version only.
+The `server` block names the never-provisioned lab session rather than any running session, and no end-to-end re-verification against 0.7.5 was run, so the version list under "Setup" is unchanged.
 
 **Empirical evidence (2026-07-11, herdr 0.7.3, protocol 16, macOS aarch64 Darwin 25.5.0, python3 3.13, jq present).**
 Capability, verified read-only:
@@ -979,7 +1008,13 @@ ok - real herdr: the watcher fast-path enqueues a stale wake naming the task win
 ```
 
 The subscriber returned the `blocked` transition in **0.129s** and the watcher fast-path enqueued a durable `stale` wake naming the task window - versus up to `FM_POLL` (15s) plus `FM_STALE_ESCALATE_SECS` (240s) on the poll path this shortcuts.
-Dedupe (one wake per `->blocked` edge, marker cleared when the pane returns to `working`), subscribe-then-reconcile ordering (an already-blocked pane enqueued exactly once while newer edges buffer in the active stream), the `kind=secondmate`/`paused:` exemptions, and the three fail-closed fallbacks are covered by the fake-CLI unit tests in `tests/fm-backend-herdr.test.sh` (the `wait_transition`/`apply_transition` cases), `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh`.
+That evidence predates the confirmation dwell, so it measures detection latency, not alarm latency: the subscriber still returns the edge that fast, and `FM_PUSH_BLOCK_DWELL` is what now sits between that edge and the wake.
+Dedupe (one wake per sustained block, marker cleared when the pane returns to `working`), subscribe-then-reconcile ordering (an already-blocked pane taken up exactly once while newer edges buffer in the active stream), the `kind=secondmate`/`paused:` exemptions, and the three fail-closed fallbacks are covered by the fake-CLI unit tests in `tests/fm-backend-herdr.test.sh` (the `wait_transition`/`apply_transition` cases), `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh`.
+
+**Dwell regression coverage (deterministic, no herdr and no watcher).**
+`tests/fm-supervision-events.test.sh` drives the real `handle_push_transition`, `push_block_dwell_check`, and `fm_backend_herdr_apply_transition` against a throwaway state directory, reproducing the counterfactual that diagnosed the storm.
+It pins that a block nothing services escalates once and only after the dwell; that five clearer-style `blocked -> working -> blocked` cycles escalate **zero** times where each cycle previously bought one; that a `working` edge cancels a pending escalation even after the dwell has already elapsed, which is what separates cancelling from deduping; that an unattended human-wait still escalates once per unserviced block; and that a failed durable enqueue leaves the escalation pending rather than losing it.
+`tests/fm-backend-herdr.test.sh` pins the marker's two states and that a corrupt marker reads as nothing pending rather than as a due alarm.
 
 ## Away-mode daemon terminal launch (2026-07-12, herdr 0.7.3, protocol 16, macOS aarch64)
 
