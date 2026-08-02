@@ -437,6 +437,64 @@ Each case was confirmed failing against broken logic before being accepted as pa
 
 Triage protection (design doc §7.3): `bin/fm-crew-state.sh`'s `pane_readable` uses the state probe for sbx (a stopped sandbox is present, classified from the status log), and the adapter's capture refuses outright unless the sandbox is already running - so routine triage can never churn an idle-stopped VM.
 
+### Guest gate-vendor assertion (`fm_backend_sbx_gate_vendor_check`)
+
+Firstmate creates its own sandboxes with a bare `sbx create` and installs no gate config into the guest.
+On the live `fm-agent-dotfiles` guest that produced **26 of 26 adversarial review runs on claude and zero on codex**, an unbroken run from 2026-07-31 02:28 to 2026-08-01 04:32 UTC, with claude reviewing claude's own work the whole time.
+The mechanism was three layers deep and silent at every one: no config was installed, so no-mistakes' own `EnsureDefaultGlobalConfig` wrote `agent: auto`, `auto` resolved to claude, and claude reviewed claude.
+Nothing errored, and nothing exited non-zero.
+This is not a regression - no commit in firstmate's history has ever referenced the agent-dotfiles provisioning scripts, so the two paths have been independent since the first sbx commit.
+
+Ownership is deliberately **split**, and firstmate's half is the narrower one.
+The guest image owns the gate config's **content**; firstmate owns an **assertion**, because firstmate chooses both the harness a secondmate writes code with and the delivery mode that gates it.
+The invariant is therefore stated without naming any other repo: *the gate must not review with the same vendor that wrote the code*.
+Firstmate installs nothing, copies nothing, and invokes no other repo's provisioning script - which also means the check generalizes to any future guest flavour rather than to one image.
+
+**The vendor is read at the resolution layer, never from a config file.**
+`no-mistakes doctor` prints one `gate validation` line naming the agent the gate would actually run:
+
+```
+$ no-mistakes doctor            # v1.40.2, host, 2026-08-02
+  ...
+  ✓ gate validation  codex is runnable
+```
+
+A config that *says* `codex` is the weaker artifact this whole defect family is about, so it is never consulted.
+The failing shape carries the binary's own wording, `no runnable agent found for configured agent <x> (looked for: ...)`, which resolves no vendor at all and is classified indeterminate rather than as a cross-vendor pass.
+
+**`doctor`'s exit status is never consulted, anywhere.**
+It exits 0 even when that check fails (measured against v1.40.2 by agent-dotfiles PR #90), so reading it would be a fresh instance of the same `exit 0` lie the assertion exists to catch.
+The verdict is the parsed line or nothing.
+
+Verdicts, and the caller that acts on each:
+
+| verdict | return | create | resurrection | session-start sweep |
+|---|---|---|---|---|
+| cross-vendor (proven) | 0 | proceeds silently | silent | silent |
+| same vendor (proven) | 1 | **REFUSES** | reports, delivers anyway | `GATE_VENDOR:` line |
+| indeterminate (no gate binary, unparseable report, failed exec, no recorded harness) | 2 | reports, proceeds | reports, delivers anyway | `GATE_VENDOR:` line |
+
+The refusal is scoped to a **proven match**, matching the tmux and source-mount refusals in the same function, whose comment already carries the reasoning: half-provisioned is worse than no sandbox, and create is the one point in the lifecycle where refusing strands no work.
+Refusing an indeterminate reading instead would make firstmate an enforcer of what the guest image ships - the other half of this split - and would refuse guests carrying no gate at all, which have no gate that could review on the wrong vendor.
+It is never swallowed: the reason is printed at every call site, and the assertion re-runs at each later convergence point, so a guest that gains a gate afterwards is still caught.
+
+Resurrection **never blocks**, following the tracked-file sync's precedent in the same function: a hard refusal there strands a live secondmate mid-task, and the printed line reaches the supervisor either way.
+The session-start sweep is the **backstop**, and it is not optional coverage - the live guest ran 26 gates across 26 hours without a single resurrection, so resurrection alone would never have caught it.
+The sweep classifies the same way the guest tracked-sync sweep beside it does: cross-vendor is routine silence, every other outcome is one actionable `GATE_VENDOR:` line.
+It probes a **running** guest only; `sbx exec` auto-starts a stopped sandbox, and booting every sbx guest at every session start to re-read a value nothing in a stopped VM can change is a cost the backstop does not need to pay.
+A stopped guest is reported as an honest skip and re-asserted at its next start.
+
+One bounded side effect is worth naming: the probe is the guest's first `no-mistakes` invocation in a fresh VM, so it materializes no-mistakes' **own** default global config when the image baked none.
+That is the same file the guest's first gate run would have written, it is never a firstmate-authored config, and `EnsureDefaultGlobalConfig` never overwrites one that already exists.
+The assertion judges whatever the guest would actually resolve, so a generated default is measured on the vendor it produces exactly like a baked one.
+
+Verified against the fixtures in `tests/fm-sbx-gate-vendor.test.sh`: the real guest probe script executed against a hermetic PATH and a fake `no-mistakes` whose `doctor` report shape is byte-accurate to the v1.40.2 output above, **including that it exits 0 while reporting a gate it cannot validate**.
+That property has its own fixture guard, so a fake that stopped reproducing the lie fails the suite rather than letting a classifier pass for the wrong reason.
+
+**Not yet verified end to end against a real sandbox VM.**
+The demanded proof is a `~/.no-mistakes/logs/*/review.log` from a fresh firstmate-created guest showing it ran codex, and it is tracked separately (`fm-gate-config-fresh-guest-proof`) because it needs both halves of the split landed and a guest that is not the captain's production second mate.
+Until that log exists, this section records what the assertion does, not that a real guest has been observed reviewing cross-vendor.
+
 ### Caller reachability (`fm_backend_sbx_transport_reachable`)
 
 Steering requires the caller to reach the **sbx daemon**, and not every firstmate context can.

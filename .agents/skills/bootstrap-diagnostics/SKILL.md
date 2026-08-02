@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, STATE_KEY_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of its diagnostics.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, STATE_KEY_MIGRATION, SECONDMATE_SYNC, GATE_VENDOR, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of its diagnostics.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -58,6 +58,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation could not run; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_SYNC: secondmate <id> guest: skipped: <reason>` - the same honesty for an sbx-backed secondmate's in-VM clone, which no host-home fast-forward reaches (`docs/sbx-backend.md` "Tracked-file sync" owns the mechanism): a running-VM skip clears itself at the guest's next restart, while a dirty or diverged guest deserves the same inspection as a host home with that reason; a completed guest sync is the no-action `BOOTSTRAP_INFO: secondmate <id> guest: updated <a>..<b>` fact.
   If the reason says the home is not writable from this session, the home could not create its inheritance lock artifacts at all; retrying bootstrap from the same sandbox will not help until that filesystem access is fixed.
+- `GATE_VENDOR: secondmate <id> guest: same vendor: <reason>` - an sbx-backed secondmate's in-VM gate would run its adversarial review with the same vendor its worker writes code with, so that review is not independent (`docs/sbx-backend.md` "Guest gate-vendor assertion" owns the contract).
+  Treat every review that guest has already produced as unverified, and escalate to the captain: correcting it changes what the guest's image ships, which is not firstmate's to decide alone.
+- `GATE_VENDOR: secondmate <id> guest: skipped: <reason>` - the same assertion could not read that guest's resolved gate vendor at all, so nothing proved the review is independent either way.
+  A stopped-VM skip clears itself at the guest's next start; a guest with no gate on its exec PATH, an unparseable report, or a failed probe each deserve inspection before trusting that guest's next review.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>` - the session-start liveness sweep could not guarantee that a live secondmate's recorded endpoint is running a real agent process.
   Investigate the reason because that secondmate is not guaranteed live.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - the secondmate sweep fast-forwarded a running secondmate home and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
