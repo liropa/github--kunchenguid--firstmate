@@ -31,6 +31,24 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# The awaiting-validation verb. On a no-mistakes ship task the crew commits its
+# implementation and then STOPS, because firstmate owes it the validation trigger
+# (AGENTS.md section 7 "Validate"). That handoff is NOT a completion, so it gets
+# its own verb instead of reusing `done:`. Sharing `done:` made the two states
+# indistinguishable in the durable record: a supervisor reading the last status
+# line could not tell "waiting on you" from "shipped" without further inspection,
+# and an away-mode crew could idle indefinitely behind a record that read as
+# success. It is captain-relevant (firstmate must see it and act) and terminal
+# (the crew ended its turn and will not advance on its own), but terminal is not
+# the same as complete - needs-decision and blocked are terminal-and-unfinished in
+# exactly the same way. This constant is the ONE definition of the verb; the
+# captain regex below, status_is_terminal_verb, bin/fm-crew-state.sh's
+# map_log_state, and bin/fm-brief.sh's generated brief all read it here rather
+# than hardcoding a second copy. Like the other terminal captain verbs it is not
+# individually overridable: a home wanting a different vocabulary replaces the
+# whole set through FM_CAPTAIN_RE.
+FM_CLASSIFY_AWAITING_VALIDATION_VERB='awaiting-validation'
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -42,7 +60,7 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT="done:|${FM_CLASSIFY_AWAITING_VALIDATION_VERB}:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged"
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -81,14 +99,17 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
-# callers that need legacy free-text matching use status_is_captain_relevant.
+# (done, awaiting-validation, needs-decision, blocked, failed). Terminal here means
+# the crew ENDED ITS TURN and will not advance without firstmate - it does not mean
+# the task finished: needs-decision, blocked, and awaiting-validation are all
+# terminal-and-unfinished. Free-text tokens alone never count here; callers that
+# need legacy free-text matching use status_is_captain_relevant.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done|needs-decision|blocked|failed|"$FM_CLASSIFY_AWAITING_VALIDATION_VERB") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -110,7 +131,7 @@ status_is_captain_relevant() {
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      done|needs-decision|blocked|failed|"$FM_CLASSIFY_AWAITING_VALIDATION_VERB") return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
@@ -235,9 +256,9 @@ status_open_decisions() {  # <status-file>
 
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
-# A later done, failed, needs-decision, blocked, or resolved event carrying that
-# key closes the phase, because it has moved to a terminal or separately tracked
-# state.
+# A later done, awaiting-validation, failed, needs-decision, blocked, or resolved
+# event carrying that key closes the phase, because it has moved to a terminal or
+# separately tracked state.
 # A bare legacy event uses the default key, preserving one-phase behavior.
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
@@ -259,7 +280,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|failed|needs-decision|blocked|"$FM_CLASSIFY_AWAITING_VALIDATION_VERB"|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

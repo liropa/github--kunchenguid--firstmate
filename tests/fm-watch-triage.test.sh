@@ -225,6 +225,57 @@ test_crew_is_provably_working_classifier() {
   pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
+# The awaiting-validation verb: a no-mistakes ship crew that committed its
+# implementation and stopped, waiting for firstmate's validation trigger. It used
+# to share `done:` with a genuinely-finished task, so the last status line could
+# not tell "waiting on you" from "shipped". The classification contract is:
+# captain-relevant (firstmate owes it a trigger, so the wake must surface),
+# terminal (the crew ended its turn, so the stale path escalates once rather than
+# aging a wedge), and NOT a declared pause (a pause is absorbed on a long cadence,
+# which is exactly the silent stall this verb exists to prevent).
+test_awaiting_validation_classifier() {
+  local dir state line open
+  dir=$(make_case awaiting-validation); state="$dir/state"
+  line='awaiting-validation: gate config template baked, ready for validation'
+
+  status_is_captain_relevant "$line" \
+    || fail "awaiting-validation must reach firstmate (not captain-relevant)"
+  status_is_terminal_verb "$line" \
+    || fail "awaiting-validation must be a terminal verb (crew ended its turn)"
+  status_is_paused "$line" \
+    && fail "awaiting-validation must not be absorbed as a declared external wait"
+  status_is_paused_or_captain_held "$line" \
+    && fail "awaiting-validation must not get the bounded-idle pause cadence"
+  status_is_captain_relevant 'awaiting-validation [key=impl]: keyed handoff' \
+    || fail "keyed awaiting-validation not recognized as captain-relevant"
+
+  # Distinguishable from a completion, which is the whole point: the two states
+  # no longer share a verb, so a supervisor greps them apart without inspection.
+  [ "$(status_line_verb "$line")" = "awaiting-validation" ] \
+    || fail "awaiting-validation verb did not parse as its own leading verb"
+  [ "$(status_line_verb 'done: PR https://x/pull/9 checks green')" = "done" ] \
+    || fail "the terminal completion verb stopped parsing as done"
+
+  # It is not a captain DECISION: opening one would put every routine no-mistakes
+  # ship task into the pending-decision set and demand a resolved: to close it.
+  printf '%s\n' "$line" > "$state/av.status"
+  open=$(status_open_decisions "$state/av.status")
+  [ -z "$open" ] || fail "awaiting-validation wrongly opened a keyed decision: $open"
+
+  # It does supersede an open working phase: the crew stopped that phase.
+  printf 'working [key=impl]: implementing\nawaiting-validation [key=impl]: committed\n' \
+    > "$state/av-phase.status"
+  [ -z "$(status_open_activities "$state/av-phase.status")" ] \
+    || fail "awaiting-validation did not close the working phase it ended"
+
+  # End to end through the wake path a real handoff takes.
+  signal_reason_is_actionable "$state/av.status" \
+    || fail "an awaiting-validation signal was not actionable"
+  printf '%s' "$(scan_captain_relevant_statuses "$state")" | grep -F 'av.status' >/dev/null \
+    || fail "the heartbeat fleet scan missed an awaiting-validation status"
+  pass "awaiting-validation surfaces to firstmate as terminal-but-unfinished, never as a pause or a decision"
+}
+
 # status_is_paused: the shared pause verb test both consumers read (so neither
 # hardcodes the literal). Matches only the verb before the first colon, so a reason
 # that merely mentions "paused" does not false-match, and a genuine blocker stays a
@@ -1272,6 +1323,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_awaiting_validation_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier

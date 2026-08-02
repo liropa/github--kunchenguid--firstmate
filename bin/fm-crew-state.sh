@@ -2,7 +2,8 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
+# Crews append only wake-worthy transitions
+# (done/awaiting-validation/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -127,6 +128,14 @@ log_last_line() {
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
+#
+# The awaiting-validation verb (FM_CLASSIFY_AWAITING_VALIDATION_VERB) maps to
+# `parked`, the same state a needs-decision gate reports: the crew committed its
+# implementation and stopped, and only firstmate's validation trigger moves it on.
+# This path is exactly where a no-mistakes ship crew lands between its
+# implementation commit and its first run - there is no run to attribute yet and
+# the pane is idle - so mapping it to `done` (as the shared `done:` verb used to)
+# reported a still-unvalidated task as finished to every consumer of this reader.
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
@@ -135,6 +144,7 @@ map_log_state() {  # <line>
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
+    "$FM_CLASSIFY_AWAITING_VALIDATION_VERB") echo parked ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
@@ -663,17 +673,23 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
+  # An awaiting-validation line is stale as soon as ANY run exists, whatever step
+  # that run is on. The verb describes only the window BEFORE the crew has a run
+  # at all, so an attributed run is proof the validation trigger it was waiting
+  # for has fired; unlike needs-decision/blocked there is no run state that still
+  # agrees with it.
+  LOG_SUPERSEDED=0
   case "$LOG_VERB" in
-    needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
-        if [ "$RUN_STATE" = working ]; then
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
-        else
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
-        fi
-      fi
-      ;;
+    needs-decision|blocked) [ "$RUN_STATE" = parked ] || LOG_SUPERSEDED=1 ;;
+    "$FM_CLASSIFY_AWAITING_VALIDATION_VERB") LOG_SUPERSEDED=1 ;;
   esac
+  if [ "$LOG_SUPERSEDED" = 1 ]; then
+    if [ "$RUN_STATE" = working ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
+    fi
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

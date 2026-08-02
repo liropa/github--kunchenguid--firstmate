@@ -39,6 +39,12 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# The no-mistakes ship brief additionally offers
+# FM_CLASSIFY_AWAITING_VALIDATION_VERB ("awaiting-validation:") for its FIRST
+# stop point - implementation committed, waiting for firstmate's validation
+# trigger - so that state is never recorded with the terminal "done:" verb the
+# second stop point uses. The other delivery modes have no mid-lifecycle handoff,
+# so their briefs do not offer the verb at all.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -66,6 +72,7 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+AWAITING_VERB=$FM_CLASSIFY_AWAITING_VALIDATION_VERB
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -279,6 +286,13 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Reportable state vocabulary for rule 4. Only the no-mistakes mode has a stop
+# point that hands the task back to firstmate mid-lifecycle, so only its brief
+# offers the awaiting-validation verb; a direct-PR or local-only crew has nothing
+# left to do after its own stop point and would never have cause to use it.
+STATES_LIST="working, needs-decision, blocked, $PAUSED_VERB, done, failed"
+STATES_SHORT="needs-decision/blocked/$PAUSED_VERB/done/failed"
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -309,11 +323,19 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    STATES_LIST="working, needs-decision, blocked, $PAUSED_VERB, $AWAITING_VERB, done, failed"
+    STATES_SHORT="needs-decision/blocked/$PAUSED_VERB/$AWAITING_VERB/done/failed"
     DOD=$(cat <<EOF
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This task has TWO stop points and they use DIFFERENT status verbs. Only the second one is \`done:\`.
+
+1. **Implementation committed on your branch.** Append \`$AWAITING_VERB: {summary}\` to the status file and stop.
+   Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+   This is a handoff, not a completion: firstmate owes you the validation trigger, and the durable
+   record has to say so. Never use \`done:\` here - it would record the task as finished while it is
+   still waiting on firstmate, and an unnoticed task would then sit idle behind a record that reads
+   as success.
+2. **Validation shipped a PR and CI is green.** Append \`done: PR {url} checks green\` and stop. You are finished.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -324,7 +346,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+Stop point 2 is reached when /no-mistakes reports CI green - the CI-ready return point; do not keep monitoring in the background until merge.
 EOF
 )
     ;;
@@ -353,13 +375,13 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: $STATES_LIST.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
+   $STATES_SHORT states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it; continue the same stage until a defined stop point under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long

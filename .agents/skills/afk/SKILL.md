@@ -152,7 +152,8 @@ While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to
 
 Classify each wake this way:
 
-- `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
+- `signal` with a terminal captain verb (`done:`, `awaiting-validation:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
+  `awaiting-validation:` is a worker waiting for firstmate's validation trigger, not a finished task; escalating it is what keeps an away-mode worker from idling indefinitely behind a record that reads as success.
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant status -> self-handle.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.

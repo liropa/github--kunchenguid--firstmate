@@ -927,6 +927,47 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+# (g'') no run + idle pane on an awaiting-validation handoff -> state: parked.
+# This is the exact position a no-mistakes ship crew occupies between its
+# implementation commit and its first pipeline run: nothing to attribute a run to,
+# an idle pane, and only firstmate's validation trigger to move it on. While that
+# state shared the `done:` verb this reader answered `state: done`, so every
+# consumer read a still-unvalidated task as finished.
+test_no_run_idle_pane_awaiting_validation_is_parked() {
+  reset_fakes
+  local d; d=$(new_case awaiting-validation)
+  make_repo_on_branch "$d/wt" fm/feat-av
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-av.meta" "window=fm:fm-feat-av" "worktree=$d/wt" "kind=ship"
+  printf 'awaiting-validation: template baked, ready for validation\n' > "$d/state/feat-av.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-av)
+  assert_contains "$out" "state: parked" "awaiting-validation log -> parked"
+  assert_not_contains "$out" "state: done" "awaiting-validation must never read as done"
+  assert_contains "$out" "source: status-log" "idle pane -> status-log source"
+  assert_contains "$out" "ready for validation" "awaiting-validation note is lost from the detail"
+  pass "an awaiting-validation handoff reports parked, not done"
+}
+
+# Once firstmate fires the validation trigger the crew was waiting for, a run
+# exists and the awaiting-validation line is spent. The run-step stays
+# authoritative and the stale line must be marked superseded, so it can never be
+# re-read later as a crew still waiting on a trigger that already fired.
+test_awaiting_validation_log_superseded_by_active_run() {
+  reset_fakes
+  local d; d=$(new_case awaiting-validation-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-avs
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-avs.meta" "window=fm:fm-feat-avs" "worktree=$d/wt" "kind=ship"
+  printf 'awaiting-validation: implementation committed\n' > "$d/state/feat-avs.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-avs)"
+  local out; out=$(run_crew_state "$d" feat-avs)
+  assert_contains "$out" "state: working" "an active run must outrank a spent awaiting-validation line"
+  assert_contains "$out" "superseded" "spent awaiting-validation line not flagged superseded"
+  pass "an awaiting-validation line is superseded once its run exists"
+}
+
 test_no_run_idle_pane_uses_keyed_log() {
   reset_fakes
   local d; d=$(new_case keyed-idle)
@@ -1663,6 +1704,8 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_pane_awaiting_validation_is_parked
+test_awaiting_validation_log_superseded_by_active_run
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
