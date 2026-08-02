@@ -446,6 +446,7 @@ secondmate_sync() {
     fi
     if [ "$sbx_ready" != yes ]; then
       echo "SECONDMATE_SYNC: secondmate $id guest: skipped: sbx adapter failed to load"
+      echo "GATE_VENDOR: secondmate $id guest: skipped: sbx adapter failed to load, so the gate vendor could not be read"
       continue
     fi
     if ! validate_secondmate_home "$id" "$home"; then

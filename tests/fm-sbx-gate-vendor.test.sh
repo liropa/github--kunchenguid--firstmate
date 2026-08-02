@@ -368,7 +368,20 @@ test_bootstrap_sweep_classifies() {
     "an unsafe host home must still be reported by tracked sync"
   assert_contains "$out" "GATE_VENDOR: secondmate x guest: same vendor: the gate would review on claude" \
     "host-home validation must never suppress the independent vendor backstop"
-  pass "T11 the session-start sweep classifies vendors independently of host-home validation"
+
+  mv "$bootstrap_root/bin/backends/sbx.sh" "$bootstrap_root/bin/backends/sbx.sh.disabled"
+  out=$(PATH="$fb:$BASE_PATH" \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+    FM_SBX_SIGNALS_ROOT="$w/signals" FM_HOME="$w/home" FM_SEND_SETTLE=0 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" FM_FAKE_SBX_NM_BIN="$nmbin" \
+    FM_FAKE_NM_GATE=claude \
+    "$bootstrap_root/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate x guest: skipped: sbx adapter failed to load" \
+    "an adapter-load failure must still be reported by tracked sync"
+  assert_contains "$out" "GATE_VENDOR: secondmate x guest: skipped: sbx adapter failed to load, so the gate vendor could not be read" \
+    "an adapter-load failure must produce its own indeterminate vendor diagnostic"
+  pass "T11 the session-start sweep reports every gate-vendor outcome"
 }
 
 test_same_vendor_gate_is_caught
