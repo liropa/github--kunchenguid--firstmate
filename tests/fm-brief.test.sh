@@ -119,6 +119,69 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# A no-mistakes ship task stops TWICE, and the two stops must not share a verb.
+# Incident 2026-08-02: both ship tasks dispatched that day committed, appended
+# `done:` exactly as the scaffold instructed, and stopped for their validation
+# trigger; firstmate read the terminal `done:` as "shipped", reported both to the
+# captain as workers stopping short, and sent corrective steers for a handoff the
+# template had always intended. The durable record has to distinguish them.
+test_no_mistakes_dod_separates_handoff_from_completion() {
+  local home id brief
+  home="$TMP_ROOT/handoff-verb-home"
+  mkdir -p "$home/data"
+  id="brief-handoff-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Append `awaiting-validation: {summary}`' "$brief" \
+    "no-mistakes DOD does not name the awaiting-validation stop point"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Never use `done:` here' "$brief" \
+    "no-mistakes DOD does not forbid done: at the handoff stop point"
+  assert_grep "awaiting-validation" "$brief" \
+    "no-mistakes brief does not offer the awaiting-validation verb at all"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Append `done: PR {url} checks green`' "$brief" \
+    "no-mistakes DOD lost its genuine completion line"
+  # The old wording paired done: with the pre-validation summary; that pairing is
+  # the defect and must not come back.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD still instructs done: for the pre-validation handoff"
+
+  # The scaffold is a safety contract: the wording change must not have relaxed it.
+  assert_grep "Verify isolation before anything else" "$brief" \
+    "ship brief lost its worktree-isolation assertion"
+  assert_grep "ask-user findings are not yours to answer" "$brief" \
+    "ship brief lost its ask-user escalation rule"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Avoid `--yes`' "$brief" \
+    "ship brief lost its --yes prohibition"
+  pass "fm-brief.sh: the no-mistakes handoff and completion stop points use different verbs"
+}
+
+# The other delivery modes have no mid-lifecycle handoff back to firstmate: their
+# worker is genuinely finished at its single stop point, so offering it a verb it
+# can never correctly use would only invite misuse.
+test_other_delivery_modes_do_not_offer_the_handoff_verb() {
+  local home id brief
+  home="$TMP_ROOT/no-handoff-home"
+  write_registry "$home"
+  for id_proj in "brief-nohandoff-direct:direct-proj" "brief-nohandoff-local:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "awaiting-validation" "$brief" \
+      "$id: a mode with no validation handoff must not offer the awaiting-validation verb"
+    assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+      "$id: states list changed for a mode with no validation handoff"
+  done
+  pass "fm-brief.sh: direct-PR and local-only briefs keep their single-stop vocabulary"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -267,7 +330,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief states
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -288,7 +351,14 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    # The ship brief defaults to no-mistakes, which also offers the
+    # awaiting-validation verb for its implementation-committed stop point; scout
+    # and secondmate have no such handoff, so their lists are unchanged.
+    case "$kind" in
+      ship) states="States: working, needs-decision, blocked, awaiting, awaiting-validation, done, failed." ;;
+      *)    states="States: working, needs-decision, blocked, awaiting, done, failed." ;;
+    esac
+    assert_grep "$states" "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -346,6 +416,8 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_separates_handoff_from_completion
+test_other_delivery_modes_do_not_offer_the_handoff_verb
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

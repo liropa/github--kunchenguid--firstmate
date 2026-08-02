@@ -7,7 +7,7 @@
 # captain-relevant events plus bounded declared-pause rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
+# awaiting-validation/needs-decision/blocked/failed/persistent-wedge/check-output events and a
 # declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
