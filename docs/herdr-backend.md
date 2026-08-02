@@ -965,6 +965,12 @@ A still-blocked reading escalates, a resumed reading cancels the marker, and a f
 An unreadable pane is therefore neither treated as proof that the crew resumed nor allowed to produce an alarm from a stale timestamp.
 Cancelling an escalation that has not fired and deduping one that has are different operations: the pre-existing marker only ever did the second, which is why a clearer's `working` edge simply re-armed the next prompt for another alarm.
 
+There is one accepted degraded-mode limit when the event stream is unavailable: if an armed block resolves and the pane becomes blocked again before the marker is due, the newer blocked episode inherits the earlier timestamp and can escalate before it has lasted the full dwell.
+The pane is genuinely blocked when that alarm fires, so this is an early true alarm rather than a false alarm, and the settled marker bounds it to at most one alarm until a later observed `working` edge.
+This can happen only when the event path missed the intervening resume, because an observed `working` edge clears the marker exactly as described above.
+Distinguishing the two blocked episodes would require continuity data that Herdr does not expose, the same integration limit that prevents stable block-type classification from the transition record.
+Re-arming every due reconciliation was rejected because repeated blocked readings could then postpone escalation indefinitely for a crew genuinely waiting on a human, violating the guarantee that every sustained unattended block eventually alarms.
+
 Nothing is suppressed by category, by task, or by count - only by dwell.
 A crew genuinely waiting on a human is blocked indefinitely, so it crosses any finite dwell and escalates exactly once, with the settled marker holding it to that one wake until a `working` edge proves someone acted.
 The wake kind is still `stale`, so away mode consumes it through the same queue.
