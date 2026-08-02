@@ -910,6 +910,20 @@ fm_backend_deferred_since() {  # <backend> <state_dir> <window>
   esac
 }
 
+# fm_backend_transition_state: classify <window>'s current agent level as
+# blocked, resumed, or unknown. Unknown is deliberately not evidence that a
+# deferred alarm should fire or be cancelled.
+fm_backend_transition_state() {  # <backend> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || { printf 'unknown'; return 0; }
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_transition_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_settle_transition: mark <window>'s block escalated (or absorbed),
 # holding it to that one wake until a working edge clears it.
 fm_backend_settle_transition() {  # <backend> <state_dir> <window>

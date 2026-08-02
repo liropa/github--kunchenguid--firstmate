@@ -903,11 +903,11 @@ handle_push_transition() {  # <backend> <session> <record>
 # sleep, and no extra wait - the cycle was already running.
 #
 # It escalates only once a pane has been continuously blocked for
-# PUSH_BLOCK_DWELL_SECS. "Continuously" is exact rather than sampled: the
-# backend's working edge DELETES the armed marker the instant a crew resumes
-# (fm_transition_policy's absorb action), so a block that something services
-# inside the window CANCELS its own pending escalation and this check never sees
-# it.
+# PUSH_BLOCK_DWELL_SECS. The backend's working edge normally deletes the armed
+# marker immediately. Once a marker is due, this function also reads the current
+# agent level before escalating: that closes the restart/lost-subscription
+# window where the working edge could have been missed. A resumed level cancels
+# the marker, while an unreadable level leaves it pending for a later retry.
 #
 # Cancelling is why this is not the pre-existing per-pane dedupe marker doing its
 # job. That marker suppressed REPEATS of an alarm which had ALREADY fired, and a
@@ -925,7 +925,7 @@ handle_push_transition() {  # <backend> <session> <record>
 # The wake is enqueued BEFORE the marker is settled, so a watcher that dies
 # between the two re-escalates on its next run rather than losing the alarm.
 push_block_dwell_check() {  # <window> <last-status-line>
-  local win=$1 last=$2 backend since age reason
+  local win=$1 last=$2 backend since age current reason
   backend=$(window_backend "$win")
   since=$(fm_backend_deferred_since "$backend" "$STATE" "$win") || return 0
   if status_is_paused "$last"; then
@@ -935,6 +935,16 @@ push_block_dwell_check() {  # <window> <last-status-line>
   fi
   age=$(( $(date +%s) - since ))
   [ "$age" -ge "$PUSH_BLOCK_DWELL_SECS" ] || return 0
+  current=$(fm_backend_transition_state "$backend" "$win")
+  case "$current" in
+    blocked) ;;
+    resumed)
+      fm_backend_clear_transition "$backend" "$STATE" "$win" || exit 1
+      triage_log "cancelled push blocked (pane resumed before due-marker reconciliation): $win"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
   reason="stale: $win (herdr: agent blocked ${age}s - still waiting on human after the ${PUSH_BLOCK_DWELL_SECS}s confirmation dwell, escalated ahead of the wedge timer)"
   fm_wake_append stale "$win" "$reason" || exit 1
   fm_backend_settle_transition "$backend" "$STATE" "$win" || exit 1

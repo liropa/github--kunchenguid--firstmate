@@ -2536,6 +2536,17 @@ test_normalize_event_leaves_from_empty() {
   pass "fm_backend_herdr_normalize_event routes through the shared record with an empty from_status"
 }
 
+test_transition_state_preserves_blocked_resumed_unknown() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=default; FM_BACKEND_HERDR_PANE=wG:pQ; }; fm_backend_herdr_pane_agent_detail() { printf "live:blocked"; }; fm_backend_herdr_transition_state default:wG:pQ' "$ROOT")
+  [ "$out" = blocked ] || fail "a real blocked agent status must reconcile as blocked, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=default; FM_BACKEND_HERDR_PANE=wG:pQ; }; fm_backend_herdr_pane_agent_detail() { printf "live:working"; }; fm_backend_herdr_transition_state default:wG:pQ' "$ROOT")
+  [ "$out" = resumed ] || fail "a real non-blocked agent status must reconcile as resumed, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=default; FM_BACKEND_HERDR_PANE=wG:pQ; }; fm_backend_herdr_pane_agent_detail() { printf "unknown"; }; fm_backend_herdr_transition_state default:wG:pQ' "$ROOT")
+  [ "$out" = unknown ] || fail "an ambiguous agent read must reconcile as unknown, got '$out'"
+  pass "fm_backend_herdr_transition_state preserves blocked, resumed, and unknown levels"
+}
+
 test_escalation_marker_keys_like_watcher() {
   local m expect
   expect="/st/.herdr-escalated-$(fm_state_key_encode 'default:wG:pQ')"
@@ -2920,6 +2931,7 @@ test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
+test_transition_state_preserves_blocked_resumed_unknown
 test_escalation_marker_keys_like_watcher
 test_escalation_marker_separates_fold_colliding_panes
 test_marker_carries_deferred_then_settled_states
