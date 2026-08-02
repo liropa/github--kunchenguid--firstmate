@@ -51,7 +51,9 @@
 #   4. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. An awaiting-validation line is
+#      superseded by any attributed run because it describes only the no-run
+#      handoff before firstmate triggers validation.
 #   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
