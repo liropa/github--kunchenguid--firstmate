@@ -97,7 +97,7 @@
 #   from the default branch's, naming which side carries the file when only one
 #   does. It is DETECTION ONLY: the dispatch proceeds either way, no trust store
 #   or launch flag is touched, and no line is printed when the two agree, when
-#   the file is absent from both, or when no default branch resolves. Those
+#   the file is absent from both, or when no default branch resolves.
 #   On Claude Code v2.1.220's host/tmux path, measured 2026-08-02, those settings
 #   load without a prompt under the repo-root trust grant, which the fleet
 #   accepts deliberately; docs/claude-settings-trust-posture.md owns that
