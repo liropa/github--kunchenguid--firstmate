@@ -1486,8 +1486,8 @@ test_missing_pr_identity_is_named_apart_from_legacy_quarantine() {
     "migration did not name the missing PR identity as what failed"
   assert_no_grep "$ambiguous_message" "$state/.pr-check-migration.log" \
     "migration still called a current, self-consistent poll legacy and invalid"
-  assert_grep "quarantined poll was watching $url" "$state/.pr-check-migration.log" \
-    "migration did not name the PR the quarantined poll was watching"
+  assert_grep "poll with unusable task PR identity was watching $url" "$state/.pr-check-migration.log" \
+    "migration did not name the PR the identity-invalid poll was watching"
   assert_grep "bin/fm-pr-check.sh task-a $url" "$state/.pr-check-migration.log" \
     "migration did not name the exact re-arm command"
   assert_grep 'refused while it is unresponsive' "$state/.pr-check-migration.log" \
