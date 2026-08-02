@@ -850,13 +850,14 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # Report - never refuse - when the branch this spawn will work on carries a
 # committed .claude/settings.json that differs from the default branch's.
 #
-# Claude Code loads a linked worktree's branch-carried project settings, hooks
-# included, under the PRIMARY checkout's repo-root trust grant, with no
-# per-worktree prompt (docs/claude-settings-trust-posture.md, which owns the
-# measurement and the captain's decision to accept it). The fleet accepts that,
-# so this exists to make the difference VISIBLE at the moment work is
-# dispatched, not to stop the dispatch: the accepted risk is about who decided,
-# and a supervisor can only weigh that if they are told.
+# On Claude Code v2.1.220's host/tmux path, measured 2026-08-02, a linked
+# worktree loaded branch-carried project settings, hooks included, under the
+# PRIMARY checkout's repo-root trust grant with no per-worktree prompt
+# (docs/claude-settings-trust-posture.md owns the measurement and the captain's
+# decision to accept it). The fleet accepts that measured posture, so this
+# exists to make the difference VISIBLE at the moment work is dispatched, not
+# to stop the dispatch: the accepted risk is about who decided, and a
+# supervisor can only weigh that if they are told.
 #
 # Two consequences of "detection, not a gate" are load-bearing. It never exits
 # non-zero and is never called in a position that could abort the launch, and
@@ -891,7 +892,7 @@ report_settings_drift() {  # <worktree>
   else
     change="differs from the base"
   fi
-  echo "warning: branch-carried claude settings drift for $ID: $rel $change (base $base_rev) in $wt; it loads under the repo-root trust grant without a prompt (docs/claude-settings-trust-posture.md). Dispatch continues." >&2
+  echo "warning: branch-carried claude settings drift for $ID: $rel $change (base $base_rev) in $wt; see the Claude Code v2.1.220 host/tmux measurement from 2026-08-02 in docs/claude-settings-trust-posture.md. Dispatch continues." >&2
   return 0
 }
 
@@ -1279,7 +1280,7 @@ fi
 # this reports on. Detection only - see report_settings_drift; the launch below
 # is unaffected either way.
 if [ "$KIND" != secondmate ]; then
-  report_settings_drift "$WT"
+  report_settings_drift "$WT" || true
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
