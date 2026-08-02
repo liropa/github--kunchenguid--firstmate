@@ -70,15 +70,19 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 # fm_transition_policy: THE single-owner status -> supervision-action table.
 # Given a normalized `to_status`, print exactly one action token:
 #
-#   actionable - escalate to the supervisor IMMEDIATELY (a fresh edge here is a
-#                durable wake now). `blocked` is the only immediately-actionable
-#                status today: herdr reports it precisely when a harness is
-#                waiting on the human (a permission/trust dialog, an interactive
-#                menu, a wedged prompt) - the cases that write no status file
-#                and otherwise sit until the stale-pane wedge timer.
-#   absorb     - do NOT wake, but CLEAR this pane's per-pane escalation dedupe
-#                marker so a later `->blocked` edge re-escalates. `working`
-#                (a crew resumed/started a turn) is the clearing edge.
+#   actionable - hand this edge to the supervisor's escalation path. `blocked`
+#                is the only actionable status today: herdr reports it precisely
+#                when a harness is waiting on the human (a permission/trust
+#                dialog, an interactive menu, a wedged prompt) - the cases that
+#                write no status file and otherwise sit until the stale-pane
+#                wedge timer. The edge is NOT itself the alarm: how long a pane
+#                must HOLD the status before anyone is woken is the consumer's
+#                policy (bin/fm-watch.sh's push_block_dwell_check), because an
+#                edge counts approval prompts rather than stuckness.
+#   absorb     - do NOT wake, and CLEAR this pane's per-pane escalation state,
+#                which both re-arms the dedupe for a later `->blocked` edge and
+#                cancels an escalation still deferred for the current one.
+#                `working` (a crew resumed/started a turn) is the clearing edge.
 #   defer      - do NOTHING on the fast path; leave it to the existing
 #                status/turn-end completion semantics and the poll backstop.
 #                `idle`/`done` blip transiently between tool calls, so
