@@ -92,6 +92,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A ship/scout spawn also prints one `warning: branch-carried claude settings
+#   drift` line when the task branch's committed .claude/settings.json differs
+#   from the default branch's, naming which side carries the file when only one
+#   does. It is DETECTION ONLY: the dispatch proceeds either way, no trust store
+#   or launch flag is touched, and no line is printed when the two agree, when
+#   the file is absent from both, or when no default branch resolves. Those
+#   settings load without a prompt under the repo-root trust grant, which the
+#   fleet accepts deliberately; docs/claude-settings-trust-posture.md owns that
+#   posture and its evidence.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -838,6 +847,54 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Report - never refuse - when the branch this spawn will work on carries a
+# committed .claude/settings.json that differs from the default branch's.
+#
+# Claude Code loads a linked worktree's branch-carried project settings, hooks
+# included, under the PRIMARY checkout's repo-root trust grant, with no
+# per-worktree prompt (docs/claude-settings-trust-posture.md, which owns the
+# measurement and the captain's decision to accept it). The fleet accepts that,
+# so this exists to make the difference VISIBLE at the moment work is
+# dispatched, not to stop the dispatch: the accepted risk is about who decided,
+# and a supervisor can only weigh that if they are told.
+#
+# Two consequences of "detection, not a gate" are load-bearing. It never exits
+# non-zero and is never called in a position that could abort the launch, and
+# it stays quiet unless there is a real difference - an unresolvable default
+# branch, a non-repository worktree, or no settings file on either side all
+# print nothing. A line on every ordinary spawn would be tuned out inside a
+# week, which would cost the detection its whole point.
+#
+# It reads git only; it touches no trust store and changes no launch flag.
+report_settings_drift() {  # <worktree>
+  local wt=$1 rel=.claude/settings.json
+  local default base_rev rev head_blob base_blob change
+  default=$(default_branch "$wt" 2>/dev/null) || return 0
+  base_rev=
+  for rev in "$default" "origin/$default"; do
+    if git -C "$wt" rev-parse --quiet --verify "$rev^{commit}" >/dev/null 2>&1; then
+      base_rev=$rev
+      break
+    fi
+  done
+  [ -n "$base_rev" ] || return 0
+  head_blob=$(git -C "$wt" rev-parse --quiet --verify "HEAD:$rel" 2>/dev/null || true)
+  base_blob=$(git -C "$wt" rev-parse --quiet --verify "$base_rev:$rel" 2>/dev/null || true)
+  [ "$head_blob" = "$base_blob" ] && return 0
+  # State the two trees, not a cause. A branch that merely trails the default
+  # branch produces the same asymmetry as one that deleted the file, and this
+  # line is read at dispatch by someone who has not looked at either yet.
+  if [ -z "$base_blob" ]; then
+    change="is present on this branch and absent on the base"
+  elif [ -z "$head_blob" ]; then
+    change="is absent on this branch and present on the base"
+  else
+    change="differs from the base"
+  fi
+  echo "warning: branch-carried claude settings drift for $ID: $rel $change (base $base_rev) in $wt; it loads under the repo-root trust grant without a prompt (docs/claude-settings-trust-posture.md). Dispatch continues." >&2
+  return 0
+}
+
 # A stale presentation journal never grants launch authority.
 # When authoritative metadata already exists, require its endpoint to be
 # positively dead before the journal's read-only token inspection may allow a
@@ -1214,6 +1271,15 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+# Both crewmate worktree paths (orca's create above, treehouse get here) have
+# resolved and validated $WT by now, so one call covers both. A secondmate's
+# $WT is its own firstmate home rather than a project branch, which is not what
+# this reports on. Detection only - see report_settings_drift; the launch below
+# is unaffected either way.
+if [ "$KIND" != secondmate ]; then
+  report_settings_drift "$WT"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

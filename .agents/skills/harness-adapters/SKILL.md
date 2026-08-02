@@ -146,6 +146,9 @@ A **guest clone** hits the workspace gate instead, cleared by the grants in `doc
 Pre-seeding its per-worktree key is refused on purpose rather than merely unimplemented: that file is controlled by the branch the agent was sent to work on, so granting the key would make the agent adopt permissions, hooks, and MCP servers carried by the code under review.
 The prompt is that boundary working, not a gap to close; `docs/sbx-backend.md`'s "Guest claude workspace trust" owns the full rationale and the grant shape firstmate does seed.
 
+That host silence means branch-carried settings, including command-executing `PreToolUse` hooks, load without the agent choosing to run them.
+The fleet accepts that deliberately; `docs/claude-settings-trust-posture.md` owns the posture, its evidence, and the dispatch-time drift report `fm-spawn` prints.
+
 Budget one supervised answer per NEW GIT ROOT - a newly cloned project, or a guest clone - not per worktree and not once per machine or per sandbox.
 A host dispatch into a fresh pool worktree of an already-granted repo needs no supervised keypress and does not park, so unattended and away-mode dispatch into the pool costs nothing extra.
 
