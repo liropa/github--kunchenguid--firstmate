@@ -201,7 +201,8 @@ Trust is not one switch:
 - **Project-settings** trust (`.claude/settings.json` permissions, hooks, MCP servers) uses the git-root-canonicalized **exact** key and does **not** walk.
 
 Both gates can park an interactive launch, and the grants below clear only the first of them.
-`.agents/skills/harness-adapters/SKILL.md`'s claude section owns what firstmate does about the second one at spawn time, because it is a property of claude everywhere rather than of this backend.
+`.agents/skills/harness-adapters/SKILL.md`'s claude section owns what firstmate does about the second one at spawn time.
+Its scope is not uniform across backends: the host worktree case canonicalizes to the **shared repository root**, so one grant covers every linked worktree of that repo, while each clone here is its own git root and the cost really is per clone (Claude Code v2.1.220, host/tmux path, 2026-08-02; the guest path was not re-tested in that run).
 
 Three keys are granted, each a ROOT whose interesting descendants are separate git roots:
 
@@ -320,7 +321,7 @@ The first in-guest crewmate ever launched under the agent-dotfiles secondmate co
 - **The project-settings gate parked the launch anyway:** The crewmate's worktree carried the repo's own committed `.claude/settings.json`, read at file level inside the live guest worktree: `permissions.allow` 18 entries, `permissions.deny` 12, plus a `hooks` block.
 - **One keypress cleared it:** `bin/fm-send.sh <id> --key Enter` from the supervising firstmate released the launch and the worker proceeded immediately.
 
-This run is the measurement behind the once-per-worktree dispatch contract and keypress owned by `.agents/skills/harness-adapters/SKILL.md`'s claude section.
+This run is the guest-clone measurement behind the supervised-keypress dispatch contract owned by `.agents/skills/harness-adapters/SKILL.md`'s claude section; that contract budgets the keypress per new git root, which in a guest is each clone.
 
 Re-derived host-side on 2026-07-31 inside the separate external `agent-dotfiles` repository at commit `9f9d163`: `git show 9f9d163:.claude/settings.json` shows exactly `permissions.allow` 18, `permissions.deny` 12, and a `hooks` block, so the settings that gate asked about were branch-controlled rather than local operator state.
 Not captured during the guest run: the guest claude version and the exact dialog text, so this entry records an observed outcome rather than a replayable transcript.
