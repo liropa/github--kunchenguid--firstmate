@@ -1137,7 +1137,7 @@ if migration_needed; then
         obligations_ok=1
         ensure_outcome_obligation "$prefix" "pending-$outcome" || obligations_ok=0
         if [ "$obligations_ok" -eq 1 ] && [ "$outcome" = identity ]; then
-          record_diagnostic "task $id: quarantined poll was watching $watched_url; re-arm with bin/fm-pr-check.sh $id $watched_url, which pauses the watcher first and is refused while it is unresponsive" \
+          record_diagnostic "task $id: poll with unusable task PR identity was watching $watched_url; re-arm with bin/fm-pr-check.sh $id $watched_url, which pauses the watcher first and is refused while it is unresponsive" \
             || obligations_ok=0
         fi
         if [ "$obligations_ok" -eq 1 ]; then
