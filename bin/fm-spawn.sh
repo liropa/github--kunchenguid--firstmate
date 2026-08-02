@@ -98,8 +98,9 @@
 #   does. It is DETECTION ONLY: the dispatch proceeds either way, no trust store
 #   or launch flag is touched, and no line is printed when the two agree, when
 #   the file is absent from both, or when no default branch resolves. Those
-#   settings load without a prompt under the repo-root trust grant, which the
-#   fleet accepts deliberately; docs/claude-settings-trust-posture.md owns that
+#   On Claude Code v2.1.220's host/tmux path, measured 2026-08-02, those settings
+#   load without a prompt under the repo-root trust grant, which the fleet
+#   accepts deliberately; docs/claude-settings-trust-posture.md owns that
 #   posture and its evidence.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
