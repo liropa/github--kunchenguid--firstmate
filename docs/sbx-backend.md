@@ -9,7 +9,7 @@ This guide records the fork-side adapter contract and the empirical CLI facts it
 
 Adapter: `bin/backends/sbx.sh`, dispatched through `bin/fm-backend.sh`.
 Spawn branch: `bin/fm-spawn.sh` (secondmate-only; ship/scout sbx spawns are refused).
-Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-secondmate-liveness.test.sh`, `tests/fm-watch-sbx-signals.test.sh`, `tests/fm-sbx-tracked-sync.test.sh`.
+Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-secondmate-liveness.test.sh`, `tests/fm-watch-sbx-signals.test.sh`, `tests/fm-sbx-gate-vendor.test.sh`, `tests/fm-sbx-tracked-sync.test.sh`.
 
 ## Empirical CLI facts (verified 2026-07-19, sbx CLI against a real shell-agent sandbox)
 
