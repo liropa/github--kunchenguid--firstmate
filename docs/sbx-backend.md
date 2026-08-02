@@ -491,9 +491,43 @@ The assertion judges whatever the guest would actually resolve, so a generated d
 Verified against the fixtures in `tests/fm-sbx-gate-vendor.test.sh`: the real guest probe script executed against a hermetic PATH and a fake `no-mistakes` whose `doctor` report shape is byte-accurate to the v1.40.2 output above, **including that it exits 0 while reporting a gate it cannot validate**.
 That property has its own fixture guard, so a fake that stopped reproducing the lie fails the suite rather than letting a classifier pass for the wrong reason.
 
-**Not yet verified end to end against a real sandbox VM.**
-The demanded proof is a `~/.no-mistakes/logs/*/review.log` from a fresh firstmate-created guest showing it ran codex, and it is tracked separately (`fm-gate-config-fresh-guest-proof`) because it needs both halves of the split landed and a guest that is not the captain's production second mate.
-Until that log exists, this section records what the assertion does, not that a real guest has been observed reviewing cross-vendor.
+**Verified end to end against a real sandbox VM 2026-08-02** (`fm-gate-config-fresh-guest-proof`).
+A throwaway guest `fm-gvproof` was created through firstmate's own path - `bin/fm-spawn.sh <id> <home> --harness claude --backend sbx --secondmate`, reaching `fm_backend_sbx_create_task` - on `docker.io/library/adf-codex:v5` (image `c5e40c1c8781`) with `FM_SBX_AGENT=codex`, from a throwaway `FM_HOME` outside the captain's fleet.
+No provisioning script was run, no `sbx create` was issued by hand, and the guest's gate config was never edited; it arrived baked in the template.
+Create's assertion passed **silently**, which is its cross-vendor verdict: the gate resolved codex against a claude worker.
+
+On the first gate that guest ever ran - beforehand `~/.no-mistakes/` held only the baked `config.yaml` and no `logs/` directory - `~/.no-mistakes/logs/01KZ1FZMSB167398WQS2F4WZ0V/review.log` recorded:
+
+```
+reviewing changes...
+
+codex started pid=1937
+...
+codex exited pid=1937 status=success
+```
+
+and that process's own argv, read from `/proc/1937/cmdline` while the review was still live, carries the pins:
+
+```
+/home/agent/.local/share/mise/installs/node/26.5.0/bin/node
+/usr/local/share/npm-global/bin/codex
+exec
+-m
+gpt-5.6-sol
+-c
+model_reasoning_effort="high"
+```
+
+The review step completed in 90.3 s with zero findings, spanning 2026-08-02 15:02:53 to 15:04:23 UTC, on a real committed change rather than a dry run.
+The guest's whole log tree was 1 run, 1 `review.log`, **codex 1, claude 0** - against the 26-of-26-on-claude regression target above.
+Both CLIs were observed present in that guest, so by the resolution order measured above `auto` would still have reached claude: the baked config is what changed the outcome, not CLI availability.
+The run was aborted after review rather than pushed, and the guest was destroyed once the log was captured.
+
+The artifacts this defect family has already produced falsely are recorded as context only, never as the proof: the guest's `agent: codex` config line, `doctor`'s `✓ gate validation  codex is runnable`, and the run's exit status.
+
+**This says nothing about the live `fm-agent-dotfiles` guest.**
+What is proven is that a *newly created* guest is born gate-correct on `adf-codex:v5`.
+The live guest predates that template and carries a hand-edited config no gate run has ever exercised, so its own correctness remains unproven in exactly the way this section's opening describes, and is tracked as a separate open risk.
 
 ### Caller reachability (`fm_backend_sbx_transport_reachable`)
 
