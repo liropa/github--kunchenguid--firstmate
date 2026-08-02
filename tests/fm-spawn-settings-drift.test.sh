@@ -2,9 +2,10 @@
 # Behavior tests for fm-spawn.sh's dispatch-time branch-carried settings drift
 # report (bin/fm-spawn.sh, report_settings_drift).
 #
-# Claude Code loads a linked worktree's committed .claude/settings.json - hooks
-# included - under the primary checkout's repo-root trust grant, with no
-# per-worktree prompt. The fleet accepts that posture
+# On Claude Code v2.1.220's host/tmux path, measured 2026-08-02, a linked
+# worktree loaded its committed .claude/settings.json - hooks included - under
+# the primary checkout's repo-root trust grant with no per-worktree prompt. The
+# fleet accepts that measured posture
 # (docs/claude-settings-trust-posture.md) and reports the drift at dispatch
 # instead of guarding it. These tests pin the three properties that make the
 # report worth having rather than noise:
@@ -192,11 +193,30 @@ test_branch_added_settings_names_which_side() {
   pass "settings added only on the branch are reported with the side that carries them"
 }
 
+# The inverse asymmetry follows a separate production branch and commonly
+# occurs when a feature branch predates settings added to the default branch.
+test_base_only_settings_names_which_side() {
+  local rec id out status
+  id=drift-base-only-e5
+  rec=$(make_case drift-base-only "$id" 'echo base-only' -)
+  read_case "$rec"
+  git -C "$WT_DIR" rm -q .claude/settings.json
+  git_commit "$WT_DIR" 'remove branch settings'
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a branch without the base settings must still dispatch"
+  assert_contains "$out" "spawned $id" "drift report blocked the spawn"
+  assert_contains "$out" ".claude/settings.json is absent on this branch and present on the base" \
+    "drift report did not identify that only the base carries the settings file"
+  pass "settings present only on the base are reported with the side that carries them"
+}
+
 # The report reads git and says so; it must not have written a trust key or
 # otherwise reached outside the repo to reach its verdict.
 test_report_leaves_the_trust_store_alone() {
   local rec id fake_home out
-  id=drift-notrust-e5
+  id=drift-notrust-f6
   rec=$(make_case drift-notrust "$id" 'echo base' 'echo branch')
   read_case "$rec"
   fake_home="$TMP_ROOT/drift-notrust/claude-home"
@@ -215,6 +235,7 @@ test_modified_settings_report_and_still_dispatch
 test_no_settings_anywhere_is_silent
 test_inherited_settings_are_silent
 test_branch_added_settings_names_which_side
+test_base_only_settings_names_which_side
 test_report_leaves_the_trust_store_alone
 
 echo "# all fm-spawn-settings-drift tests passed"
