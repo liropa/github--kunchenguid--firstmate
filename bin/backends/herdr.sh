@@ -890,7 +890,7 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
-fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
+fm_backend_herdr_pane_agent_detail() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid status
   # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
   # an error response's JSON body to STDERR (success bodies go to stdout), so
@@ -919,7 +919,25 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|idle|done|blocked) printf 'live:%s' "$status" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
+  case "$(fm_backend_herdr_pane_agent_detail "$1" "$2")" in
+    live:*) printf 'live' ;;
+    dead) printf 'dead' ;;
+    no-agent) printf 'no-agent' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_herdr_transition_state() {  # <window>
+  fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_pane_agent_detail "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    live:blocked) printf 'blocked' ;;
+    live:*) printf 'resumed' ;;
     *) printf 'unknown' ;;
   esac
 }

@@ -27,6 +27,8 @@ WAKE_LOG="$TMP/wakes"
 SLEEP_LOG="$TMP/sleeps"
 wake() { printf '%s\n' "$1" >> "$WAKE_LOG"; return 0; }
 sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
+CURRENT_TRANSITION_STATE=blocked
+fm_backend_transition_state() { printf '%s' "$CURRENT_TRANSITION_STATE"; }
 
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
@@ -37,6 +39,7 @@ reset_state() {
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  CURRENT_TRANSITION_STATE=blocked
 }
 
 mkrec() {  # <pane_id> <status>
@@ -148,6 +151,38 @@ handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 push_block_dwell_check "$WIN" ""
 [ "$(wake_count)" = 0 ] || fail "the next block must start a fresh dwell rather than inherit the cancelled one"
 pass "push_block_dwell_check: a working edge cancels a pending escalation and the next block starts a fresh dwell"
+
+# A due marker must reconcile the current level in case the working edge was
+# missed while the watcher was restarting or its subscription was unavailable.
+reset_state
+fm_write_meta "$STATE_DIR/tk7.meta" "window=$WIN" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+age_armed_block "$WIN" "$PUSH_BLOCK_DWELL_SECS"
+CURRENT_TRANSITION_STATE=resumed
+push_block_dwell_check "$WIN" ""
+[ "$(wake_count)" = 0 ] || fail "a due marker whose pane resumed must not escalate"
+if fm_backend_deferred_since herdr "$STATE_DIR" "$WIN" >/dev/null; then
+  fail "a resumed pane must cancel its due marker"
+fi
+CURRENT_TRANSITION_STATE=blocked
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+push_block_dwell_check "$WIN" ""
+[ "$(wake_count)" = 0 ] || fail "a later blocked edge must arm a fresh dwell"
+pass "push_block_dwell_check: due reconciliation cancels a resumed pane and permits a fresh dwell"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk7.meta" "window=$WIN" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+age_armed_block "$WIN" "$PUSH_BLOCK_DWELL_SECS"
+CURRENT_TRANSITION_STATE=unknown
+push_block_dwell_check "$WIN" ""
+[ "$(wake_count)" = 0 ] || fail "an unreadable due pane must not escalate"
+fm_backend_deferred_since herdr "$STATE_DIR" "$WIN" >/dev/null \
+  || fail "an unreadable due pane must retain its pending marker"
+CURRENT_TRANSITION_STATE=blocked
+push_block_dwell_check "$WIN" ""
+[ "$(wake_count)" = 1 ] || fail "a retained marker must escalate after a later blocked read"
+pass "push_block_dwell_check: an unknown due read stays pending for retry"
 
 # Case C, the binding constraint: an unattended crew really waiting on a human is
 # blocked indefinitely, so it crosses any finite dwell and must still escalate -

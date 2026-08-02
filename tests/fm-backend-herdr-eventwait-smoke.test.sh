@@ -4,8 +4,8 @@
 # bin/backends/herdr.sh, and its raw-socket reader bin/backends/herdr-eventwait.py).
 # It drives a real idle->blocked transition in an ISOLATED, never-default herdr
 # lab session and asserts the subscriber returns that transition sub-second and
-# that the watcher's handle_push_transition lands a stale record in a scratch
-# state/.wake-queue. Skips cleanly when herdr, jq, or python3 is missing.
+# that the watcher arms and then escalates the confirmation dwell in scratch
+# state. Skips cleanly when herdr, jq, or python3 is missing.
 #
 # Safety (2026-07-02 incident, tests/herdr-test-safety.sh): cleanup uses ONLY
 # herdr_safe_stop_and_delete on a private fm-lab-* session, never a bare/ambient
@@ -110,20 +110,23 @@ UNDER_ONE=$(python3 -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/de
 [ "$UNDER_ONE" = yes ] || echo "note: idle->blocked wake took ${ELAPSED}s (>1s; still far under the 240s wedge timer, not fatal)" >&2
 pass "real herdr ($HERDR_VERSION): a driven idle->blocked transition returns the blocked record in ${ELAPSED}s (pane $PANE_ID)"
 
-# --- the watcher's fast-path lands a stale record in the scratch wake queue ---
-# Source the watcher (its guard returns before the lock/loop) and override wake so
-# handle_push_transition enqueues without exiting the test.
+# --- the watcher arms the edge, then escalates only after the dwell -----------
 export FM_STATE_OVERRIDE="$STATE"
 export FM_ROOT_OVERRIDE="$ROOT"
 # shellcheck source=bin/fm-watch.sh
 . "$ROOT/bin/fm-watch.sh"
 wake() { return 0; }
 handle_push_transition herdr "$SESSION" "$REC"
-[ -e "$STATE/.wake-queue" ] || fail "handle_push_transition did not create the wake queue"
+fm_backend_deferred_since herdr "$STATE" "$TARGET" >/dev/null \
+  || fail "handle_push_transition did not arm the confirmation dwell"
+[ ! -e "$STATE/.wake-queue" ] || fail "handle_push_transition must not enqueue before the dwell"
+fm_backend_defer_transition herdr "$STATE" "$TARGET" "$(( $(date +%s) - PUSH_BLOCK_DWELL_SECS ))"
+push_block_dwell_check "$TARGET" ""
+[ -e "$STATE/.wake-queue" ] || fail "a still-blocked pane did not enqueue after the dwell"
 grep -q 'stale' "$STATE/.wake-queue" || fail "the wake queue must carry a stale record: $(cat "$STATE/.wake-queue")"
 grep -q "$TARGET" "$STATE/.wake-queue" || fail "the stale record must name the task window $TARGET"
 grep -q 'herdr: agent blocked' "$STATE/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
-pass "real herdr: the watcher fast-path enqueues a stale wake naming the task window from the live blocked transition"
+pass "real herdr: the watcher defers then escalates a sustained live blocked transition"
 
 cleanup_all
 trap - EXIT
