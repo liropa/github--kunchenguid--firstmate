@@ -938,9 +938,10 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
-## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
+## Native `pane.agent_status_changed` push escalation (sub-second blocked detection)
 
-Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
+Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) is detected sub-second instead of after the ~240s stale-pane wedge timer.
+The alarm is held for the confirmation dwell below, so detection remains sub-second while escalation does not.
 This is the follow-up the former "No `events.subscribe` native push" gap note deferred; it is now implemented.
 
 **Mechanism (one owner per contract).**
@@ -956,8 +957,12 @@ A crew with an automated approval clearer attached answers each dialog in second
 This is the same duration predicate the poll path has always applied through `FM_STALE_ESCALATE_SECS`, at a threshold well inside the 240s wedge timer.
 The re-check runs in the poll loop that already executes every cycle, so it needs no second process, no background sleep, and no extra wait.
 
-"Still blocked" is decided exactly rather than by sampling.
 `fm_transition_policy`'s `absorb` action deletes the pane's escalation marker the instant a `working` edge arrives, and the deferred timestamp lives in that same marker, so a crew that resumes inside the window CANCELS its pending escalation with the one unlink that also re-arms the dedupe.
+That observed-edge cancellation is exact rather than sampled and remains the primary path for clearer-serviced blocks.
+When the marker becomes due, `push_block_dwell_check` additionally samples the pane's current agent state before escalating.
+This due-time read happens only once the marker is due, not on every poll cycle, and closes the restart or lost-subscription window where no `working` edge was observed.
+A still-blocked reading escalates, a resumed reading cancels the marker, and a failed or ambiguous reading retains the pending marker for a later retry without firing or cancelling.
+An unreadable pane is therefore neither treated as proof that the crew resumed nor allowed to produce an alarm from a stale timestamp.
 Cancelling an escalation that has not fired and deduping one that has are different operations: the pre-existing marker only ever did the second, which is why a clearer's `working` edge simply re-armed the next prompt for another alarm.
 
 Nothing is suppressed by category, by task, or by count - only by dwell.
@@ -1013,7 +1018,7 @@ Dedupe (one wake per sustained block, marker cleared when the pane returns to `w
 
 **Dwell regression coverage (deterministic, no herdr and no watcher).**
 `tests/fm-supervision-events.test.sh` drives the real `handle_push_transition`, `push_block_dwell_check`, and `fm_backend_herdr_apply_transition` against a throwaway state directory, reproducing the counterfactual that diagnosed the storm.
-It pins that a block nothing services escalates once and only after the dwell; that five clearer-style `blocked -> working -> blocked` cycles escalate **zero** times where each cycle previously bought one; that a `working` edge cancels a pending escalation even after the dwell has already elapsed, which is what separates cancelling from deduping; that an unattended human-wait still escalates once per unserviced block; and that a failed durable enqueue leaves the escalation pending rather than losing it.
+It pins that a block nothing services escalates once and only after the dwell; that five clearer-style `blocked -> working -> blocked` cycles escalate **zero** times where each cycle previously bought one; that an observed `working` edge cancels a pending escalation even after the dwell has already elapsed, which is what separates cancelling from deduping; that due-time reconciliation cancels a resumed pane after a missed edge while an unknown read retains the pending marker for retry; that an unattended human-wait still escalates once per unserviced block; and that a failed durable enqueue leaves the escalation pending rather than losing it.
 `tests/fm-backend-herdr.test.sh` pins the marker's two states and that a corrupt marker reads as nothing pending rather than as a due alarm.
 
 ## Away-mode daemon terminal launch (2026-07-12, herdr 0.7.3, protocol 16, macOS aarch64)
