@@ -83,7 +83,7 @@ What the adapter does with that matrix:
   [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the resulting task-meta field; "Agent liveness probe" below owns its durable respawn behavior and the manual-spawn exception.
 
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, and `tests/fm-secondmate-liveness.test.sh` for resolution, refusal, the meta record, and respawn re-entry.
-The credential matrix itself is the live measurement above; a codex-flavor sandbox driven by claude through firstmate's own spawn path has not yet been provisioned end to end.
+The credential matrix itself is the live measurement above; a codex-flavor sandbox driven by claude through firstmate's own spawn path was subsequently verified end to end by the retained gate-vendor proof below.
 
 ## Agent liveness probe (`fm_backend_sbx_agent_alive`)
 
