@@ -132,19 +132,25 @@ Natural language is acceptable if uncertain.
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
+**Trust-gate scope (verified 2026-08-02, Claude Code v2.1.220, host/tmux path).**
 Two independent gates can park a claude launch, and a machine's first ever run may add a bypass-permissions confirmation on top of them.
 
 - **Workspace** trust ("Accessing workspace" / "Quick safety check") resolves by walking the cwd's **ancestors**, so a single grant over a pool root clears it for every worktree beneath that root.
-- **Project-settings** trust resolves by the **exact** git-root-canonicalized key and does **not** walk, so no ancestor grant ever clears it, and it is asked once per worktree whenever that worktree carries a committed `.claude/settings.json`.
+- **Project-settings** trust resolves by the **exact** git-root-canonicalized key and does **not** walk, so no ancestor grant ever clears it.
+  Canonicalization resolves a **linked worktree** to its **shared repository root** (`git-common-dir`), so one grant on the primary checkout covers every pool worktree of that repo and raises no further prompt there.
+  A separate **clone** is its own git root and therefore a separate key, which is why sbx guests, where every project is a clone, genuinely do get one prompt per clone.
 
-For any repo that commits `.claude/settings.json`, including firstmate's own, the project-settings gate is the one a launch actually hits.
+That verification exercised the host/tmux path only and did not re-test an sbx guest, so the clone-path half above stands on `docs/sbx-backend.md`'s guest evidence rather than on a fresh probe.
+On the host worktree path a launch hits **neither** gate once the repo root is granted, including in a repo that commits `.claude/settings.json` such as firstmate's own.
+A **guest clone** hits the workspace gate instead, cleared by the grants in `docs/sbx-backend.md`, and the project-settings gate is the one firstmate deliberately leaves unseeded.
 Pre-seeding its per-worktree key is refused on purpose rather than merely unimplemented: that file is controlled by the branch the agent was sent to work on, so granting the key would make the agent adopt permissions, hooks, and MCP servers carried by the code under review.
 The prompt is that boundary working, not a gap to close; `docs/sbx-backend.md`'s "Guest claude workspace trust" owns the full rationale and the grant shape firstmate does seed.
 
-Budget one supervised answer for the FIRST claude launch in each new worktree - once per worktree, not once per machine or per sandbox.
-An unattended or away-mode dispatch into a fresh worktree therefore sits parked until someone answers it, so treat that keypress as part of dispatching the task rather than an occasional surprise.
+Budget one supervised answer per NEW GIT ROOT - a newly cloned project, or a guest clone - not per worktree and not once per machine or per sandbox.
+A host dispatch into a fresh pool worktree of an already-granted repo needs no supervised keypress and does not park, so unattended and away-mode dispatch into the pool costs nothing extra.
 
 After every spawn, peek the pane within about 20 seconds.
+A dialog can still appear at a new git root, so the peek stays worth doing, but it is not a per-worktree certainty to plan dispatch around.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
