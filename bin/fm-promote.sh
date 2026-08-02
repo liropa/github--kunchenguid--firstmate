@@ -19,9 +19,17 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+# Re-emit the recorded PR identity after the ordinary fields instead of leaving
+# it wherever it sat and appending kind= past it: fm_pr_metadata_identity_parse
+# in bin/fm-pr-lib.sh owns the field ordering this record must satisfy, and it
+# refuses a violating record whole, silently disarming the task's merge poll.
+# Same re-emit shape as bin/fm-pr-check.sh, which writes the identity in.
 TMP="$META.tmp"
-grep -v '^kind=' "$META" > "$TMP"
-echo "kind=ship" >> "$TMP"
+{
+  grep -v -E '^(kind|pr|pr_head)=' "$META" || true
+  echo "kind=ship"
+  grep -E '^(pr|pr_head)=' "$META" || true
+} > "$TMP"
 mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
