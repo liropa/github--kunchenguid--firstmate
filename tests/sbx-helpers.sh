@@ -110,6 +110,11 @@
 #                            probe the developer's real daemon root.
 #   FM_FAKE_SBX_NM_RC        non-zero fails that exec outright (the transport
 #                            failure case) instead of executing it
+#   FM_FAKE_SBX_DOCTOR_RC    non-zero fails the gate-vendor probe exec (the
+#                            `sh -c` pass naming `no-mistakes doctor`) outright.
+#                            That exec reuses FM_FAKE_SBX_NM_BIN and the same
+#                            hermetic-PATH rule - a suite must never run the
+#                            developer's real `no-mistakes doctor`.
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -301,6 +306,23 @@ case "$cmd" in
         sh -c "$script" "$@"
         exit $?
         ;;
+      "sh -c "*"no-mistakes doctor"*)
+        # The guest gate-vendor probe (fm_backend_sbx_gate_vendor_check).
+        # Executed for real against a hermetic PATH, so suites assert what the
+        # probe PARSED out of a byte-accurate doctor report rather than
+        # grepping script text - the parse is the behaviour under test. The
+        # PATH is a replacement, not a prepend, for the same reason as the
+        # daemon route below: the guest script must never be one inherited
+        # entry away from the developer's real `no-mistakes`.
+        [ "${FM_FAKE_SBX_DOCTOR_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_DOCTOR_RC}"
+        script=$3
+        shift 3
+        guest_user_home=${FM_FAKE_SBX_GUEST_USER_HOME:-${FM_FAKE_SBX_LOG:-/dev/null}.guest-user-home}
+        mkdir -p "$guest_user_home" 2>/dev/null || true
+        env HOME="$guest_user_home" \
+          PATH="${FM_FAKE_SBX_NM_BIN:-/nonexistent}:/usr/bin:/bin" sh -c "$script" "$@"
+        exit $?
+        ;;
       "sh -c "*"no-mistakes daemon status"*)
         # The guest no-mistakes daemon restore
         # (fm_backend_sbx_restore_nomistakes_daemon), driven by resurrection.
@@ -423,6 +445,14 @@ SBX_FAKE_PLACEHOLDER=sk-ant-oat01-fixtureplaceholder
 #   FM_FAKE_NM_START_INERT  non-empty leaves the state unchanged after a
 #                           successful-looking start (a start that did not
 #                           produce a serving daemon)
+#   FM_FAKE_NM_GATE         what `doctor` reports on its `gate validation`
+#                           line: a vendor name (default codex) renders
+#                           "<name> is runnable"; `unrunnable` renders the real
+#                           no-runnable-agent wording; `none` omits the line
+#                           entirely. `doctor` ALWAYS EXITS 0, byte-accurate to
+#                           v1.40.2 - including when gate validation fails -
+#                           so a check that trusted the exit status would pass
+#                           against a guest whose gate cannot validate at all.
 make_fake_no_mistakes() {  # <dir>
   local nmbin="$1/nmbin"
   mkdir -p "$nmbin"
@@ -430,6 +460,28 @@ make_fake_no_mistakes() {  # <dir>
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_NM_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_NM_LOG"
+case "${1:-} ${2:-}" in
+  "doctor"*)
+    # Report shape verified against the real CLI 2026-08-02 (v1.40.2): a
+    # System block, an Agents block, then the gate-validation verdict last.
+    printf '  System\n'
+    printf '  \342\234\223 git             git version 2.55.0\n'
+    printf '  \342\234\223 data directory  %s/.no-mistakes\n' "$HOME"
+    printf '\n  Agents\n'
+    printf '  \342\234\223 claude          /usr/local/bin/claude\n'
+    printf '  \342\200\223 cursor          not found (cursor-agent, acpx)\n'
+    case "${FM_FAKE_NM_GATE:-codex}" in
+      none) ;;
+      unrunnable)
+        printf '  \342\234\227 gate validation  no runnable agent found for configured agent auto (looked for: claude, codex)\n'
+        ;;
+      *)
+        printf '  \342\234\223 gate validation  %s is runnable\n' "$FM_FAKE_NM_GATE"
+        ;;
+    esac
+    exit 0
+    ;;
+esac
 state=$(cat "${FM_FAKE_NM_STATE_FILE:?FM_FAKE_NM_STATE_FILE unset}" 2>/dev/null || echo down)
 case "${1:-} ${2:-}" in
   "daemon status")

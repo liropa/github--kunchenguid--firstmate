@@ -662,8 +662,12 @@ test_resurrection_skips_the_daemon_restore_without_a_gate_root() {
   nm_steer "$w" "$fb" "$nmbin" "$guest_user" \
     || fail "a steer of a resurrectable sandbox should succeed"
 
-  [ ! -s "$w/nm.log" ] \
-    || fail "a guest with no gate root must not be probed or started: $(cat "$w/nm.log")"
+  # Scoped to daemon lifecycle, not to every no-mistakes call: the cross-vendor
+  # gate assertion runs `doctor` on the same resurrection, and deliberately does
+  # NOT wait for a gate root - a guest whose first gate run has not happened yet
+  # is exactly the one whose first review must not be a self-review.
+  assert_not_contains "$(cat "$w/nm.log")" "daemon" \
+    "a guest with no gate root must have no daemon probed or started"
   pass "resurrection: a guest that never ran the gate gets no daemon probe at all"
 }
 

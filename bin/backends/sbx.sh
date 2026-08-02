@@ -647,7 +647,7 @@ fm_backend_sbx_guest_tmux_ready() {  # <name>
 # needs is still the resumed agent's own job, and its brief owns that.
 fm_backend_sbx_ensure_stack() {  # <target>
   local target=$1 name id meta harness home turnend beat resume fg signals_dir
-  local ready_prev ready_now ready_i
+  local ready_prev ready_now ready_i gate_line
   name=$(fm_backend_sbx_name_of_target "$target")
   case "$(fm_backend_sbx_state "$name")" in
     running|stopped) ;;
@@ -696,6 +696,15 @@ fm_backend_sbx_ensure_stack() {  # <target>
   # #40): harness-gated inside, fail-soft, and never a reason to abandon a
   # steer. Resurrect-only, like the pass above.
   fm_backend_sbx_reconcile_claude_trust "$name" "$home" "$harness"
+  # Cross-vendor gate assertion, re-asserted at the same pre-relaunch point so
+  # a guest that drifted after create is caught without waiting for a session
+  # start. NEVER blocks, for the same reason the tracked-file sync below never
+  # does: a refusal here strands a live secondmate mid-task, while the printed
+  # line reaches the supervisor either way. Not a suppressed failure - every
+  # non-ok verdict is reported; only the abort is withheld.
+  if ! gate_line=$(fm_backend_sbx_gate_vendor_check "sandbox $name guest gate" "$name" "$harness" now); then
+    echo "firstmate sbx: $gate_line" >&2
+  fi
   # Tracked-file sync (fork issue #20): advance the guest clone's tracked
   # files to the host clone's default-branch tip before the agent relaunches -
   # the one point in the VM lifecycle where nothing in-guest can be mid-turn.
@@ -966,7 +975,7 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
 # runs FIRST so an unusable flavor/driver pairing refuses before any sandbox,
 # signal directory, or guest state exists.
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
-  local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent
+  local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent gate_line gate_rc
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1
   # sbx clone mode refuses linked git worktrees outright ("--clone is not
   # supported when run from a Git worktree", verified live) - and secondmate
@@ -1000,6 +1009,33 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   if ! sbx exec "$name" -- sh -c 'command -v tmux >/dev/null 2>&1'; then
     echo "error: sandbox $name's template has no tmux; the sbx backend needs an in-guest tmux (pin FM_SBX_TEMPLATE to a template that ships it)" >&2
     return 1
+  fi
+  # Cross-vendor gate assertion. A PROVEN match joins the two refusals above,
+  # for the same stated reason - half-provisioned is worse than no sandbox:
+  # firstmate chose this guest's worker vendor, so a secondmate whose gate
+  # would review with that same vendor must not come into existence, and create
+  # is the one point in the lifecycle where refusing strands no work.
+  #
+  # An indeterminate reading is loud but NOT fatal, and the asymmetry is
+  # deliberate. Refusing there would make firstmate an enforcer of what the
+  # guest image ships, which is the other half of this split and not firstmate's
+  # to own; a guest with no gate at all also has no gate that could review on
+  # the wrong vendor. It is never swallowed either: the reason is printed here,
+  # and the assertion re-runs at every resurrection and every session start, so
+  # a guest that later gains a gate is still caught.
+  #
+  # The if/else shape, not `case $?`, because fm-spawn.sh runs under `set -e`:
+  # a bare assignment from a deliberately-non-zero check would abort the spawn
+  # before this function got to classify it.
+  if gate_line=$(fm_backend_sbx_gate_vendor_check "sandbox $name" "$name" "$harness" now); then
+    :
+  else
+    gate_rc=$?
+    if [ "$gate_rc" -eq 1 ]; then
+      echo "error: $gate_line; refusing to finish creating $name, because its adversarial review would not be independent of the code it reviews. Pin FM_SBX_TEMPLATE to a template whose baked gate config resolves to a different vendor than '$harness', or drive this secondmate with a different harness (docs/sbx-backend.md 'Guest gate-vendor assertion')" >&2
+      return 1
+    fi
+    echo "firstmate sbx: $gate_line; $name is created, but nothing here proved its gate would review on a different vendor than '$harness' (docs/sbx-backend.md 'Guest gate-vendor assertion')" >&2
   fi
   sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home_abs" || return 1
   return 0
@@ -1274,6 +1310,156 @@ finally:
 FMPY
   ' _ "$home_abs" \
     || echo "firstmate sbx: the claude gate-trust reconcile did not complete in sandbox $name (the guest keeps whatever trust sbx left it)" >&2
+  return 0
+}
+
+# fm_backend_sbx_gate_vendor_check: assert that <name>'s in-guest no-mistakes
+# gate would NOT review with the same vendor the worker writes code with.
+# Prints exactly one outcome line and returns 0 (cross-vendor, proven), 1 (SAME
+# vendor, proven), or 2 (indeterminate - the resolved vendor could not be
+# read). docs/sbx-backend.md "Guest gate-vendor assertion" owns the contract,
+# the per-caller failure directions, and the evidence.
+#
+# Firstmate picks BOTH the harness a secondmate writes with and the delivery
+# mode that gates it, so "the reviewer must not be the author" is firstmate's
+# own invariant. This is therefore an ASSERTION, never an installation: it
+# writes no gate config, names no repo that was meant to bake one, and stays
+# correct for any future guest flavour.
+#
+# It exists because the invariant failed silently for 26 consecutive gate runs
+# on a live firstmate-created guest (2026-07-31..2026-08-01): the guest carried
+# no gate config, no-mistakes wrote its own `agent: auto` default, `auto`
+# resolved to claude, and claude reviewed claude's own work every time. Nothing
+# errored and nothing exited non-zero - which is exactly why the check reads a
+# RESOLVED vendor and never a config file.
+#
+# Three properties are deliberate:
+#   - The vendor comes from `no-mistakes doctor`'s `gate validation` line, the
+#     resolution-layer answer. A config that SAYS codex is the weaker artifact
+#     this defect class is about.
+#   - `doctor` EXITS 0 even when that check fails (v1.40.2, agent-dotfiles PR
+#     #90), so its exit status is never consulted anywhere below; the verdict is
+#     the parsed line or nothing.
+#   - No arm turns a failure into a pass. An unreadable vendor gets its own
+#     outcome and its own non-zero return, because a silently-skipped check is
+#     the exact shape of the original defect.
+#
+# The probe is a read, with one bounded side effect worth naming: it is the
+# guest's first `no-mistakes` invocation in a fresh VM, so it materializes
+# no-mistakes' OWN default global config when the template baked none - the
+# same file the guest's first gate run would have written, never a
+# firstmate-authored one, and never over a config that already exists.
+#
+# mode selects the VM-lifecycle policy:
+#   now   - the caller already holds the VM up (create, resurrection); probe
+#           unconditionally.
+#   sweep - session start: probe a RUNNING guest only. `sbx exec` auto-starts a
+#           stopped sandbox, and waking every sbx guest on every session start
+#           to re-read a value nothing in a stopped VM can change is a cost the
+#           backstop does not need to pay. A stopped guest is reported as an
+#           honest skip and re-asserted at its next start.
+fm_backend_sbx_gate_vendor_check() {  # <label> <name> <harness> <now|sweep>
+  local label=$1 name=$2 harness=$3 mode=$4
+  local worker gate raw verdict detail
+
+  worker=$(printf '%s' "$harness" | tr '[:upper:]' '[:lower:]')
+  worker=${worker#acp:}
+  if [ -z "$worker" ]; then
+    echo "$label: skipped: no worker harness is recorded, so there is nothing to compare the gate vendor against"
+    return 2
+  fi
+
+  if [ "$mode" = sweep ]; then
+    case "$(fm_backend_sbx_state "$name")" in
+      running) ;;
+      stopped)
+        echo "$label: skipped: guest VM is stopped and this read never wakes one; the assertion runs again at its next start"
+        return 2
+        ;;
+      absent)
+        echo "$label: skipped: sandbox is absent"
+        return 2
+        ;;
+      *)
+        echo "$label: skipped: sandbox state is unreadable"
+        return 2
+        ;;
+    esac
+  fi
+
+  # Every verdict rides one "fm-gate-vendor ..." line so sbx auto-start chatter
+  # and doctor's own update banner can never be mistaken for a result. The
+  # comparison itself stays HOST-side: the guest reports what it resolved, and
+  # firstmate - which chose the worker vendor - decides what that means.
+  # shellcheck disable=SC2016  # single quotes deliberate: the whole probe expands in the guest sh, not here
+  raw=$(sbx exec "$name" -- sh -c '
+    if ! command -v no-mistakes >/dev/null 2>&1; then
+      echo "fm-gate-vendor absent"
+      exit 0
+    fi
+    NO_MISTAKES_NO_UPDATE_CHECK=1; export NO_MISTAKES_NO_UPDATE_CHECK
+    # No status test on the next line, by contract: doctor exits 0 whether the
+    # gate validates or not, so reading it would be a new instance of the same
+    # lie this check exists to catch.
+    out=$(no-mistakes doctor 2>&1)
+    line=$(printf "%s\n" "$out" | grep "gate validation" | head -n 1)
+    if [ -z "$line" ]; then
+      echo "fm-gate-vendor unreadable doctor-printed-no-gate-validation-line"
+      exit 0
+    fi
+    vendor=$(printf "%s\n" "$line" | sed -n "s/.*[[:space:]]\([^[:space:]][^[:space:]]*\)[[:space:]]is runnable.*/\1/p")
+    case ${vendor:-} in
+      "")
+        # The other shape doctor prints here is "no runnable agent found for
+        # configured agent <x>": a gate that cannot validate at all, which is
+        # not a cross-vendor pass and must not read as one.
+        echo "fm-gate-vendor unreadable gate-validation-reports-no-runnable-agent"
+        exit 0
+        ;;
+      *[!A-Za-z0-9._:+-]*)
+        echo "fm-gate-vendor unreadable gate-vendor-token-is-not-a-plain-name"
+        exit 0
+        ;;
+    esac
+    printf "fm-gate-vendor vendor %s\n" "$vendor"
+    exit 0
+  ' _) || {
+    echo "$label: skipped: the guest gate-vendor probe could not be run"
+    return 2
+  }
+
+  verdict=$(printf '%s\n' "$raw" | sed -n 's/^fm-gate-vendor //p' | tail -n 1)
+  case "$verdict" in
+    'vendor '*)
+      gate=$(printf '%s' "${verdict#vendor }" | tr '[:upper:]' '[:lower:]')
+      gate=${gate#acp:}
+      ;;
+    absent)
+      echo "$label: skipped: the guest has no no-mistakes on its exec PATH, so the vendor its gate would review with cannot be read"
+      return 2
+      ;;
+    'unreadable '*)
+      detail=${verdict#unreadable }
+      echo "$label: skipped: the guest's gate reported no resolved vendor ($detail)"
+      return 2
+      ;;
+    *)
+      echo "$label: skipped: the guest gate-vendor probe returned no verdict"
+      return 2
+      ;;
+  esac
+  case "$gate" in
+    ''|*[!a-z0-9._:+-]*)
+      echo "$label: skipped: the guest reported an unusable gate vendor"
+      return 2
+      ;;
+  esac
+
+  if [ "$gate" = "$worker" ]; then
+    echo "$label: same vendor: the gate would review on $gate, the very vendor the worker writes with"
+    return 1
+  fi
+  echo "$label: cross-vendor ok: gate $gate, worker $worker"
   return 0
 }
 

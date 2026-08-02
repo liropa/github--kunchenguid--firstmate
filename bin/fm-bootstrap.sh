@@ -438,7 +438,7 @@ secondmate_sync() {
   # update lands at the next resurrection. Classification: updated is a
   # completed no-action fact, already-current is routine silence, every skip
   # is an actionable SECONDMATE_SYNC line.
-  local guest_line sbx_ready=""
+  local guest_line gate_line sbx_ready=""
   while IFS='|' read -r id home _window meta; do
     [ "$(fm_backend_of_meta "$meta")" = sbx ] || continue
     if [ -z "$sbx_ready" ]; then
@@ -458,6 +458,19 @@ secondmate_sync() {
       *': already current') ;;
       *) echo "SECONDMATE_SYNC: $guest_line" ;;
     esac
+    # Cross-vendor gate assertion, as the BACKSTOP to the create and
+    # resurrection assertions in bin/backends/sbx.sh (which owns the check and
+    # its verdict vocabulary). Resurrection alone is not coverage: the guest
+    # that ran 26 same-vendor reviews never resurrected once across those 26
+    # hours, so a long-lived guest needs a convergence point that does not
+    # depend on its VM being restarted. Runs after the sync above so a stopped
+    # guest the sync just woke is read while it is up, at no extra cost.
+    # Classification matches this loop's: cross-vendor ok is routine silence,
+    # and every other outcome - a same-vendor gate or a vendor that could not
+    # be read - is one actionable GATE_VENDOR line.
+    if ! gate_line=$(fm_backend_sbx_gate_vendor_check "secondmate $id guest" "fm-$id" "$(fm_meta_get "$meta" harness)" sweep); then
+      echo "GATE_VENDOR: $gate_line"
+    fi
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
