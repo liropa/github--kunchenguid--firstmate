@@ -75,6 +75,10 @@ FM_SBX_GUEST_ACTIVE_WINDOW=${FM_SBX_GUEST_ACTIVE_WINDOW:-120}
 # rather than the transition.
 FM_SBX_MIDTASK_STOP_SETTLE=${FM_SBX_MIDTASK_STOP_SETTLE:-120}
 
+# Lines kept when the per-task keep-alive verdict log is trimmed
+# (fm_backend_sbx_keepalive_log). 0 disables trimming entirely.
+FM_SBX_KEEPALIVE_LOG_LINES=${FM_SBX_KEEPALIVE_LOG_LINES:-200}
+
 # In-guest tmux session name. One secondmate per sandbox, so a fixed session
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
@@ -500,6 +504,16 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #   - While work is visible, touch the mount's <id>.guest-active breadcrumb so
 #     the HOST gets a pure-stat view of in-guest activity (the wrapper's
 #     mid-task-stop check below, and fm-watch.sh's stranding suppression).
+#   - On the way out, print ONE "fm-keepalive detail" line before the verdict,
+#     reporting how each arm read on the deciding poll (a1/a2/a3), whether the
+#     crewmate gate was open (crew), and - on released-idle with a crewmate
+#     registered - the newest in-guest *.status mtime. The wrapper logs it.
+#     This is INSTRUMENTATION ONLY: a1/a2/a3 are assigned beside the existing
+#     work=1 assignments and are never read by any condition, so the arms, the
+#     poll cadence, and the pin/release conditions are byte-for-byte the ones
+#     the fixtures above already pin. It exists because a released pin left no
+#     durable trace at all, which cost a multi-hour forensic dig to reconstruct
+#     (2026-08-03 scout; docs/sbx-backend.md "Keep-alive verdict log").
 # Plain POSIX sh, GNU-first portable stat (the guest is Linux; the BSD arm
 # exists so the host-side unit tests can run the same script on macOS).
 fm_backend_sbx_keepalive_script() {
@@ -508,6 +522,20 @@ fm_backend_sbx_keepalive_script() {
     t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6
     act=${t%.turn-ended}.guest-active
     mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+    emit() {
+      extra=
+      if [ "$1" = released-idle ] && [ "$crew" = 1 ]; then
+        last=0
+        for f in "$home"/state/*.status; do
+          [ -e "$f" ] || continue
+          m=$(mt "$f")
+          [ "$m" -gt "$last" ] && last=$m
+        done
+        [ "$last" -gt 0 ] && extra=" status=$last"
+      fi
+      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 crew=$crew$extra"
+      echo "fm-keepalive $1"
+    }
     start=$(date +%s)
     base=$(mt "$t")
     prev=
@@ -515,6 +543,9 @@ fm_backend_sbx_keepalive_script() {
       now=$(date +%s)
       work=0
       crew=0
+      a1=0
+      a2=0
+      a3=0
       snap=
       if [ -n "$home" ]; then
         for f in "$home"/state/*.meta; do
@@ -529,6 +560,7 @@ fm_backend_sbx_keepalive_script() {
         if [ "$work" = 0 ] \
           && printf "%s\n" "$pane" | grep -v "^[[:space:]]*$" | tail -6 | grep -qiE "$regex"; then
           work=1
+          a1=1
         fi
       done
       if [ "$work" = 0 ] && [ -n "$home" ]; then
@@ -536,26 +568,67 @@ fm_backend_sbx_keepalive_script() {
           [ -e "$f" ] || continue
           [ $((now - $(mt "$f"))) -le "$window" ] || continue
           work=1
+          a2=1
           break
         done
       fi
       sig=$(printf "%s" "$snap" | cksum 2>/dev/null) || sig=
       if [ "$work" = 0 ] && [ "$crew" = 1 ] && [ -n "$prev" ] && [ "$sig" != "$prev" ]; then
         work=1
+        a3=1
       fi
       prev=$sig
       if [ "$work" = 1 ]; then touch "$act" 2>/dev/null; fi
       if [ $((now - start)) -ge "$max" ]; then
-        if [ "$work" = 1 ]; then echo "fm-keepalive capped-active"; else echo "fm-keepalive capped-idle"; fi
+        if [ "$work" = 1 ]; then emit capped-active; else emit capped-idle; fi
         exit 0
       fi
       cur=$(mt "$t")
       if [ "$cur" -gt "$base" ] && [ "$work" = 0 ]; then
-        echo "fm-keepalive released-idle"
+        emit released-idle
         exit 0
       fi
       sleep "$poll"
     done'
+}
+
+# fm_backend_sbx_keepalive_log: append one line per finished keeper to the
+# per-task verdict log and bound the file. The line is
+# "<UTC timestamp> <verdict> pin=<seconds>s [<guest arm detail>]".
+#
+# EVIDENCE ONLY, never an alarm. Nothing in firstmate reads this file; it
+# exists so a human diagnosing the next mid-work VM stop can tell "a keeper was
+# armed and released" from "no keeper ever started" - a distinction the code
+# could not make after the fact, because a clean release wrote nothing at all
+# and the guest's verdict was discarded with its stdout. Deriving a captain
+# alarm from it is deliberately out of scope: `stopped` is an idle
+# secondmate's HEALTHY resting state, so alarming on stopped-plus-anything
+# reopens the false-positive class docs/sbx-backend.md "Remaining gaps"
+# refuses on stated grounds.
+#
+# Non-fatal by construction: every write failure is swallowed and the function
+# always returns 0. It runs in the wrapper's detached subshell after the exec
+# has already ended, so it can reach neither the keeper's own decisions nor
+# the guest. Concurrent keepers (one per steer) each append a single short
+# line, and only the rare trim rewrites the file - a trim racing an append can
+# drop that one diagnostic line, which is the right trade for a file no
+# control flow depends on.
+fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
+  local log=$1 verdict=$2 elapsed=$3 detail=${4:-} line keep
+  line="$(date -u '+%Y-%m-%dT%H:%M:%SZ') $verdict pin=${elapsed}s"
+  [ -z "$detail" ] || line="$line $detail"
+  printf '%s\n' "$line" >> "$log" 2>/dev/null || return 0
+  keep=$FM_SBX_KEEPALIVE_LOG_LINES
+  [ "$keep" -gt 0 ] 2>/dev/null || return 0
+  # Hysteresis: trim only at twice the keep count, so a long-lived home
+  # rewrites the file about once per <keep> keeper exits rather than per exit.
+  [ "$(wc -l < "$log" 2>/dev/null || echo 0)" -ge $((keep * 2)) ] || return 0
+  if tail -n "$keep" "$log" > "$log.tmp" 2>/dev/null; then
+    mv -f "$log.tmp" "$log" 2>/dev/null || rm -f "$log.tmp" 2>/dev/null
+  else
+    rm -f "$log.tmp" 2>/dev/null
+  fi
+  return 0
 }
 
 # fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until the
@@ -583,26 +656,43 @@ fm_backend_sbx_keepalive_script() {
 # explicit stop, a crash) - waits FM_SBX_MIDTASK_STOP_SETTLE, reads the
 # sandbox state once (the only sbx CLI call, spent per rare suspicious exit,
 # never per poll), and on stopped/absent records the .sbx-midtask-stop marker
-# fm-watch.sh's beacon surfaces as a named mid-task-stop alarm. Guest stdout
-# is untrusted data: only the fixed fm-keepalive verdict shapes are matched,
-# and the breadcrumb is stat'ed, never read.
+# fm-watch.sh's beacon surfaces as a named mid-task-stop alarm. Every exit,
+# silent ones included, also appends one evidence line to the per-task verdict
+# log (fm_backend_sbx_keepalive_log above). Guest stdout is untrusted data:
+# only the fixed fm-keepalive verdict and detail shapes are matched - the
+# detail whitelist admits nothing but 0/1 flags and a digit timestamp - and
+# the breadcrumb is stat'ed, never read.
 fm_backend_sbx_keepalive() {  # <name> <id> [home]
-  local name=$1 id=$2 home=${3:-} turnend script busy key marker
+  local name=$1 id=$2 home=${3:-} turnend script busy key marker log
   [ "$FM_SBX_KEEPALIVE_MAX" -gt 0 ] 2>/dev/null || return 0
   turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
   script=$(fm_backend_sbx_keepalive_script)
   busy=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
   key=$(fm_state_key_encode "$id")
   marker="$(fm_backend_sbx_state_dir)/.sbx-midtask-stop-$key"
+  log="$(fm_backend_sbx_state_dir)/.sbx-keepalive-$key.log"
   (
     trap '' HUP
+    started=$(date +%s)
     out=$(sbx exec "$name" -- sh -c "$script" _ "$turnend" "$FM_SBX_KEEPALIVE_MAX" \
       "$FM_SBX_KEEPALIVE_POLL" "$FM_SBX_GUEST_ACTIVE_WINDOW" "$home" "$busy" 2>/dev/null) || true
-    verdict=$(printf '%s\n' "$out" | grep '^fm-keepalive ' | tail -1)
-    why=
+    verdict=$(printf '%s\n' "$out" \
+      | grep -E '^fm-keepalive (released-idle|capped-idle|capped-active)$' | tail -1)
+    detail=$(printf '%s\n' "$out" \
+      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] crew=[01]( status=[0-9]{1,19})?$' \
+      | tail -1)
     case "$verdict" in
-      'fm-keepalive released-idle'|'fm-keepalive capped-idle') exit 0 ;;
-      'fm-keepalive capped-active')
+      'fm-keepalive released-idle') outcome=released-idle ;;
+      'fm-keepalive capped-idle') outcome=capped-idle ;;
+      'fm-keepalive capped-active') outcome=capped-active ;;
+      *) outcome=no-verdict ;;
+    esac
+    fm_backend_sbx_keepalive_log "$log" "$outcome" \
+      "$(($(date +%s) - started))" "${detail#fm-keepalive detail }"
+    why=
+    case "$outcome" in
+      released-idle|capped-idle) exit 0 ;;
+      capped-active)
         why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
         ;;
       *)
