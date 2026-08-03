@@ -75,9 +75,9 @@
 #
 # teardown_treehouse_return therefore classifies each failed attempt by its text:
 #   1. TERMINAL failures abort immediately with no retry, because no amount of waiting
-#      changes them: `worktree ... is not managed by treehouse`,
-#      `worktree ... is being destroyed`, and `lease precondition failed` (verified
-#      against treehouse v2.1.0 internal/pool/pool.go and cmd/return_cmd.go).
+#      changes them: structured error lines for `worktree ... is not managed by
+#      treehouse`, `worktree ... is being destroyed`, and `lease precondition failed`
+#      (verified against treehouse v2.1.0 internal/pool/pool.go and cmd/return_cmd.go).
 #   2. Every other failure is retried up to FM_TREEHOUSE_RETURN_LOCK_RETRIES times
 #      (default 3), waiting FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS (default 1s; falls
 #      back to the older FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS name when the new one is
@@ -630,7 +630,8 @@ treehouse_return_is_index_lock_error() {
 # and cmd/return_cmd.go's unmanaged-worktree case.
 treehouse_return_is_terminal_error() {
   local text=$1
-  printf '%s\n' "$text" | grep -Eq "is not managed by treehouse|is being destroyed|lease precondition failed"
+  printf '%s\n' "$text" | grep -Eq \
+    '^(Error: )?((failed to return worktree: )?worktree .+ (is not managed by treehouse|is being destroyed)|failed to return worktree: lease precondition failed(:.*)?)$'
 }
 
 # Records, for the most recent teardown_treehouse_return failure, whether re-running

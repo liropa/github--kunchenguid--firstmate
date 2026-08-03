@@ -472,7 +472,7 @@ FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
 
 `fm-teardown.sh` retries a failed `treehouse return` up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times, because `treehouse return --force` kills the worktree's processes and then runs git in that same worktree without waiting for them to be reaped.
-The only failures it refuses to retry are the ones no wait can change: `worktree ... is not managed by treehouse`, `worktree ... is being destroyed`, and `lease precondition failed`.
+The only failures it refuses to retry are structured treehouse error lines for states no wait can change: `worktree ... is not managed by treehouse`, `worktree ... is being destroyed`, and `lease precondition failed`.
 The retry budget is one shared window for the whole return step, so a failure that changes signature between attempts cannot extend it.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
 `FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS` accepts nonnegative whole or fractional seconds between attempts.
