@@ -7,7 +7,7 @@
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to the project's delivery mode).
 # Usage: fm-promote.sh <task-id>
-set -eu
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -28,13 +28,15 @@ TMP="$META.tmp"
 PR_TMP="$META.pr.tmp"
 : > "$TMP"
 : > "$PR_TMP"
-while IFS= read -r line || [ -n "$line" ]; do
+if ! grep -E '^' "$META" | while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     kind=*) ;;
     pr=*|pr_head=*) printf '%s\n' "$line" >> "$PR_TMP" || exit 1 ;;
     *) printf '%s\n' "$line" >> "$TMP" || exit 1 ;;
   esac
-done < "$META"
+done; then
+  exit 1
+fi
 printf 'kind=ship\n' >> "$TMP" || exit 1
 cat "$PR_TMP" >> "$TMP" || exit 1
 rm "$PR_TMP" || exit 1
