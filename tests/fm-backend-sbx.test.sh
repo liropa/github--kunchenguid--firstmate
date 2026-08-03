@@ -1331,13 +1331,26 @@ SH
   chmod +x "$1/tmux"
 }
 
-# run_keepalive_script <fakebin> <pane-file> <args...>: execute the guest loop
-# synchronously with the fake tmux first in PATH; echoes the verdict.
-run_keepalive_script() {
+# run_keepalive_raw <fakebin> <pane-file> <args...>: execute the guest loop
+# synchronously with the fake tmux first in PATH; echoes its whole stdout - the
+# arm-detail line followed by the verdict line.
+run_keepalive_raw() {
   local fakebin=$1 pane=$2 script
   shift 2
   script=$(run_adapter "$fakebin" "$TMP_ROOT" 'fm_backend_sbx_keepalive_script')
   PATH="$fakebin:$BASE_PATH" FAKE_TMUX_PANE="$pane" sh -c "$script" _ "$@"
+}
+
+# run_keepalive_script <fakebin> <pane-file> <args...>: as above, echoing the
+# VERDICT line alone, so the pin/release assertions below read exactly as they
+# did before the loop grew its detail line.
+run_keepalive_script() {
+  run_keepalive_raw "$@" | grep -v '^fm-keepalive detail '
+}
+
+# keepalive_detail_of <raw output>: the arm-detail line from a raw run.
+keepalive_detail_of() {
+  printf '%s\n' "$1" | grep '^fm-keepalive detail ' | tail -1
 }
 
 test_keepalive_script_capped_verdicts() {
@@ -1550,6 +1563,230 @@ test_keepalive_script_change_arm_needs_a_registered_crewmate() {
   wait "$wid" 2>/dev/null || true
   [ "$out" = "fm-keepalive capped-idle" ] || fail "a changing pane with no registered crewmate must not pin, got '$out'"
   pass "keep-alive loop: the pane-change arm stays off for an ordinary idle secondmate"
+}
+
+# assert_log_matches <file> <ere> <msg> / assert_log_lacks: the verdict log's
+# fields are structured (timestamp, verdict, pin=Ns, arm flags), so asserting
+# on their SHAPE needs a real regex rather than lib.sh's fixed-string grep.
+assert_log_matches() {
+  grep -qE -- "$2" "$1" || fail "$3"$'\n'"--- log ---"$'\n'"$(cat "$1" 2>/dev/null)"
+}
+
+assert_log_lacks() {
+  ! grep -qE -- "$2" "$1" || fail "$3"$'\n'"--- log ---"$'\n'"$(cat "$1" 2>/dev/null)"
+}
+
+# --- keep-alive instrumentation: the arm detail line -------------------------
+#
+# Why these exist: a released pin used to leave no durable trace, so "the keeper
+# released" and "no keeper ever started" were indistinguishable after the fact
+# (2026-08-03 scout, §3.2/§3.4). The loop now reports how each arm read on the
+# deciding poll. These fixtures pin the REPORT only - the pin/release fixtures
+# above are unchanged and remain the behavioural net.
+
+test_keepalive_script_detail_names_the_deciding_arm() {
+  local w fb te out
+  w=$(new_sbx_world keeper-detail); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+
+  # Idle, nothing registered: every arm reads 0 and the crewmate gate is shut.
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "" 'esc (to )?interrupt')
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=0" ] \
+    || fail "an idle guest should report all three arms 0 with the gate shut, got '$(keepalive_detail_of "$out")'"
+
+  # Arm 1: a busy pane tail.
+  printf 'esc to interrupt\n' > "$w/pane.txt"
+  out=$(run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=1 arm2=0 arm3=0" \
+    "a busy pane tail should be reported as arm 1"
+
+  # Arm 2: a child worker's fresh signal file, every pane idle.
+  : > "$w/home/state/w1.status"
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=1 arm3=0" \
+    "a fresh child signal should be reported as arm 2"
+
+  pass "keep-alive detail: the line names which activity arm read the guest as working"
+}
+
+test_keepalive_script_detail_reports_the_pane_change_arm() {
+  # Arm 3 needs two polls to compare against, so this run must actually loop.
+  local w fb script te wid out i
+  w=$(new_sbx_world keeper-detail-arm3); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  : > "$w/home/state/w1.meta"
+  : > "$w/home/state/w1.status"
+  touch -t 202001010000 "$w/home/state/w1.status"
+  printf 'boot\n' > "$w/worker.txt"
+  ( i=0
+    while [ "$i" -lt 200 ]; do
+      printf 'running tests %s\n' "$i" > "$w/worker.txt"
+      i=$((i + 1))
+      sleep 0.2
+    done ) &
+  wid=$!
+  out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null FAKE_TMUX_PANE2="$w/worker.txt" \
+    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt')
+  kill "$wid" 2>/dev/null || true
+  wait "$wid" 2>/dev/null || true
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a redrawing crewmate pane should still pin to the cap"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=1 crew=1" \
+    "a redrawing crewmate pane should be reported as arm 3 with the gate open"
+  pass "keep-alive detail: a redrawing crewmate pane is reported as the pane-change arm"
+}
+
+test_keepalive_script_detail_stamps_release_against_task_state() {
+  # THE discrimination the 2026-08-03 investigation had to infer from
+  # connection arithmetic: a release with a registered in-guest task is the
+  # silent-worker defect's fingerprint, a release with none is healthy. Both
+  # release identically - only the report distinguishes them.
+  local w fb script te pid i out mtime
+  w=$(new_sbx_world keeper-detail-release); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  # A crewmate task registered, its last status append far outside the activity
+  # window: the worker is inside one long silent operation.
+  : > "$w/home/state/w1.meta"
+  : > "$w/home/state/w1.status"
+  touch -t 202401011200 "$w/home/state/w1.status"
+  mtime=$(stat -c %Y "$w/home/state/w1.status" 2>/dev/null || stat -f %m "$w/home/state/w1.status")
+
+  ( sleep 0.4; touch "$te" ) &
+  pid=$!
+  out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null \
+    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt')
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "fm-keepalive released-idle" \
+    "a quiescent guest should release on the turn-end"
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1 status=$mtime" ] \
+    || fail "a release with a registered task must carry the gate and the newest in-guest status mtime, got '$(keepalive_detail_of "$out")'"
+
+  # The healthy shape: no task registered, so no stamp and an unmistakably
+  # different line - "gate correctly off" is not "gate open, pane static".
+  rm -f "$w/home/state/w1.meta"
+  touch -t 202001010000 "$te"
+  ( sleep 0.4; touch "$te" ) &
+  pid=$!
+  out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null \
+    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt')
+  wait "$pid" 2>/dev/null || true
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=0" ] \
+    || fail "a release with no registered task must report the gate shut and carry no stamp, got '$(keepalive_detail_of "$out")'"
+  i=$(printf '%s\n' "$out" | grep -c 'status=' || true)
+  [ "$i" -eq 0 ] || fail "a release with no registered task must not stamp an in-guest status mtime"
+  pass "keep-alive detail: a release separates a registered-but-static task from no task at all"
+}
+
+# --- keep-alive wrapper: verdict log -----------------------------------------
+
+test_keepalive_wrapper_logs_every_verdict() {
+  # The scout's §3.2 gap: a clean release wrote NOTHING, so an armed-and-
+  # released keeper could not be told from one that never started. Every exit
+  # now leaves a line, silent classifications included.
+  local w fb case_ log
+  w=$(new_sbx_world keeper-log); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  log="$w/state/.sbx-keepalive-x.log"
+  for case_ in released-idle capped-idle capped-active; do
+    run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+      FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+      FM_FAKE_SBX_KEEPALIVE_OUT="fm-keepalive $case_" \
+      || fail "the keep-alive call itself should succeed for $case_"
+  done
+  # The exec dying with no verdict at all is its own recorded outcome, not an
+  # absence: that ambiguity is exactly what this log exists to close.
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_RC=1 \
+    || fail "the keep-alive call itself should succeed for a dead exec"
+
+  [ -f "$log" ] || fail "every keeper exit must leave a durable verdict line at $log"
+  [ "$(wc -l < "$log")" -eq 4 ] || fail "four keeper exits should leave four lines, got $(wc -l < "$log")"
+  for case_ in released-idle capped-idle capped-active no-verdict; do
+    assert_grep "$case_" "$log" "the log should record the $case_ outcome"
+  done
+  assert_log_matches "$log" \
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z (released-idle|capped-idle|capped-active|no-verdict) pin=[0-9]+s$' \
+    "each line should be a UTC timestamp, a verdict and the elapsed pin duration"
+  pass "keep-alive log: every keeper exit records its verdict, timestamp and pin duration"
+}
+
+test_keepalive_wrapper_log_carries_validated_guest_detail() {
+  # Guest stdout is untrusted: the arm report is admitted only in its exact
+  # shape, so nothing but 0/1 flags and a digit timestamp can reach the log.
+  local w fb log
+  w=$(new_sbx_world keeper-log-detail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  log="$w/state/.sbx-keepalive-x.log"
+
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1 status=1785512635\nfm-keepalive released-idle' \
+    || fail "the keep-alive call itself should succeed"
+  assert_log_matches "$log" 'released-idle pin=[0-9]+s arm1=0 arm2=0 arm3=0 crew=1 status=1785512635$' \
+    "the log line should carry the guest's arm report and in-guest status stamp"
+  assert_no_grep 'fm-keepalive detail' "$log" \
+    "the log should carry the report's fields, not the raw guest marker line"
+
+  # A forged or garbled report is dropped, and the verdict line still lands.
+  : > "$log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1; rm -rf /\nfm-keepalive released-idle' \
+    || fail "the keep-alive call itself should succeed"
+  assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
+    "an unparseable report should be dropped, leaving the verdict line intact"
+  assert_no_grep 'rm -rf' "$log" "a guest line outside the accepted shape must never reach the log"
+  pass "keep-alive log: the guest's arm report is admitted only in its exact shape"
+}
+
+test_keepalive_wrapper_log_failure_cannot_affect_the_keeper() {
+  # The log is evidence, not machinery: an unwritable log must not disturb the
+  # wrapper's own classification, nor make the keep-alive call fail.
+  local w fb
+  w=$(new_sbx_world keeper-log-unwritable); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  # A directory at the log path makes every append fail, without chmod games.
+  mkdir -p "$w/state/.sbx-keepalive-x.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT='fm-keepalive capped-active' \
+    || fail "an unwritable verdict log must not fail the keep-alive call"
+  [ -f "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "an unwritable verdict log must not suppress the mid-task-stop marker"
+  pass "keep-alive log: an append failure changes neither the call's result nor the wrapper's alarm"
+}
+
+test_keepalive_log_growth_is_bounded() {
+  # A long-lived home must not accumulate an unbounded file, and the trim must
+  # keep the NEWEST lines - a post-mortem reads the most recent exits.
+  local w fb log lines
+  w=$(new_sbx_world keeper-log-bound); fb=$(make_fake_sbx "$w")
+  log="$w/state/keeper.log"
+  # shellcheck disable=SC2016  # single quotes deliberate: $i expands in the inner bash run_adapter starts, not here
+  run_adapter "$fb" "$w" \
+    'i=1; while [ "$i" -le 60 ]; do fm_backend_sbx_keepalive_log "'"$log"'" released-idle "$i" "" || exit 1; i=$((i + 1)); done' \
+    FM_SBX_KEEPALIVE_LOG_LINES=10 \
+    || fail "the log writer should always succeed"
+  lines=$(wc -l < "$log")
+  [ "$lines" -le 20 ] || fail "60 exits at a 10-line bound should stay under the trim threshold, got $lines lines"
+  [ "$lines" -ge 10 ] || fail "the trim should keep the configured number of lines, got $lines"
+  assert_contains "$(tail -1 "$log")" "pin=60s" "the newest exit must survive the trim"
+  assert_log_lacks "$log" 'pin=1s$' "the oldest exits should have been trimmed away"
+  [ ! -e "$log.tmp" ] || fail "the trim must not leave its scratch file behind"
+  pass "keep-alive log: growth is bounded and the trim keeps the newest exits"
 }
 
 # --- keep-alive wrapper: mid-task-stop classification ------------------------
@@ -2180,6 +2417,13 @@ test_keepalive_script_releases_idle_guest_on_turn_end
 test_keepalive_script_pins_redrawing_crewmate_with_quiet_tail
 test_keepalive_script_releases_static_crewmate_pane
 test_keepalive_script_change_arm_needs_a_registered_crewmate
+test_keepalive_script_detail_names_the_deciding_arm
+test_keepalive_script_detail_reports_the_pane_change_arm
+test_keepalive_script_detail_stamps_release_against_task_state
+test_keepalive_wrapper_logs_every_verdict
+test_keepalive_wrapper_log_carries_validated_guest_detail
+test_keepalive_wrapper_log_failure_cannot_affect_the_keeper
+test_keepalive_log_growth_is_bounded
 test_keepalive_wrapper_marks_midtask_stop_on_capped_active
 test_keepalive_wrapper_skips_marker_when_vm_still_running
 test_keepalive_wrapper_marks_dropped_connection_with_fresh_breadcrumb
