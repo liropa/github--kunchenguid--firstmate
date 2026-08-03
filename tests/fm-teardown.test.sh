@@ -49,6 +49,13 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# And backlog teardown-return-retry-widen: the same post-kill race can surface with an
+# error text that carries no index.lock signature at all, which used to get zero
+# retries and abort the whole teardown.
+#   (z)  observed non-lock transient failure, clears on retry -> retry ALLOW
+#   (aa) terminal failure (unmanaged / destroying / lease)    -> ABORT, zero retries
+#   (ab) non-lock failure that never clears                   -> ABORT after the budget
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -396,6 +403,65 @@ if [ "${1:-}" = return ]; then
   fi
   echo "fatal: Unable to create '$lock': File exists." >&2
   exit 128
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails the first N attempts with the VERBATIM text recovered from
+# the incident transcript (2026-08-03T16:25:07.594Z), then succeeds. That text carries
+# no index.lock signature - it is git's ordinary informational output from a
+# `git checkout --detach` - so it is exactly the failure the old signature-only
+# predicate aborted on with zero retries. Pinning it verbatim keeps the regression
+# test anchored to the real signature rather than a paraphrase.
+#
+# Whether treehouse exited non-zero while reporting only benign output, or git failed
+# with no additional error text, was NOT established. The stub deliberately reproduces
+# only what was observed - a non-zero exit carrying this text - and asserts nothing
+# about which of the two it was.
+add_observed_transient_treehouse() {
+  local case_dir=$1 fail_attempts=${2:-1}
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then
+  count_file="\${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "\$count_file" ]; then
+    count=\$(cat "\$count_file")
+  fi
+  count=\$(( count + 1 ))
+  printf '%s\n' "\$count" > "\$count_file"
+  if [ "\$count" -le $fail_attempts ]; then
+    echo "Terminated lingering processes: bash (3955), claude (4070)" >&2
+    echo "failed to return worktree: git checkout --detach --force refs/remotes/origin/main: Previous HEAD position was b3aad8a docs(architecture): correct the passthrough section" >&2
+    echo "HEAD is now at 6c3df52 docs(nupathnet3): warn against working during a harness run" >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return always fails with one of the states no retry can change. Verified
+# against treehouse v2.1.0 internal/pool/pool.go (releasableWorktree and
+# validateReleasePreconditions) and cmd/return_cmd.go, which wraps them all in
+# "failed to return worktree: %w".
+add_terminal_error_treehouse() {
+  local case_dir=$1 message=$2
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then
+  count_file="\${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "\$count_file" ]; then
+    count=\$(cat "\$count_file")
+  fi
+  printf '%s\n' "\$(( count + 1 ))" > "\$count_file"
+  echo "Error: failed to return worktree: $message" >&2
+  exit 1
 fi
 exit 0
 SH
@@ -1199,6 +1265,114 @@ test_empty_retry_wait_uses_default_without_aborting() {
   pass "empty retry wait overrides use the default without aborting teardown"
 }
 
+# The regression test for the observed abort: a transient return failure whose text
+# carries no index.lock signature used to get ZERO retries and abort the whole
+# teardown (bin/fm-teardown.sh's old signature-only early return).
+test_observed_non_lock_transient_return_failure_is_retried() {
+  local case_dir rc attempt_file
+  case_dir=$(make_case observed-transient-return)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_observed_transient_treehouse "$case_dir" 1
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "observed-transient-return: teardown should survive a non-lock transient return failure"
+  assert_grep "succeeded on retry" "$case_dir/stderr" \
+    "observed-transient-return: teardown did not report success on retry"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "observed-transient-return: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "observed-transient-return: teardown left task metadata behind despite succeeding"
+  pass "non-lock transient return failure is retried instead of aborting teardown (observed 2026-08-03 signature)"
+}
+
+# Retrying a state treehouse cannot change wastes the recovery window and buries the
+# real error, so each terminal signature must abort on the first attempt.
+test_terminal_return_failure_aborts_without_retrying() {
+  local case_dir rc attempt_file message idx=0
+  for message in \
+    "worktree /pool/wt is not managed by treehouse" \
+    "worktree /pool/wt is being destroyed" \
+    "lease precondition failed: lease holder does not match worktree /pool/wt"; do
+    idx=$(( idx + 1 ))
+    case_dir=$(make_case "terminal-return-failure-$idx")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit "$case_dir" "shippable work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+
+    add_terminal_error_treehouse "$case_dir" "$message"
+    attempt_file="$case_dir/treehouse-attempts"
+    : > "$attempt_file"
+
+    set +e
+    TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+    FM_TREEHOUSE_RETURN_LOCK_RETRIES=3 \
+    FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "terminal-return-failure: teardown should abort on '$message'"
+    [ "$(cat "$attempt_file")" = 1 ] \
+      || fail "terminal-return-failure: '$message' should not be retried, got $(cat "$attempt_file") attempts"
+    assert_grep "no retry can clear" "$case_dir/stderr" \
+      "terminal-return-failure: teardown did not explain that '$message' is terminal"
+    assert_grep "re-running teardown will not clear this" "$case_dir/stderr" \
+      "terminal-return-failure: abort line did not say a retry is pointless for '$message'"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "terminal-return-failure: teardown discarded task metadata after aborting on '$message'"
+  done
+  pass "terminal treehouse return failures abort immediately with no retry attempts"
+}
+
+# The widened retry stays bounded: a failure that never clears still fails the
+# teardown rather than looping, and says a later retry may still succeed.
+test_persistent_non_lock_return_failure_aborts_after_retries() {
+  local case_dir rc attempt_file
+  case_dir=$(make_case persistent-non-lock-return)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  # Fails far more times than the budget allows, so only the budget can stop it.
+  add_observed_transient_treehouse "$case_dir" 99
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "persistent-non-lock-return: teardown should still fail when the error never clears"
+  [ "$(cat "$attempt_file")" = 3 ] \
+    || fail "persistent-non-lock-return: expected 1 attempt plus 2 retries, got $(cat "$attempt_file")"
+  assert_grep "persisted across 2 retries" "$case_dir/stderr" \
+    "persistent-non-lock-return: teardown did not report the exhausted retry window"
+  assert_grep "re-running teardown may clear this" "$case_dir/stderr" \
+    "persistent-non-lock-return: abort line did not say a later retry may still help"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "persistent-non-lock-return: teardown discarded task metadata after aborting"
+  pass "a non-lock return failure that never clears still aborts teardown after a bounded retry window"
+}
+
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   local case_dir rc lock
   case_dir=$(make_case fractional-legacy-retry-wait)
@@ -1605,4 +1779,7 @@ test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
+test_observed_non_lock_transient_return_failure_is_retried
+test_terminal_return_failure_aborts_without_retrying
+test_persistent_non_lock_return_failure_aborts_after_retries
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
