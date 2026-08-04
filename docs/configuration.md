@@ -418,6 +418,7 @@ FM_WATCH_CYCLE_LOG_MAX_BYTES=262144   # size cap for the arm-owned watcher lifec
 FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered when the ledger is capped
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_BEACON_MAX_AGE=10    # cap on watcher liveness-beacon age while the watcher waits inside a cycle, so a coalescing linger cannot age the beacon toward FM_GUARD_GRACE; invalid or 0 resets to 10
 FM_SBX_NOPROGRESS_TURNS=3   # sbx-only: consecutive turn-ends with no status progress before the watcher raises an sbx-stranded check wake; 0 disables this stranding arm
 FM_SBX_DELIVERY_ACK_SECS=900   # sbx-only: seconds of silence after a turn-submitting delivery (no turn end, status line, or in-guest work) before the same sbx-stranded wake names an unacknowledged delivery; 0 disables this stranding arm, which is the only one that can see a guest producing no turn-ends at all; docs/sbx-backend.md owns the contract
 FM_SBX_KEEPALIVE_POLL=5   # sbx-only: seconds between the keep-alive guest loop's activity probes; docs/sbx-backend.md owns the keep-alive contract
