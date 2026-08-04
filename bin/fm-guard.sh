@@ -198,6 +198,7 @@ if [ "$watcher_fresh" = false ]; then
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
       printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      printf '●  Read docs/watcher-continuity.md ("Inter-cycle supervision gaps") for what this beacon age means and what can cause it.\n'
       if [ "$READ_ONLY" -eq 1 ]; then
         if [ "$LOCK_RC" = 2 ]; then
           printf '●  This read-only session should report the lapse; repairs are deferred because single-session safety could not be verified.\n'
