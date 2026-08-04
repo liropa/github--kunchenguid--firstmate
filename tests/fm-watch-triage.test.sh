@@ -9,8 +9,9 @@
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# backstop fail-safe, the coalescing linger keeping the liveness beacon truthful
+# without changing what it folds into one wake, and afk coherence (no
+# double-triage while the away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -1260,6 +1261,75 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# --- the coalescing linger keeps the beacon truthful ------------------------
+# The watcher is alive for the whole SIGNAL_GRACE linger, so the beacon has to
+# keep advancing through it. It used to be touched only at the top of the cycle,
+# so at a clean signal exit it was already the whole grace old and fm-guard.sh's
+# effective window was that much shorter than the configured FM_GUARD_GRACE.
+# beacon_sleep chunks the wait at FM_BEACON_MAX_AGE, which is what keeps an
+# operator-raised grace from reopening the same hole.
+
+test_beacon_stays_fresh_across_the_coalescing_linger() {
+  local dir state fakebin out status_file pid grace ticks distinct last m now age
+  dir=$(make_case beacon-linger); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  grace=4
+  # Captain-relevant from the first scan, so the watcher enters the linger on its
+  # first cycle and every beacon touch sampled below comes from inside the linger.
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE="$grace" \
+    FM_BEACON_MAX_AGE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  distinct=0; last=; ticks=0
+  while [ "$ticks" -lt 150 ] && is_live_non_zombie "$pid"; do
+    m=$(file_mtime "$state/.last-watcher-beat")
+    if [ -n "$m" ] && [ "$m" != "$last" ]; then distinct=$(( distinct + 1 )); last=$m; fi
+    sleep 0.2
+    ticks=$(( ticks + 1 ))
+  done
+  wait_for_exit "$pid" 50 || fail "watcher did not exit after the coalescing linger"
+  now=$(date +%s)
+  m=$(file_mtime "$state/.last-watcher-beat")
+  [ -n "$m" ] || fail "watcher beacon missing after the coalescing linger"
+  age=$(( now - m ))
+  # One touch per second across a 4s linger; before the fix the whole linger
+  # produced the single top-of-cycle touch.
+  [ "$distinct" -ge 3 ] \
+    || fail "beacon advanced only $distinct time(s) across a ${grace}s linger (not touched during the wait)"
+  [ "$age" -le 2 ] \
+    || fail "beacon was ${age}s old at cycle exit; the ${grace}s linger aged it instead of keeping it truthful"
+  pass "the liveness beacon keeps advancing across the coalescing linger and is fresh at cycle exit"
+}
+
+# The linger exists so a crewmate's status write and the same turn's turn-end hook
+# cost ONE firstmate turn instead of two. Chunking the wait must not change that:
+# the trailing signal still has to be folded into the same single wake.
+
+test_linger_still_coalesces_a_trailing_signal() {
+  local dir state fakebin out drain_out status_file trailing pid reasons
+  dir=$(make_case linger-coalesce); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"; trailing="$state/task.turn-ended"
+  printf 'done: PR https://example.test/pr/9 checks green\n' > "$status_file"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=4 \
+    FM_BEACON_MAX_AGE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  # The status is seen on the first cycle (poll 0.2s), so this trailing turn-end
+  # lands well inside the 4s linger - exactly the write the linger folds in.
+  sleep 1.5
+  : > "$trailing"
+  wait_for_exit "$pid" 100 || fail "watcher did not exit after the coalescing linger"
+  reasons=$(grep -c '^signal:' "$out")
+  [ "$reasons" -eq 1 ] \
+    || fail "trailing turn-end was not coalesced: $reasons wake reasons printed: $(cat "$out")"
+  grep -F "$status_file" "$out" | grep -F "$trailing" >/dev/null \
+    || fail "the single wake reason did not carry both coalesced signals: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the coalesced wake failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$trailing" >/dev/null \
+    || fail "the coalesced turn-end was not queued"
+  pass "the coalescing linger still folds a trailing turn-end into one wake"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_present_reverts_watcher_to_one_shot() {
@@ -1352,5 +1422,7 @@ test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
+test_beacon_stays_fresh_across_the_coalescing_linger
+test_linger_still_coalesces_a_trailing_signal
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

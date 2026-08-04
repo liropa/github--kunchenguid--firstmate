@@ -159,6 +159,9 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+BEACON_MAX_AGE=${FM_BEACON_MAX_AGE:-10}   # cap on liveness-beacon age while this
+                                      # watcher waits INSIDE a cycle; see beacon_sleep
+case "$BEACON_MAX_AGE" in ''|*[!0-9]*|0) BEACON_MAX_AGE=10 ;; esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -491,6 +494,40 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
   m=$(stat_mtime "$f") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
+}
+
+# The liveness beacon fm-guard.sh and fm-watch-arm.sh read: a fresh mtime means a
+# watcher is alive, and supervision scripts warn when it goes stale with tasks in
+# flight. The main loop touches it once per cycle, so it must also stay truthful
+# across a wait INSIDE a cycle - the watcher is demonstrably alive there, and an
+# untouched beacon spends the guard's grace window on a watcher that never left.
+beacon_touch() {
+  touch "$STATE/.last-watcher-beat"
+}
+
+# Wait <seconds>, touching the beacon at least every BEACON_MAX_AGE seconds.
+# Chunked rather than one touch on the way out: FM_SIGNAL_GRACE is
+# operator-overridable, so a trailing touch would close the hole for the default
+# grace and leave a raised one exactly as blind. Chunking also bounds the other
+# side of the trade - a watcher KILLED mid-wait now looks alive for at most one
+# chunk longer, instead of for the whole configured grace.
+beacon_sleep() {  # <seconds>
+  local remaining=$1
+  beacon_touch
+  # Chunk a plain-integer wait only; a fractional grace is far below the cap in
+  # every practical configuration, so it waits whole.
+  case "$remaining" in
+    ''|*[!0-9]*) : ;;
+    *)
+      while [ "$remaining" -gt "$BEACON_MAX_AGE" ]; do
+        sleep "$BEACON_MAX_AGE"
+        remaining=$(( remaining - BEACON_MAX_AGE ))
+        beacon_touch
+      done
+      ;;
+  esac
+  sleep "$remaining"
+  beacon_touch
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -1021,9 +1058,8 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Liveness beacon for fm-guard.sh: this cycle is alive (see beacon_touch).
+  beacon_touch
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -1099,9 +1135,12 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  # The linger keeps the liveness beacon fresh (beacon_sleep): the watcher is
+  # alive throughout it, so aging the beacon by the whole grace period would
+  # hand fm-guard.sh a stale reading it has not earned.
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    beacon_sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
