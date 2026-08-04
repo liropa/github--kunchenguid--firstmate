@@ -273,12 +273,13 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
-# Reap stray owner links a loser planted inside <ownerdir> (see
-# fm_lock_try_create) and then died before removing. Only dangling symlinks
-# matching the mktemp owner-dir naming are removed, and no lock path other than
-# <ownerdir>/pid is ever read from inside an owner dir, so this cannot change
-# who holds the lock; it only keeps the rmdir below from failing on a directory
-# a dead loser made non-empty.
+# Reap stray owner links that became dangling after a loser discarded its own
+# owner dir without removing them (see fm_lock_try_create). This is the ordinary
+# shape left by pre-fix code and lets a previously polluted owner dir self-heal
+# when its holder releases. Only dangling symlinks matching the mktemp owner-dir
+# naming are removed, so a stray left by a loser killed after planting it but
+# before discarding its owner dir is not reaped. That limitation can leak one
+# directory as tidiness debt, but never changes who holds the lock.
 fm_lock_reap_stray_owner_links() {
   local ownerdir=$1 stray
   # Both patterns are required: every firstmate lock name is dot-prefixed

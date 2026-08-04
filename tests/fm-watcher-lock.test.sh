@@ -590,11 +590,11 @@ test_lock_lost_race_leaves_no_stray_or_leaked_owner_dir() {
   pass "a lost publish race leaves no stray link and no leaked owner dir"
 }
 
-# Backstop for the same leak when the loser dies between planting the stray and
-# reaping it: the holder's own discard must reap dangling owner-shaped strays so
-# its rmdir still succeeds. Only dangling links are removed, so a loser still
-# alive keeps ownership of its own cleanup.
-test_lock_release_reaps_stray_left_by_dead_loser() {
+# Backstop for the dangling stray shape left by pre-fix code: the holder's own
+# discard must reap dangling owner-shaped strays so its rmdir still succeeds.
+# Only dangling links are removed, so a loser whose owner dir still exists keeps
+# ownership of its own cleanup.
+test_lock_release_reaps_dangling_stray() {
   local dir state lockdir base out
   dir=$(make_case lock-dead-loser-stray)
   state="$dir/state"
@@ -605,8 +605,8 @@ test_lock_release_reaps_stray_left_by_dead_loser() {
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
-    # A loser planted this and was killed before removing it; its own owner dir
-    # is already gone, so the link dangles.
+    # Pre-fix code discarded the loser owner dir without removing this stray,
+    # leaving the link dangling.
     ln -s "$2.owner.ZZZZZZ" "$FM_LOCK_OWNER_DIR/$(basename "$2").owner.ZZZZZZ"
     fm_lock_release "$2"
     if [ -e "$2" ] || [ -L "$2" ]; then exists=1; else exists=0; fi
@@ -618,8 +618,8 @@ test_lock_release_reaps_stray_left_by_dead_loser() {
     *) fail "release did not remove the lock path: $out" ;;
   esac
   [ "$(count_owner_dirs "$state" "$base")" = "0" ] \
-    || fail "release leaked an owner dir around a dead loser's stray: $(find "$state" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
-  pass "release reaps a dead loser's dangling stray instead of leaking the owner dir"
+    || fail "release leaked an owner dir around a dangling stray: $(find "$state" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
+  pass "release reaps a dangling stray instead of leaking the owner dir"
 }
 
 # End-to-end shape of the same defect under real (uninjected) contention: many
@@ -1534,7 +1534,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_unwritable_parent_fails_cleanly_without_steal_spiral
 test_lock_absent_after_ln_failure_reports_cannot_create
 test_lock_lost_race_leaves_no_stray_or_leaked_owner_dir
-test_lock_release_reaps_stray_left_by_dead_loser
+test_lock_release_reaps_dangling_stray
 test_lock_contention_leaves_no_owner_dirs_behind
 test_lock_stale_lock_in_unwritable_parent_fails_bounded
 test_lock_stale_steal_companion_self_heals
