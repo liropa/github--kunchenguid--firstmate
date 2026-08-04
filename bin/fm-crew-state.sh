@@ -24,11 +24,18 @@
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
+#      branch whose head DIVERGED must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution. Only the NEWEST row for the
+#      the same line of history). A head this worktree cannot resolve at ALL also
+#      binds, on branch plus unreachability: the gate authors its fix commits in
+#      its own object store and never pushes them back here, so a locally-absent
+#      head is the normal shape of a healthy run mid-fix-round rather than
+#      evidence the run belongs elsewhere (nm_head_verdict states the rule and
+#      the protection this trades away). The emitted detail records that weaker
+#      provenance. A head that DOES resolve and is a strict ancestor of the
+#      worktree HEAD, or has diverged from it, still invalidates attribution:
+#      local work moved past that run. Only the NEWEST row for the
 #      branch is ever a candidate: if it fails that code-identity check there is
 #      no attributable run at all, and an older row is by definition superseded
 #      by it, so rejection stops the search instead of walking further back.
@@ -276,9 +283,53 @@ nm_run() {  # <args...>
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
+#
+# Scoped to the document's blocks, deliberately NOT a first-match read. Real `axi
+# status` output duplicates key names across blocks: the run's `head:` and
+# `branch:` are repeated as `branch_sync.local.head` and `.branch`. A first-match
+# read returned the run's copy only because the CLI happens to emit the run block
+# first, so a purely cosmetic reordering upstream would silently return the LOCAL
+# head instead - and the local head equals the worktree HEAD by construction, so
+# nm_head_verdict would then answer `match` for ANY run on the branch, including a
+# superseded one. That is exactly the attribution the code-identity check exists
+# to prevent, re-entering through a third-party formatting change, so the read is
+# scoped rather than ordered.
+#
+# In scope: top-level keys (`outcome:` and `gate:` are emitted at column 0,
+# verified against the installed v1.40.2 binary) and the DIRECT children of the
+# `run:` block (`id:`, `branch:`, `status:`, `head:`). Out of scope: every deeper
+# level, which is where the duplicates live, and any other top-level block.
 RUN_OUT=""
 nm_field() {  # <key>
-  printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
+  local key=$1 line body lead indent in_run=0 child=0 value
+  while IFS= read -r line; do
+    body=${line#"${line%%[![:space:]]*}"}
+    [ -n "$body" ] || continue
+    lead=${line%"$body"}
+    indent=${#lead}
+    if [ "$indent" -eq 0 ]; then
+      # `run:` opens the run block; any other column-0 key closes it.
+      child=0
+      case "$body" in
+        run:*) in_run=1 ;;
+        *)     in_run=0 ;;
+      esac
+    else
+      [ "$in_run" = 1 ] || continue
+      # The block's first indented line fixes its direct-child column; anything
+      # deeper is a nested sub-block and out of scope.
+      [ "$child" -ne 0 ] || child=$indent
+      [ "$indent" -eq "$child" ] || continue
+    fi
+    case "$body" in
+      "$key":*) ;;
+      *) continue ;;
+    esac
+    value=${body#"$key":}
+    printf '%s\n' "${value#"${value%%[![:space:]]*}"}"
+    return 0
+  done <<< "$RUN_OUT"
+  return 0
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -433,7 +484,9 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows. A row that
+# bound on branch plus an unreachable head echoes "<status> <short-sha>" so the
+# caller can report that weaker provenance.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   # An unreadable list is not an empty list: a truncated one can be missing its
@@ -462,8 +515,13 @@ nm_runs_status_for_branch() {  # <branch>
       # commit), the loop kept scanning, and the older failed row still bound
       # to HEAD. That surfaced `failed` for a run that was mid-lint and green,
       # which reads to firstmate as authority to tear the work down.
-      nm_coarse_head_matches_worktree "$sha" || return 0
-      printf '%s' "$st"
+      case "$(nm_head_verdict "$sha")" in
+        match)       printf '%s' "$st" ;;
+        # Relaxed on exactly the same rule as the primary path - keying both on
+        # the same commit is what made this fallback share the primary's failure
+        # mode instead of covering it.
+        unreachable) printf '%s %s' "$st" "$sha" ;;
+      esac
       return 0
     fi
   done <<< "$out"
@@ -474,41 +532,49 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rules:
-#   - missing/empty head field: cannot bind; reject the run
-#   - equal commits (short or full SHA): match
-#   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
-#     the same history advanced the run tip)
-#   - run head is a strict ancestor of worktree HEAD: no match (local work
-#     advanced outside the run)
-#   - diverged / run head not in this worktree: no match (rewritten branch tip)
-nm_run_head_matches_worktree() {
-  local run_head local_full run_full
-  run_head=$(strip_quotes "$(nm_field head)")
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
-  fi
-  return 1
-}
-
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
+# Code-identity verdict for one run head against this worktree, echoed as a single
+# word. Branch match is a precondition (callers). This is the ONE owner of the
+# rule: `axi status`'s head field and a coarse runs-list row's short sha are the
+# same fact read from two places, and a shared rule is what stops the fallback
+# from silently inheriting the primary path's failure mode.
+#
+#   none        - no head recorded, or this worktree's own HEAD is unreadable:
+#                 nothing to bind against
+#   match       - equal commits (short or full sha), or the worktree HEAD is an
+#                 ancestor of the run head (pipeline fix commits advanced the run
+#                 tip along the same line of history)
+#   unreachable - the head names no object this worktree can read. NOT a mismatch:
+#                 no-mistakes authors its fix commits in its own object store
+#                 (~/.no-mistakes/repos/<hash>.git) and pushes them to origin,
+#                 never back to the crew's repo, so from a run's first
+#                 pipeline-authored commit onward its recorded head is
+#                 legitimately invisible here - measured at 75% of the last 40
+#                 runs, up to 87.5% (investigation crew-state-blind-during-fix-
+#                 round, 2026-08-03). Reading that as "not my run" made both
+#                 attribution paths decline at once and blinded this reader for
+#                 the whole post-first-fix stretch of every run.
+#   no-match    - readable, but the run head is a strict ancestor of the worktree
+#                 HEAD (local work advanced outside the run) or has diverged from
+#                 it: attribution is genuinely invalid
+#
+# The trade `unreachable` accepts, deliberately and with the captain's decision on
+# record: a rewritten branch tip whose old run head was never in this object store
+# is also unreachable, so such a run now binds where it used to be rejected. What
+# still holds is the whole of the readable case - a resolvable stale or diverged
+# head is rejected exactly as before - and only the NEWEST run for the branch is
+# ever a candidate, so this never resurrects a superseded run behind a live one.
+nm_head_verdict() {  # <run-head>
   local run_head=$1 local_full run_full
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
+  [ -n "$run_head" ] || { printf 'none'; return; }
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || { printf 'none'; return; }
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) \
+    || { printf 'unreachable'; return; }
+  if [ "$run_full" = "$local_full" ] \
+     || git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    printf 'match'
+    return
   fi
-  return 1
+  printf 'no-match'
 }
 
 HAVE_RUN=0
@@ -525,6 +591,10 @@ COARSE_STATUS=""
 # substitute a historical record for it (header, step 3).
 NM_UNREADABLE=0
 NM_UNREADABLE_WHY=""
+# Short sha of the run head when attribution bound on branch plus an unreachable
+# head (nm_head_verdict's `unreachable`), empty otherwise. Non-empty means the
+# code-identity check could not confirm the bind, which the emitted detail says.
+UNREACHABLE_HEAD=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -545,12 +615,17 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     esac
   elif [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-    else
+    run_head=$(strip_quotes "$(nm_field head)")
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      case "$(nm_head_verdict "$run_head")" in
+        match)       HAVE_RUN=1 ;;
+        unreachable) HAVE_RUN=1; UNREACHABLE_HEAD=$run_head ;;
+      esac
+    fi
+    if [ "$HAVE_RUN" = 0 ]; then
       # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # a diverged head or one this worktree has moved past (the CLI is alive and
+      # answered; only the attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
@@ -567,6 +642,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       elif [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
+        # "<status> <short-sha>" means the row bound on branch plus an
+        # unreachable head; a bare status word is an ordinary code-identity bind.
+        case "$COARSE_STATUS" in
+          *' '*)
+            UNREACHABLE_HEAD=${COARSE_STATUS#* }
+            COARSE_STATUS=${COARSE_STATUS%% *}
+            ;;
+        esac
       fi
     fi
   fi
@@ -653,6 +736,15 @@ if [ "$HAVE_RUN" = 1 ]; then
         esac
       fi
     fi
+  fi
+
+  # Attribution provenance. This run bound on its branch plus a head this
+  # worktree cannot resolve, so the code-identity check could not confirm it.
+  # Say so in the line rather than passing it off as an ordinary bind: it is also
+  # the pointer a supervisor needs to read `axi status` directly if the run-step
+  # ever looks wrong.
+  if [ -n "$UNREACHABLE_HEAD" ]; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}attributed by branch: run head $UNREACHABLE_HEAD not in local objects"
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
