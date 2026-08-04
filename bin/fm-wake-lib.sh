@@ -278,8 +278,8 @@ fm_lock_points_to_owner() {
 # shape left by pre-fix code and lets a previously polluted owner dir self-heal
 # when its holder releases. Only dangling symlinks matching the mktemp owner-dir
 # naming are removed, so a stray left by a loser killed after planting it but
-# before discarding its owner dir is not reaped. That limitation can leak one
-# directory as tidiness debt, but never changes who holds the lock.
+# before discarding its owner dir is not reaped. That limitation can leave
+# owner-directory tidiness debt, but never changes who holds the lock.
 fm_lock_reap_stray_owner_links() {
   local ownerdir=$1 stray
   # Both patterns are required: every firstmate lock name is dot-prefixed
