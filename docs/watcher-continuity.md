@@ -49,10 +49,12 @@ The one-shot design above has a direct operational consequence worth stating pla
 Supervision is a chain of cycles joined only by the next arm, so every interval between one cycle's exit and the next arm starting is unsupervised by construction rather than by failure.
 The normal interval is 10 to 40 seconds, comfortably inside the 300-second grace, and `bin/fm-guard.sh` stays deliberately silent for it.
 
-What stretches that interval into a lapse is anything that suspends the operator's turn.
-The arm is a harness-tracked background task precisely so its exit notifies the model, which means the decision to re-arm can only be taken while a turn is running.
-A turn held at a permission prompt, or otherwise suspended mid-tool-call, suspends supervision for exactly as long as it lasts.
-The measured instance was a permission prompt that held one turn for 19m51s.
+For Claude, Grok, and Codex, what stretches that interval into a lapse is anything that suspends the operator's turn.
+Claude and Grok use a harness-tracked background task whose exit notifies the model, while Codex uses a bounded foreground checkpoint, so re-arm in all three depends on the model's turn.
+A turn held at a permission prompt, or otherwise suspended mid-tool-call, therefore suspends supervision for exactly as long as it lasts in those harnesses.
+Pi and OpenCode do not carry this turn-coupled exposure because their continuity is extension-owned and plugin-owned, respectively, and a successor is started and verified off the model's turn before wake delivery.
+The harness-specific arm mechanisms are owned by `docs/supervision-protocols/`, with `pi.md` and `opencode.md` defining the two turn-decoupled mechanisms.
+The measured instance came from a Claude home and was a permission prompt that held one turn for 19m51s.
 
 The second consequence is easy to miss: the suspended command may itself be a steer.
 A lapse then postpones real work as well as monitoring, because the crewmate instruction waits exactly as long as the supervision does.
@@ -69,16 +71,18 @@ Its per-cycle records distinguish a designed wake exit from a terminated one, an
 Measured bounds come from a 570-cycle ledger in one home, reported in that home's investigation record `data/watcher-midflight-lapse-cause/report.md` (2026-08-04, home-local and not tracked in this repo).
 74 of 569 gaps exceeded the grace window, or 13.0%, with a median lapse of 680 seconds.
 That ledger contained zero kill signatures, so no lapse in it was a killed watcher.
-The same ledger separately records arm terminations by `SIGTERM` at session end or interrupt, which that report treats as a real but distinct second mechanism rather than the cause of the lapses it examined.
+The same report records that 44 of the 570 recorded cycles were arm-interrupted with `rc=143` and a `TERM` signal, and only 5 of those 44 preceded a grace-exceeding lapse.
+This contradictory result proves that external arm termination is a real second mechanism, distinct from the main finding and not its cause.
 Those figures predate the in-cycle beacon refresh now bounded by `FM_BEACON_MAX_AGE` (`docs/configuration.md`), which changed how much grace a live watcher consumes inside a cycle but not the inter-cycle gap measured here.
 
 The durable wake queue holds across a lapse.
 No observed lapse lost a signal, and a wake enqueued as the cycle exited drained intact once supervision resumed.
 The cost is delayed reaction, not lost work.
 
-Accepting this exposure is a legitimate posture, and the bounds above are what make it assessable rather than a guess.
-Decoupling the arm from the operator's turn is the real fix, and it costs the notification-on-exit property the current design is built on, so it needs its own design pass rather than an incremental patch.
-Each home weighs that trade against its own tolerance for delayed reaction; nothing here settles it.
+Accepting this exposure in Claude, Grok, and Codex is a legitimate posture, and the bounds above are what make it assessable rather than a guess.
+For those turn-coupled harnesses, decoupling the arm from the operator's turn is the real fix, and it costs the notification-on-exit property their current designs are built on, so it needs its own design pass rather than an incremental patch.
+Pi and OpenCode already demonstrate turn-decoupled continuity in production.
+Each Claude, Grok, or Codex home weighs that trade against its own tolerance for delayed reaction; nothing here settles it.
 
 ## Regression coverage
 
