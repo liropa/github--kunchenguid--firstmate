@@ -553,6 +553,7 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 #                 round, 2026-08-03). Reading that as "not my run" made both
 #                 attribution paths decline at once and blinded this reader for
 #                 the whole post-first-fix stretch of every run.
+#   invalid     - malformed, ambiguous, or not a commit: cannot bind
 #   no-match    - readable, but the run head is a strict ancestor of the worktree
 #                 HEAD (local work advanced outside the run) or has diverged from
 #                 it: attribution is genuinely invalid
@@ -564,11 +565,28 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 # head is rejected exactly as before - and only the NEWEST run for the branch is
 # ever a candidate, so this never resurrects a superseded run behind a live one.
 nm_head_verdict() {  # <run-head>
-  local run_head=$1 local_full run_full
+  local run_head=$1 local_full run_full candidate candidates=0
   [ -n "$run_head" ] || { printf 'none'; return; }
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || { printf 'none'; return; }
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) \
-    || { printf 'unreachable'; return; }
+  if [[ ! "$run_head" =~ ^[0-9a-fA-F]{8,40}$ ]]; then
+    printf 'invalid'
+    return
+  fi
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidates=$((candidates + 1))
+    [ "$candidates" -le 1 ] || break
+    run_full=$candidate
+  done < <(git -C "$WT" rev-parse --disambiguate="$run_head" 2>/dev/null)
+  if [ "$candidates" -eq 0 ]; then
+    printf 'unreachable'
+    return
+  fi
+  if [ "$candidates" -ne 1 ] \
+     || ! run_full=$(git -C "$WT" rev-parse --verify "${run_full}^{commit}" 2>/dev/null); then
+    printf 'invalid'
+    return
+  fi
   if [ "$run_full" = "$local_full" ] \
      || git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
     printf 'match'
@@ -743,13 +761,15 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Say so in the line rather than passing it off as an ordinary bind: it is also
   # the pointer a supervisor needs to read `axi status` directly if the run-step
   # ever looks wrong.
+  ATTRIBUTION_PROVENANCE=""
   if [ -n "$UNREACHABLE_HEAD" ]; then
-    RUN_DETAIL="$RUN_DETAIL${SEP}attributed by branch: run head $UNREACHABLE_HEAD not in local objects"
+    ATTRIBUTION_PROVENANCE="${SEP}attributed by branch: run head $UNREACHABLE_HEAD not in local objects"
+    RUN_DETAIL="$RUN_DETAIL$ATTRIBUTION_PROVENANCE"
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR$ATTRIBUTION_PROVENANCE"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -760,7 +780,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != unreadable ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR$ATTRIBUTION_PROVENANCE"
     fi
   fi
 
