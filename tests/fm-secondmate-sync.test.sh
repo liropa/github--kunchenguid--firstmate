@@ -936,7 +936,7 @@ SH
 # the startup sweep printed "<commit> does not exist" every session and the home
 # stayed behind until someone ran /updatefirstmate by hand.
 test_ff_standalone_clone_updated() {
-  local w base fetchlog
+  local w base fetchlog primary_real
   w=$(new_world clone-updated)
   add_sm_clone "$w" sm
   bump_primary "$w" instr
@@ -959,8 +959,10 @@ test_ff_standalone_clone_updated() {
 
   # No network: the one fetch names the primary's local directory as its source.
   fetchlog=$(cat "$w/fetch.log" 2>/dev/null || true)
+  primary_real=$(resolved_existing_dir "$w/main") \
+    || fail "could not resolve the primary checkout path"
   [ -n "$fetchlog" ] || fail "expected exactly one local fetch, none was recorded"
-  assert_contains "$fetchlog" "$w/main" "the fetch source is the primary checkout's local path"
+  assert_contains "$fetchlog" "$primary_real" "the fetch source is the primary checkout's local path"
   assert_not_contains "$fetchlog" "://" "the fetch source must not be a URL"
   pass "T16 standalone clone: a clean, behind clone of the primary fast-forwards with no manual update"
 }
