@@ -247,7 +247,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, reports sbx guest clone sync separately, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
+The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#harness-support) owns the local sync's no-network contract and eligible home shapes.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
