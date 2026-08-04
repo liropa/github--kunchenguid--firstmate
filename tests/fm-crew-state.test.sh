@@ -28,6 +28,11 @@
 #   (l) false-`failed` regression set: a superseded run must never be attributed
 #       to a live one, and an unreadable status read is unknown, never failed.
 #       See that section's own header, below, for the two channels it pins.
+#   (m) unreachable run head: a gate-authored head absent from this object store
+#       binds on branch, while a head that RESOLVES as an ancestor of the local
+#       tip stays rejected - the counterfactual pair for the blind-read gap.
+#   (n) block-scoped field reads: `branch_sync`'s duplicate `head:`/`branch:`
+#       keys must never supply the run's own, in either emission order.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1675,6 +1680,215 @@ test_unreadable_ci_log_does_not_read_as_green() {
   pass "unreadable ci log read does not resolve to checks-green done"
 }
 
+# ---------------------------------------------------------------------------
+# (m) UNREACHABLE RUN HEAD.
+#
+# The no-mistakes gate authors its fix commits in its OWN object store
+# (~/.no-mistakes/repos/<hash>.git) and pushes them to origin, never back to the
+# crew's repo, so from the crew's first pipeline-authored fix commit onward the
+# run's recorded head names a commit this worktree cannot resolve. Measured at 75%
+# of the last 40 runs (up to 87.5%), i.e. the NORMAL shape of a healthy run - not
+# an edge case (investigation `crew-state-blind-during-fix-round`, 2026-08-03).
+#
+# Rejecting that as "not my run" blinded the reader for the whole post-first-fix
+# stretch of every run, and because both attribution paths keyed on the same
+# commit, the coarse fallback shared the primary's failure mode instead of
+# covering it. With an idle pane (the crew legitimately idles while the daemon
+# drives the pipeline) and a status log whose last line is a decision-closing
+# `resolved:`, no source remained and the reader emitted `unknown · none` for a
+# run that was eight steps in with CI running.
+#
+# The boundary that stays: a head that RESOLVES and is an ancestor of the local
+# tip still invalidates attribution - local work genuinely moved past that run.
+# These cases are the counterfactual pair, differing only in reachability.
+
+# A separate object store that advances <branch> past the worktree tip, exactly
+# like the gate repo authoring its own fix commits: echoes a short sha that names
+# a real commit, descends from the worktree HEAD, and is NOT resolvable here.
+make_unreachable_gate_head() {  # <worktree> <gate-dir> -> echoes short sha
+  local wt=$1 gate=$2 sha
+  git clone -q "$wt" "$gate"
+  git -C "$gate" config user.email gate@example.invalid
+  git -C "$gate" config user.name gate
+  git -C "$gate" commit -q --allow-empty -m 'no-mistakes(review): gate fix commit'
+  git -C "$gate" commit -q --allow-empty -m 'no-mistakes(document): gate fix commit'
+  sha=$(git -C "$gate" rev-parse --short=8 HEAD)
+  git -C "$wt" rev-parse --verify --quiet "${sha}^{commit}" >/dev/null \
+    && fail "fixture broken: gate head $sha is resolvable from the worktree"
+  printf '%s\n' "$sha"
+}
+
+# The 2026-08-03 incident, reproduced: gate-authored run head, idle pane, status
+# log ending in the `resolved:` that closed the captain's decision.
+test_unreachable_run_head_is_attributed_by_branch() {
+  reset_fakes
+  local d gate_head out
+  d=$(new_case unreachable-head)
+  make_repo_on_branch "$d/wt" fm/feat-gatefix
+  gate_head=$(make_unreachable_gate_head "$d/wt" "$d/gate")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gatefix.meta" "window=fm:fm-gatefix" "worktree=$d/wt" "kind=ship"
+  printf 'resolved: [key=origin-dependency-comment] captain chose option (a)\n' \
+    > "$d/state/gatefix.status"
+  FM_FAKE_RUN_HEAD="$gate_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-gatefix)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" gatefix)
+  assert_contains "$out" "state: working" "a gate-authored run head must not blind the reader"
+  assert_contains "$out" "source: run-step" "an unreachable head still binds the run"
+  assert_contains "$out" "validating (running)" "the run-step is reported"
+  assert_contains "$out" "not in local objects" "the weaker attribution is stated in the detail"
+  assert_not_contains "$out" "source: none" "the run must not fall through to no source"
+  pass "unreachable run head is attributed by branch and reports its run-step"
+}
+
+# The counterfactual: same fixture, but the run head RESOLVES and is a strict
+# ancestor of the worktree tip. Local work advanced past that run, so attribution
+# is genuinely invalid and must stay rejected.
+test_reachable_ancestor_head_still_rejected() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case reachable-ancestor-head)
+  make_repo_on_branch "$d/wt" fm/feat-advanced
+  run_head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after that run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/advanced.meta" "window=fm:fm-advanced" "worktree=$d/wt" "kind=ship"
+  printf 'resolved: [key=origin-dependency-comment] captain chose option (a)\n' \
+    > "$d/state/advanced.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-advanced)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" advanced)
+  assert_not_contains "$out" "source: run-step" "a resolvable ancestor head must stay rejected"
+  assert_contains "$out" "state: unknown" "no source remains once the run is correctly rejected"
+  pass "a run head that resolves as an ancestor of local HEAD is still rejected"
+}
+
+# The coarse fallback keyed on the SAME commit as the primary, so one missing
+# object defeated both paths. It has to relax on exactly the same rule.
+test_unreachable_head_attributed_via_runs_list() {
+  reset_fakes
+  local d gate_head out
+  d=$(new_case unreachable-head-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-coarsegate
+  gate_head=$(make_unreachable_gate_head "$d/wt" "$d/gate")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarsegate.meta" "window=fm:fm-coarsegate" "worktree=$d/wt" "kind=ship"
+  printf 'resolved: [key=some-decision] captain chose option (a)\n' \
+    > "$d/state/coarsegate.status"
+  # `axi status` answers with another branch's run, so attribution falls to the
+  # runs list - whose newest row for this branch records the same gate head.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-branch)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-coarsegate $gate_head  2026-08-03 20:44"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" coarsegate)
+  assert_contains "$out" "state: working" "the coarse row must bind on an unreachable head too"
+  assert_contains "$out" "source: run-step" "coarse attribution still reports run-step"
+  assert_contains "$out" "not in local objects" "coarse attribution states its provenance"
+  pass "unreachable head is attributed through the coarse runs-list fallback"
+}
+
+# The residual of the accepted trade, pinned so it stays visible rather than
+# accidental. An unreachable head carries NO ancestry evidence, so a terminal run
+# on this branch binds on branch name alone - including one the worktree has since
+# moved past, which a resolvable head would have rejected as diverged. The run-step
+# stays authoritative (a status log is a stale event record, and standing it in
+# here is the false-state channel section (l) closed), so what the reader owes
+# instead is provenance: the detail names the head it could not resolve.
+test_terminal_run_with_unreachable_head_binds_and_says_so() {
+  reset_fakes
+  local d gate_head out
+  d=$(new_case unreachable-head-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-gatefail
+  gate_head=$(make_unreachable_gate_head "$d/wt" "$d/gate")
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after that run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gatefail.meta" "window=fm:fm-gatefail" "worktree=$d/wt" "kind=ship"
+  printf 'working: back on the fix round\n' > "$d/state/gatefail.status"
+  FM_FAKE_RUN_HEAD="$gate_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-gatefail)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" gatefail)
+  assert_contains "$out" "state: failed" "a terminal run with an unreachable head still binds"
+  assert_contains "$out" "not in local objects" "the unconfirmable bind must state its provenance"
+  pass "a terminal run with an unreachable head binds and reports that provenance"
+}
+
+# ---------------------------------------------------------------------------
+# (n) BLOCK-SCOPED FIELD READS.
+#
+# Real `axi status` emits `branch_sync` alongside the run block, and its
+# `local.branch`/`local.head` duplicate the run's own key names. A first-match
+# read picked the run's copy only because the CLI happens to emit the run block
+# first. `branch_sync.local.head` is BY CONSTRUCTION the worktree HEAD, so a
+# purely cosmetic reordering upstream would make the head check match for ANY run
+# on the branch, including a superseded one - reintroducing exactly what the
+# code-identity check exists to prevent, through a third-party formatting change.
+#
+# Latent, not live: no reordering has been observed. The fixtures below pin both
+# orderings so the read no longer depends on which one ships.
+
+# `branch_sync` as real output carries it. local.head is the worktree HEAD.
+branch_sync_block() {  # <branch> <local-head>
+  cat <<EOF
+branch_sync:
+  state: behind
+  local:
+    branch: $1
+    head: "$2"
+EOF
+}
+
+test_branch_sync_block_never_supplies_the_run_head() {
+  reset_fakes
+  local d run_head local_head out order
+  for order in run-first branch-sync-first; do
+    d=$(new_case "field-scope-$order")
+    make_repo_on_branch "$d/wt" fm/feat-scope
+    run_head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+    git -C "$d/wt" commit -q --allow-empty -m 'local work after that run'
+    local_head=$(git -C "$d/wt" rev-parse HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/scope.meta" "window=fm:fm-scope" "worktree=$d/wt" "kind=ship"
+    printf 'working: current stage still in progress\n' > "$d/state/scope.status"
+    FM_FAKE_RUN_HEAD="$run_head"
+    if [ "$order" = run-first ]; then
+      FM_FAKE_AXI_STATUS=$(printf '%s\n%s\n' \
+        "$(run_running fm/feat-scope)" "$(branch_sync_block fm/feat-scope "$local_head")")
+    else
+      FM_FAKE_AXI_STATUS=$(printf '%s\n%s\n' \
+        "$(branch_sync_block fm/feat-scope "$local_head")" "$(run_running fm/feat-scope)")
+    fi
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=0
+    out=$(run_crew_state "$d" scope)
+    assert_not_contains "$out" "source: run-step" \
+      "$order: branch_sync's local head must never satisfy the run head check"
+    assert_contains "$out" "source: status-log" "$order: falls back after the run is rejected"
+  done
+  pass "branch_sync's duplicate keys never supply the run's own fields"
+}
+
+# The positive half: a foreign block ahead of the run block must not hide the
+# run's fields either.
+test_reordered_output_still_reads_the_run_block() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case field-scope-positive)
+  make_repo_on_branch "$d/wt" fm/feat-scope-ok
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/scopeok.meta" "window=fm:fm-scopeok" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=$(printf '%s\n%s\n' \
+    "$(branch_sync_block fm/feat-scope-ok "$local_head")" "$(run_running fm/feat-scope-ok)")
+  out=$(run_crew_state "$d" scopeok)
+  assert_contains "$out" "source: run-step" "the run block is still read when another block precedes it"
+  assert_contains "$out" "state: working" "the run's own status is reported"
+  assert_contains "$out" "validating (running)" "the run's own step is reported"
+  pass "a leading foreign block does not hide the run block's fields"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1739,5 +1953,11 @@ test_terminal_cancelled
 test_coarse_genuine_failed_still_reports_failed
 test_coarse_genuine_cancelled_still_reports_failed
 test_unreadable_ci_log_does_not_read_as_green
+test_unreachable_run_head_is_attributed_by_branch
+test_reachable_ancestor_head_still_rejected
+test_unreachable_head_attributed_via_runs_list
+test_terminal_run_with_unreachable_head_binds_and_says_so
+test_branch_sync_block_never_supplies_the_run_head
+test_reordered_output_still_reads_the_run_block
 
 echo "all fm-crew-state tests passed"

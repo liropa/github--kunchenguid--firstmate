@@ -25,6 +25,7 @@ Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed 
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+A run head that this worktree cannot resolve at all also binds on the branch alone, because the gate authors its fix commits in its own object store, and the emitted detail records that weaker provenance.
 The script header owns the exact run-head ancestry rules and the distinction between a clean no-match and an unreadable run query.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
