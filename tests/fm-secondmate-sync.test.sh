@@ -11,7 +11,11 @@
 #     home (updated), is a no-op on an already-current home (current, no nudge),
 #     and refuses - leaving work untouched - on a dirty, diverged, or
 #     in-flight (feature-branch) home.
-#   - No origin fetch happens in the local-HEAD sync path.
+#   - The local-HEAD sync never touches the network. A linked-worktree home needs
+#     no fetch at all; a STANDALONE CLONE of the primary has its missing objects
+#     copied from the primary's path on disk - moving no ref - so it converges on
+#     the same sweep, while a clone of a real remote is still skipped honestly and
+#     never fetched. Origin mode keeps its own base resolution throughout.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
 #     actually changed; a successful send is reported as BOOTSTRAP_INFO:, a
@@ -232,10 +236,12 @@ test_ff_inflight_feature_branch() {
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
 }
 
-# --- T6: no origin fetch happens in the local-HEAD sync path -----------------
-# A bare `git fetch` would need the network; the sync must never reach for it.
+# --- T6: a linked-worktree home fast-forwards with no fetch at all -----------
+# A worktree already shares the primary's object store, so nothing has to be
+# copied: the sync must not reach for the network OR for the local top-up here.
 # Shadow git with a wrapper that records any `fetch` invocation, then drive the
-# updated path and confirm the wrapper saw none.
+# updated path and confirm the wrapper saw none. (T16-T17 own the standalone-clone
+# shape, where the top-up is the whole point and origin decides whether it runs.)
 test_no_fetch_in_local_path() {
   local w c1 base fakebin log real_git
   w=$(new_world ff-nofetch)
@@ -834,9 +840,9 @@ test_seed_marker_clean_when_gitignored() {
 # --- T13: an existing marker-only-dirty home converges on the next sweep --------
 # The convergence chicken-and-egg: existing homes predate the fix, so their marker
 # is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
-# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
-# linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
-# Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
+# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for every
+# home bootstrap/spawn can fast-forward from the primary's local HEAD - linked
+# worktrees here, and standalone clones of the primary in T16.
 # Once advanced, the now-ignored marker reads clean with no hand intervention.
 test_seed_marker_converges_existing_home() {
   local w c0 base
@@ -881,6 +887,266 @@ test_seed_marker_does_not_mask_real_dirt() {
   pass "T14 marker tolerance does not mask a genuinely dirty home"
 }
 
+# --- standalone-clone homes ------------------------------------------------
+# A secondmate home seeded to an explicit path is a STANDALONE CLONE of the primary
+# (bin/fm-home-seed.sh runs `git clone "$FM_ROOT" <home>`), not a linked worktree,
+# so it has its own object store and genuinely lacks the primary's newest commit.
+# The local-HEAD sync closes that gap by copying the objects over the local
+# filesystem when - and only when - the clone's origin resolves to the primary
+# checkout itself. Everything else about the sweep is unchanged: it still contacts
+# no network, still moves no ref while fetching, and still runs every guard.
+
+# add_sm_clone <w> <id> [origin_url]: a secondmate home as a standalone CLONE of the
+# primary (attached to main, exactly what `git clone` leaves), plus its seed marker
+# and a live kind=secondmate meta. With origin_url given, the clone's origin is
+# repointed at that URL to model a home cloned from a real remote instead.
+add_sm_clone() {
+  local w=$1 id=$2 origin_url=${3:-}
+  git clone --quiet "$w/main" "$w/$id"
+  [ -z "$origin_url" ] || git -C "$w/$id" remote set-url origin "$origin_url"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'home=%s/%s\n' "$w" "$id"
+  } > "$w/home/state/$id.meta"
+}
+
+# fetch_logging_path <w>: echo a PATH whose `git` records every invocation's full
+# argv to <w>/fetch.log before delegating to the real git. Proves both whether a
+# fetch happened at all and, when one did, what source it was given.
+fetch_logging_path() {
+  local w=$1 fakebin real_git
+  fakebin="$w/fetchlog-bin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = fetch ]; then printf '%s\n' "\$*" >> '$w/fetch.log'; break; fi
+done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+  printf '%s\n' "$fakebin:$BASE_PATH"
+}
+
+# --- T16: a standalone clone of the primary fast-forwards with no manual update -
+# The reported failure: the only secondmate in the fleet is a standalone clone, so
+# the startup sweep printed "<commit> does not exist" every session and the home
+# stayed behind until someone ran /updatefirstmate by hand.
+test_ff_standalone_clone_updated() {
+  local w base fetchlog
+  w=$(new_world clone-updated)
+  add_sm_clone "$w" sm
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+
+  # Precondition: the clone genuinely does not have the commit - this is the case
+  # a linked worktree can never reach, and the one the old code always skipped.
+  git -C "$w/sm" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+    && fail "precondition: a standalone clone must not already hold the primary's new commit"
+
+  PATH="$(fetch_logging_path "$w")" run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: updated " "standalone clone prints an advance line"
+  assert_contains "$FF_INSTR" "AGENTS.md" "instruction change is recorded for the clone"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "standalone clone did not advance to the primary's commit"
+  [ "$(git -C "$w/sm" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
+    || fail "clone tip is not a single-parent fast-forward"
+
+  # No network: the one fetch names the primary's local directory as its source.
+  fetchlog=$(cat "$w/fetch.log" 2>/dev/null || true)
+  [ -n "$fetchlog" ] || fail "expected exactly one local fetch, none was recorded"
+  assert_contains "$fetchlog" "$w/main" "the fetch source is the primary checkout's local path"
+  assert_not_contains "$fetchlog" "://" "the fetch source must not be a URL"
+  pass "T16 standalone clone: a clean, behind clone of the primary fast-forwards with no manual update"
+}
+
+# --- T16b: the session-start SWEEP converges a standalone clone ---------------
+# T16 drives the ff helper directly; this drives the same sweep function
+# bin/fm-bootstrap.sh's secondmate_sync calls, so the whole chain is covered -
+# live-meta discovery, home validation, fast-forward, and the instruction-change
+# nudge decision - for a clone rather than a worktree.
+test_sweep_converges_standalone_clone() {
+  local w base
+  w=$(new_world sweep-clone)
+  add_sm_clone "$w" sm-c
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+
+  FM_ROOT="$w/main" FM_HOME="$w/home"
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
+  sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
+
+  [ "$(head_of "$w/sm-c")" = "$base" ] \
+    || fail "the sweep did not converge a standalone clone (the reported failure)"
+  assert_contains "$FF_NUDGE_WINDOWS" "fm-sm-c" \
+    "a converged clone whose instructions changed is nudged like any other home"
+  pass "T16b standalone clone: the session-start sweep converges it and nudges it"
+}
+
+# --- T17: a clone of a REAL REMOTE is still skipped, and never fetched ---------
+# The no-network property is load-bearing. A home cloned from github must resolve
+# to no local source at all, keep the same honest skip it prints today, and must
+# not reach for the network to try.
+test_ff_standalone_clone_real_remote_skipped() {
+  local w base before
+  w=$(new_world clone-remote)
+  add_sm_clone "$w" sm https://github.com/example/firstmate.git
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm")
+  FM_ROOT="$w/main"
+
+  PATH="$(fetch_logging_path "$w")" run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: $base does not exist" \
+    "a clone of a real remote keeps the honest missing-commit skip"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "a skipped clone's HEAD moved"
+  [ ! -f "$w/fetch.log" ] \
+    || fail "a real-remote origin must never be fetched: $(cat "$w/fetch.log")"
+  pass "T17 standalone clone: a real-remote origin is still skipped honestly and never fetched"
+}
+
+# --- T18: the object top-up moves no local ref --------------------------------
+# The fetch may only put objects in the store. A detached clone isolates that: the
+# fast-forward moves HEAD alone, so every named ref must be byte-identical
+# afterwards - no refs/remotes/origin/* advance, and no tag pulled along.
+test_standalone_clone_fetch_moves_no_ref() {
+  local w base refs_before refs_after
+  w=$(new_world clone-norefs)
+  add_sm_clone "$w" sm
+  git -C "$w/sm" checkout --quiet --detach HEAD
+  bump_primary "$w" instr
+  git -C "$w/main" tag v-should-not-follow
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+  refs_before=$(git -C "$w/sm" show-ref)
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "detached clone did not advance"
+  refs_after=$(git -C "$w/sm" show-ref)
+  [ "$refs_before" = "$refs_after" ] || fail \
+    "the object top-up moved a local ref"$'\n'"--- before ---"$'\n'"$refs_before"$'\n'"--- after ---"$'\n'"$refs_after"
+  assert_not_contains "$refs_after" "v-should-not-follow" "no tag may be created by the top-up"
+  pass "T18 standalone clone: the object top-up moves no local ref and follows no tag"
+}
+
+# --- T19: every guard still refuses a standalone clone untouched --------------
+# The top-up runs before the guards, so it must not widen what gets advanced: a
+# dirty, diverged, detached-when-disallowed, or wrong-branch clone must still be
+# left exactly as it was, even though its missing objects are now obtainable.
+test_standalone_clone_guards_still_refuse() {
+  local w base before
+
+  # dirty
+  w=$(new_world clone-guard-dirty)
+  add_sm_clone "$w" sm
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+  printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"
+  before=$(head_of "$w/sm")
+  run_ff "$w/sm" "$base"
+  [ "$FF_STATUS" = skipped ] || fail "dirty clone: expected skipped, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" "dirty clone is skipped"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty clone HEAD moved"
+  grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty clone edit was discarded"
+
+  # diverged
+  w=$(new_world clone-guard-diverged)
+  add_sm_clone "$w" sm
+  printf 'fork work\n' > "$w/sm/AGENTS.md"
+  git -C "$w/sm" add -A
+  git -C "$w/sm" commit -qm local-work
+  before=$(head_of "$w/sm")
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+  run_ff "$w/sm" "$base"
+  [ "$FF_STATUS" = skipped ] || fail "diverged clone: expected skipped, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: diverged from $base" "diverged clone is skipped"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "diverged clone HEAD moved (unlanded work at risk)"
+
+  # detached, where the caller does NOT allow a detached target (allow_detached=no)
+  w=$(new_world clone-guard-detached)
+  add_sm_clone "$w" sm
+  git -C "$w/sm" checkout --quiet --detach HEAD
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+  before=$(head_of "$w/sm")
+  ff_target "$w/sm" "secondmate sm" "$base" no yes >"$TMP_ROOT/ff.out" 2>&1
+  FF_OUT=$(cat "$TMP_ROOT/ff.out")
+  [ "$FF_STATUS" = skipped ] || fail "detached clone: expected skipped, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: detached HEAD, expected main" \
+    "a detached clone is skipped when the caller disallows detached"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "detached clone HEAD moved"
+
+  # wrong branch
+  w=$(new_world clone-guard-branch)
+  add_sm_clone "$w" sm
+  git -C "$w/sm" checkout --quiet -b feature/wip
+  printf 'work in progress\n' >> "$w/sm/README.md"
+  git -C "$w/sm" add -A
+  git -C "$w/sm" commit -qm wip
+  before=$(head_of "$w/sm")
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  FM_ROOT="$w/main"
+  run_ff "$w/sm" "$base"
+  [ "$FF_STATUS" = skipped ] || fail "wrong-branch clone: expected skipped, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: on feature/wip, expected main" \
+    "a clone on a feature branch is skipped"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "wrong-branch clone HEAD moved (work at risk)"
+
+  pass "T19 standalone clone: dirty, diverged, detached, and wrong-branch clones are all still skipped untouched"
+}
+
+# --- T20: origin mode is untouched by the local top-up ------------------------
+# /updatefirstmate drives ff_target in origin base mode (bin/fm-update.sh), where a
+# missing base is terminal. This clone's origin IS the primary path, so the local
+# top-up would qualify - and must still not run. Origin mode does its ONE
+# `fetch origin --prune` and stops there.
+test_origin_mode_unchanged_by_local_topup() {
+  local w before out fetchlog
+  w=$(new_world origin-mode)
+  add_sm_clone "$w" sm
+  bump_primary "$w" instr
+  FM_ROOT="$w/main"
+  before=$(head_of "$w/sm")
+
+  # Point the clone's default branch at a name the primary does not have, so the
+  # origin-mode base (origin/trunk) cannot resolve even after a successful fetch.
+  git -C "$w/sm" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+
+  # Redirect to a file rather than $( ): a subshell would strand FF_STATUS and let
+  # this case read a previous test's value instead of this call's.
+  FETCHED=""
+  FF_STATUS=""
+  PATH="$(fetch_logging_path "$w")" \
+    ff_target "$w/sm" "secondmate sm" origin yes yes >"$TMP_ROOT/ff.out" 2>&1
+  out=$(cat "$TMP_ROOT/ff.out")
+
+  [ "$FF_STATUS" = skipped ] || fail "origin mode: expected skipped, got '$FF_STATUS': $out"
+  assert_contains "$out" "secondmate sm: skipped: origin/trunk does not exist" \
+    "origin mode keeps its own missing-base skip"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "origin-mode clone HEAD moved"
+  fetchlog=$(cat "$w/fetch.log" 2>/dev/null || true)
+  [ "$(printf '%s\n' "$fetchlog" | grep -c fetch)" -eq 1 ] \
+    || fail "origin mode must fetch exactly once, got:"$'\n'"$fetchlog"
+  assert_not_contains "$fetchlog" "refs/heads/" \
+    "origin mode must not run the local-primary top-up fetch"
+  pass "T20 origin mode keeps its own base resolution and never runs the local top-up"
+}
+
 # --- T15: the shipped firstmate repo gitignores the seed marker -----------------
 # Pins the actual fix so it cannot silently regress: without this .gitignore entry
 # every seeded home would read dirty again the moment it lands on this repo's HEAD.
@@ -911,6 +1177,12 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
+test_ff_standalone_clone_updated
+test_sweep_converges_standalone_clone
+test_ff_standalone_clone_real_remote_skipped
+test_standalone_clone_fetch_moves_no_ref
+test_standalone_clone_guards_still_refuse
+test_origin_mode_unchanged_by_local_topup
 test_repo_gitignores_seed_marker
 
 echo "# all fm-secondmate-sync tests passed"
