@@ -503,9 +503,9 @@ count_owner_dirs() {
 }
 
 # Regression for the 2026-08-04 owner-dir leak. "ln -s TARGET DIR" succeeds by
-# creating the link INSIDE DIR, so a loser whose publish landed after a
-# contender's planted a stray symlink inside the WINNER's owner dir instead of
-# failing. The stray-link cleanup ran only on the ln FAILURE branch, so the
+# creating the link INSIDE DIR. When a contender published the lock first, the
+# loser's publish planted a stray symlink inside the WINNER's owner dir instead
+# of failing. The stray-link cleanup ran only on the ln FAILURE branch, so the
 # loser discarded its own owner dir and left that stray dangling; the winner's
 # later discard then failed its rmdir on the now non-empty directory and leaked
 # it permanently - one per lost race, 8 across two locks in the live home on
