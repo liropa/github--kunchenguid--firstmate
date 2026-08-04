@@ -64,6 +64,8 @@ test_first_stale_call_prints_full_banner() {
     "full banner must keep the actionable watcher-repair instruction"
   assert_contains "$out" "WILL still run" \
     "full banner must keep the guarded-operation continuation line"
+  assert_contains "$out" 'docs/watcher-continuity.md ("Inter-cycle supervision gaps")' \
+    "full banner must name the documentation that explains the beacon age"
   pass "fm-guard stale banner: first stale call prints the full actionable banner"
 }
 
@@ -173,6 +175,8 @@ test_read_only_before_writable_does_not_consume_full_banner() {
   out_ro=$(run_guard_case_read_only "$dir")
   [ "$(count_text "$out_ro" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "read-only stale call should print the advisory full banner: $out_ro"
+  assert_contains "$out_ro" 'docs/watcher-continuity.md ("Inter-cycle supervision gaps")' \
+    "read-only full banner must also name the documentation that explains the beacon age"
   assert_absent "$marker" "read-only stale call must not create the stale-banner marker"
   assert_absent "$lock" "read-only stale call must not create the stale-banner lock"
 
