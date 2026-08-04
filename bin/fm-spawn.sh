@@ -797,8 +797,9 @@ if [ "$KIND" = secondmate ]; then
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no network: a worktree home already holds the
-  # commit, and a standalone clone of the primary gets it from that path on disk
+  # spawn section). It has no network or remote-origin-fetch dependency: a
+  # worktree home already holds the commit, and a standalone clone gets it from
+  # disk only when its resolved origin path matches the primary checkout
   # (fm-ff-lib.sh). ff-only and guarded; a dirty, diverged, or wrong-branch home is
   # left untouched and launches as-is. The agent re-reads AGENTS.md fresh on
   # launch, so no nudge is needed here.

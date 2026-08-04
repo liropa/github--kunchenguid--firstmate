@@ -242,7 +242,7 @@ test_ff_inflight_feature_branch() {
 # Shadow git with a wrapper that records any `fetch` invocation, then drive the
 # updated path and confirm the wrapper saw none. (T16-T17 own the standalone-clone
 # shape, where the top-up is the whole point and origin decides whether it runs.)
-test_no_fetch_in_local_path() {
+test_linked_worktree_fast_forwards_without_fetch() {
   local w c1 base fakebin log real_git
   w=$(new_world ff-nofetch)
   c1=$(head_of "$w/main")
@@ -266,8 +266,8 @@ SH
   PATH="$fakebin:$BASE_PATH" run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS'"
-  [ ! -f "$log" ] || fail "git fetch was invoked in the local-HEAD sync path: $(cat "$log")"
-  pass "T6 no fetch: the local-HEAD sync never invokes git fetch"
+  [ ! -f "$log" ] || fail "git fetch was invoked for a linked-worktree home: $(cat "$log")"
+  pass "T6 no fetch: a linked-worktree home fast-forwards with no fetch at all"
 }
 
 # --- T7: sweep advances a readme-only home but does NOT nudge it -------------
@@ -1161,7 +1161,7 @@ test_ff_current
 test_ff_dirty
 test_ff_diverged
 test_ff_inflight_feature_branch
-test_no_fetch_in_local_path
+test_linked_worktree_fast_forwards_without_fetch
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_nudge_send_uses_state_override

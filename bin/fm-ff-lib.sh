@@ -8,7 +8,9 @@
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO NETWORK dependency.
+#     base_mode is that local commit, with NO NETWORK or remote-origin-fetch
+#     dependency; a missing commit is fetched only after the target origin's
+#     resolved path matches the primary checkout.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward.
@@ -304,12 +306,12 @@ live_secondmate_meta_records() {
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
 #                  path); requires an origin remote and network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO NETWORK and no origin
-#                  dependency (the local-HEAD secondmate sync). A worktree of this
-#                  same repo always already has the commit; a standalone clone of
-#                  the primary gets it copied in over the local filesystem
-#                  (fetch_from_local_primary), and any other target that lacks it
-#                  is skipped as before.
+#   <commit-ish> - advance to that LOCAL commit with NO NETWORK or remote-origin-
+#                  fetch dependency (the local-HEAD secondmate sync). A worktree
+#                  of this same repo always already has the commit; a standalone
+#                  clone gets it copied over the local filesystem only when its
+#                  resolved origin path matches the primary checkout, and any
+#                  other target that lacks it is skipped as before.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
 # dirty, diverged, or wrong-branch target and leave its work untouched. The local
 # top-up runs only where a missing base would already have skipped, so it never

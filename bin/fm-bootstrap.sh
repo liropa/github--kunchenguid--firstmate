@@ -199,10 +199,11 @@ secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
-  # to the primary checkout's current default-branch commit. Purely LOCAL - no
-  # network, no origin dependency: a linked-worktree home already holds the
-  # primary's commit, and a standalone clone of the primary has the missing objects
-  # copied in from that path on disk, so both shapes converge on this sweep
+  # to the primary checkout's current default-branch commit. It has no network or
+  # remote-origin-fetch dependency: a linked-worktree home already holds the
+  # primary's commit, and a standalone clone has missing objects copied from disk
+  # only when its resolved origin path matches the primary checkout, so both
+  # shapes converge on this sweep
   # (fm-ff-lib.sh owns which targets qualify). Startup sends reread nudges only
   # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
