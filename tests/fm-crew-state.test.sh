@@ -745,7 +745,7 @@ test_cross_branch_attribution_via_runs_list() {
   reset_fakes
   local d short; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
@@ -769,7 +769,7 @@ test_cross_branch_attribution_picks_most_recent_row() {
   reset_fakes
   local d short; d=$(new_case crossbranch-mostrecent)
   make_repo_on_branch "$d/wt" fm/feat-fq
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
@@ -789,7 +789,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-coarseready.meta" "window=fm:fm-feat-coarseready" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/4 checks green\n' > "$d/state/feat-coarseready.status"
@@ -1217,7 +1217,7 @@ test_provably_working_via_runs_list_fallback() {
   reset_fakes
   local d short; d=$(new_case provably-working-crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
@@ -1742,6 +1742,68 @@ test_unreachable_run_head_is_attributed_by_branch() {
   pass "unreachable run head is attributed by branch and reports its run-step"
 }
 
+test_malformed_run_head_is_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case malformed-head)
+  make_repo_on_branch "$d/wt" fm/feat-malformed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/malformed.meta" "window=fm:fm-malformed" "worktree=$d/wt" "kind=ship"
+  printf 'resolved: [key=some-decision] captain chose option (a)\n' > "$d/state/malformed.status"
+  FM_FAKE_RUN_HEAD="not-a-head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-malformed)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" malformed)
+  assert_not_contains "$out" "source: run-step" "a malformed head must not bind"
+  assert_not_contains "$out" "not in local objects" "a malformed head is not an absent object"
+  pass "malformed run head is rejected without absence provenance"
+}
+
+test_ambiguous_run_head_is_not_attributed() {
+  reset_fakes
+  local d out real_git
+  d=$(new_case ambiguous-head)
+  make_repo_on_branch "$d/wt" fm/feat-ambiguous
+  make_fakebin "$d" >/dev/null
+  real_git=$(command -v git)
+  sed "s|@REAL_GIT@|$real_git|g" > "$d/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [[ " $* " = *" rev-parse --disambiguate=deadbeef "* ]]; then
+  printf '%040d\n' 1 2
+  exit 0
+fi
+exec @REAL_GIT@ "$@"
+SH
+  chmod +x "$d/fakebin/git"
+  fm_write_meta "$d/state/ambiguous.meta" "window=fm:fm-ambiguous" "worktree=$d/wt" "kind=ship"
+  printf 'resolved: [key=some-decision] captain chose option (a)\n' > "$d/state/ambiguous.status"
+  FM_FAKE_RUN_HEAD="deadbeef"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ambiguous)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" ambiguous)
+  assert_not_contains "$out" "source: run-step" "an ambiguous head must not bind"
+  assert_not_contains "$out" "not in local objects" "an ambiguous head is not an absent object"
+  pass "ambiguous run head is rejected without absence provenance"
+}
+
+test_ci_ready_unreachable_head_reports_provenance() {
+  reset_fakes
+  local d gate_head out
+  d=$(new_case unreachable-head-ci-ready)
+  make_repo_on_branch "$d/wt" fm/feat-ci-ready
+  gate_head=$(make_unreachable_gate_head "$d/wt" "$d/gate")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ciready.meta" "window=fm:fm-ciready" "worktree=$d/wt" "kind=ship"
+  printf 'done: checks green; PR ready for review\n' > "$d/state/ciready.status"
+  FM_FAKE_RUN_HEAD="$gate_head"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-ready)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" ciready)
+  assert_contains "$out" "source: status-log" "CI-ready status uses the early emit"
+  assert_contains "$out" "not in local objects" "the early emit retains weaker attribution provenance"
+  pass "CI-ready unreachable head reports attribution provenance"
+}
+
 # The counterfactual: same fixture, but the run head RESOLVES and is a strict
 # ancestor of the worktree tip. Local work advanced past that run, so attribution
 # is genuinely invalid and must stay rejected.
@@ -1954,6 +2016,9 @@ test_coarse_genuine_failed_still_reports_failed
 test_coarse_genuine_cancelled_still_reports_failed
 test_unreadable_ci_log_does_not_read_as_green
 test_unreachable_run_head_is_attributed_by_branch
+test_malformed_run_head_is_not_attributed
+test_ambiguous_run_head_is_not_attributed
+test_ci_ready_unreachable_head_reports_provenance
 test_reachable_ancestor_head_still_rejected
 test_unreachable_head_attributed_via_runs_list
 test_terminal_run_with_unreachable_head_binds_and_says_so
