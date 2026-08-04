@@ -17,7 +17,10 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# silent. A gap that exceeds it is often an expected, bounded consequence of the
+# one-shot cycle design rather than a fault; docs/watcher-continuity.md
+# ("Inter-cycle supervision gaps") owns that mechanism and its measured bounds.
+# Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

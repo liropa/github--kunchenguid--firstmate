@@ -43,6 +43,43 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
+## Inter-cycle supervision gaps
+
+The one-shot design above has a direct operational consequence worth stating plainly, because the alarm it eventually produces reads as a fault and frequently is not one.
+Supervision is a chain of cycles joined only by the next arm, so every interval between one cycle's exit and the next arm starting is unsupervised by construction rather than by failure.
+The normal interval is 10 to 40 seconds, comfortably inside the 300-second grace, and `bin/fm-guard.sh` stays deliberately silent for it.
+
+What stretches that interval into a lapse is anything that suspends the operator's turn.
+The arm is a harness-tracked background task precisely so its exit notifies the model, which means the decision to re-arm can only be taken while a turn is running.
+A turn held at a permission prompt, or otherwise suspended mid-tool-call, suspends supervision for exactly as long as it lasts.
+The measured instance was a permission prompt that held one turn for 19m51s.
+
+The second consequence is easy to miss: the suspended command may itself be a steer.
+A lapse then postpones real work as well as monitoring, because the crewmate instruction waits exactly as long as the supervision does.
+
+Nothing reports the gap while it is open, and that is structural rather than a defect in either guard.
+`bin/fm-guard.sh` is pull-based and warns only when some other fleet-touching command runs.
+`bin/fm-turnend-guard.sh` is push-based but fires only at turn end.
+A turn stalled mid-tool-call reaches neither boundary, because no further command runs and the turn never ends.
+The `WATCHER DOWN - SUPERVISION IS OFF` banner therefore surfaces after the fact, carrying a beacon age that already encodes the whole elapsed gap.
+
+`state/.watch-cycle-exits.log` is the decisive evidence store for diagnosing any of this, and the first thing to read.
+Its per-cycle records distinguish a designed wake exit from a terminated one, and carry the start and end timestamps that make the gap between consecutive cycles directly computable.
+
+Measured bounds come from a 570-cycle ledger in one home, reported in that home's investigation record `data/watcher-midflight-lapse-cause/report.md` (2026-08-04, home-local and not tracked in this repo).
+74 of 569 gaps exceeded the grace window, or 13.0%, with a median lapse of 680 seconds.
+That ledger contained zero kill signatures, so no lapse in it was a killed watcher.
+The same ledger separately records arm terminations by `SIGTERM` at session end or interrupt, which that report treats as a real but distinct second mechanism rather than the cause of the lapses it examined.
+Those figures predate the in-cycle beacon refresh now bounded by `FM_BEACON_MAX_AGE` (`docs/configuration.md`), which changed how much grace a live watcher consumes inside a cycle but not the inter-cycle gap measured here.
+
+The durable wake queue holds across a lapse.
+No observed lapse lost a signal, and a wake enqueued as the cycle exited drained intact once supervision resumed.
+The cost is delayed reaction, not lost work.
+
+Accepting this exposure is a legitimate posture, and the bounds above are what make it assessable rather than a guess.
+Decoupling the arm from the operator's turn is the real fix, and it costs the notification-on-exit property the current design is built on, so it needs its own design pass rather than an incremental patch.
+Each home weighs that trade against its own tolerance for delayed reaction; nothing here settles it.
+
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
