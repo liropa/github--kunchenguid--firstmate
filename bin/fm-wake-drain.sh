@@ -17,8 +17,9 @@ RAW_ROWS=
 # only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
 # Reuse fm-guard.sh's existing graced, beacon-based alarm (FM_GUARD_GRACE) - do
 # not duplicate the beacon math. Because the watcher touches its beacon every
-# poll cycle, a normal fire leaves a recent beacon well inside grace and stays
-# silent; only a genuine stale-beyond-grace lapse with work in flight warns. Call
+# poll cycle and throughout an in-cycle signal-coalescing linger, a normal fire
+# leaves a recent beacon well inside grace and stays silent; only a genuine
+# stale-beyond-grace lapse with work in flight warns. Call
 # after the queue is emptied so guard never re-prints its own queued-wakes notice
 # for the records this run just drained, and never let a guard hiccup change the
 # drain's exit status.
