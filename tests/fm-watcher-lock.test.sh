@@ -491,6 +491,168 @@ test_lock_absent_after_ln_failure_reports_cannot_create() {
   pass "plain ln failure with absent lock reports cannot-create"
 }
 
+# count_owner_dirs <dir> <lock basename>: entries under <dir> named like an
+# owner dir for that lock. mktemp names them "<lock>.owner.XXXXXX" beside the
+# lock, so a non-zero count in the state dir after every holder has released is
+# a leak - and a non-zero count INSIDE an owner dir is the stray link that
+# causes one.
+# -mindepth 1 matters: find matches its own starting point at depth 0, and the
+# inner call starts from a directory that is itself named "<lock>.owner.XXXXXX".
+count_owner_dirs() {
+  find "$1" -mindepth 1 -maxdepth 1 -name "$2.owner.*" -print 2>/dev/null | wc -l | tr -d ' '
+}
+
+# Regression for the 2026-08-04 owner-dir leak. "ln -s TARGET DIR" succeeds by
+# creating the link INSIDE DIR, so a loser whose publish landed after a
+# contender's planted a stray symlink inside the WINNER's owner dir instead of
+# failing. The stray-link cleanup ran only on the ln FAILURE branch, so the
+# loser discarded its own owner dir and left that stray dangling; the winner's
+# later discard then failed its rmdir on the now non-empty directory and leaked
+# it permanently - one per lost race, 8 across two locks in the live home on
+# 2026-08-04 (a 9th ".owner." entry there is the LIVE watcher lock's own owner
+# dir, not a leak, which is why a blind sweep of that glob is unsafe).
+# Exclusion was never affected and must stay exactly as it was.
+test_lock_lost_race_leaves_no_stray_or_leaked_owner_dir() {
+  local dir state lockdir base winner_owner winner_pid held_pid out i left
+  dir=$(make_case lock-lost-race-leak)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  base=$(basename "$lockdir")
+
+  # A live winner holds the lock until told to release, so the loser below
+  # faces a genuinely held lock rather than a stealable stale one.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    printf "%s\n" "$FM_LOCK_OWNER_DIR" > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 400 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/winner-owner" "$dir/release" &
+  winner_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/winner-owner" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  winner_owner=$(cat "$dir/winner-owner" 2>/dev/null || true)
+  [ -n "$winner_owner" ] || fail "winner never acquired the lock"
+
+  # Drive the lost race deterministically: hide the published lock so the
+  # loser's existence checks pass, then restore it from inside the loser's own
+  # prepare step - exactly the window between its last check and its ln -s.
+  mv "$lockdir" "$lockdir.hidden"
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    LOCK=$2
+    eval "orig_$(declare -f fm_lock_prepare_owner)"
+    fm_lock_prepare_owner() {
+      orig_fm_lock_prepare_owner "$@" || return 1
+      mv "$LOCK.hidden" "$LOCK"
+    }
+    fm_lock_try_create "$LOCK"
+    printf "rc=%s owner=%s\n" "$?" "${FM_LOCK_OWNER_DIR:-}"
+  ' _ "$LIB" "$lockdir")
+
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "loser of a publish race should report rc 1 (lost to a contender): $out" ;;
+  esac
+  case "$out" in
+    *"owner=") ;;
+    *) fail "loser reported an owner dir despite losing: $out" ;;
+  esac
+
+  # The winner's lock must survive the lost race untouched.
+  [ "$(readlink "$lockdir" 2>/dev/null || true)" = "$winner_owner" ] \
+    || fail "lost race disturbed the winner's published lock: $(readlink "$lockdir" 2>/dev/null || true)"
+  held_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$held_pid" = "$winner_pid" ] \
+    || fail "winner's recorded pid changed across the lost race (got '$held_pid', want '$winner_pid')"
+
+  # ...and no stray may sit inside its owner dir: that is what later defeats
+  # the winner's rmdir and leaks the directory for good.
+  left=$(count_owner_dirs "$winner_owner" "$base")
+  [ "$left" = "0" ] \
+    || fail "lost race left a stray inside the winner's owner dir: $(find "$winner_owner" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
+  [ "$(count_owner_dirs "$state" "$base")" = "1" ] \
+    || fail "loser did not discard its own owner dir: $(count_owner_dirs "$state" "$base")"
+
+  touch "$dir/release"
+  wait "$winner_pid" 2>/dev/null || true
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "winner did not release the lock"
+  [ "$(count_owner_dirs "$state" "$base")" = "0" ] \
+    || fail "released lock leaked an owner dir: $(find "$state" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
+  pass "a lost publish race leaves no stray link and no leaked owner dir"
+}
+
+# Backstop for the same leak when the loser dies between planting the stray and
+# reaping it: the holder's own discard must reap dangling owner-shaped strays so
+# its rmdir still succeeds. Only dangling links are removed, so a loser still
+# alive keeps ownership of its own cleanup.
+test_lock_release_reaps_stray_left_by_dead_loser() {
+  local dir state lockdir base out
+  dir=$(make_case lock-dead-loser-stray)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  base=$(basename "$lockdir")
+
+  # shellcheck disable=SC2016  # $1/$2 belong to the inner bash -c process.
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    # A loser planted this and was killed before removing it; its own owner dir
+    # is already gone, so the link dangles.
+    ln -s "$2.owner.ZZZZZZ" "$FM_LOCK_OWNER_DIR/$(basename "$2").owner.ZZZZZZ"
+    fm_lock_release "$2"
+    if [ -e "$2" ] || [ -L "$2" ]; then exists=1; else exists=0; fi
+    printf "exists=%s\n" "$exists"
+  ' _ "$LIB" "$lockdir")
+
+  case "$out" in
+    *"exists=0"*) ;;
+    *) fail "release did not remove the lock path: $out" ;;
+  esac
+  [ "$(count_owner_dirs "$state" "$base")" = "0" ] \
+    || fail "release leaked an owner dir around a dead loser's stray: $(find "$state" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
+  pass "release reaps a dead loser's dangling stray instead of leaking the owner dir"
+}
+
+# End-to-end shape of the same defect under real (uninjected) contention: many
+# contenders acquire and release the same lock, and once the last one is done
+# nothing may remain beside it. This can only fail, never falsely pass, when a
+# scheduling run happens not to hit the publish race.
+test_lock_contention_leaves_no_owner_dirs_behind() {
+  local dir state lockdir base i pids pid
+  dir=$(make_case lock-contention-leftovers)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  base=$(basename "$lockdir")
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        sleep 0.05
+        fm_lock_release "$2"
+      fi
+    ' _ "$LIB" "$lockdir" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  [ "$(count_owner_dirs "$state" "$base")" = "0" ] \
+    || fail "contention left owner dirs behind: $(find "$state" -mindepth 1 -maxdepth 1 -name "$base.owner.*")"
+  pass "concurrent acquire/release contention leaves no owner dirs behind"
+}
+
 # Same runaway, second shape: a stale lock already exists but its parent is no
 # longer writable. The stale holder cannot be stolen (no artifacts can be
 # created), so the acquire must report cannot-create - quickly, quietly, and
@@ -1371,6 +1533,9 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_unwritable_parent_fails_cleanly_without_steal_spiral
 test_lock_absent_after_ln_failure_reports_cannot_create
+test_lock_lost_race_leaves_no_stray_or_leaked_owner_dir
+test_lock_release_reaps_stray_left_by_dead_loser
+test_lock_contention_leaves_no_owner_dirs_behind
 test_lock_stale_lock_in_unwritable_parent_fails_bounded
 test_lock_stale_steal_companion_self_heals
 test_lock_steal_depth_is_bounded_at_one_companion_level

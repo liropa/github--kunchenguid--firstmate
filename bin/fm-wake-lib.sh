@@ -273,10 +273,29 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
+# Reap stray owner links a loser planted inside <ownerdir> (see
+# fm_lock_try_create) and then died before removing. Only dangling symlinks
+# matching the mktemp owner-dir naming are removed, and no lock path other than
+# <ownerdir>/pid is ever read from inside an owner dir, so this cannot change
+# who holds the lock; it only keeps the rmdir below from failing on a directory
+# a dead loser made non-empty.
+fm_lock_reap_stray_owner_links() {
+  local ownerdir=$1 stray
+  # Both patterns are required: every firstmate lock name is dot-prefixed
+  # (.watch.lock, .watch-cycle-exits.lock), and a leading * never matches a
+  # leading dot.
+  for stray in "$ownerdir"/*.owner.?????? "$ownerdir"/.*.owner.??????; do
+    if [ -L "$stray" ] && [ ! -e "$stray" ]; then
+      rm -f "$stray" 2>/dev/null || true
+    fi
+  done
+}
+
 fm_lock_discard_owner() {
   local ownerdir=$1
   [ -n "$ownerdir" ] || return 0
   fm_lock_clean_known_files "$ownerdir"
+  fm_lock_reap_stray_owner_links "$ownerdir"
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
@@ -359,6 +378,15 @@ fm_lock_try_create() {
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
+  else
+    # ln -s SUCCEEDED without publishing our lock: a contender won the race
+    # between the checks above and this ln, so $lockdir was already a symlink
+    # to the winner's owner dir (or a legacy real lock dir) and ln linked
+    # INSIDE it rather than creating $lockdir. Reap that stray, exactly as the
+    # ln-failure branch does for its own shape; otherwise it dangles once we
+    # discard our owner dir below, and the winner's own discard then fails its
+    # rmdir on the now non-empty directory and leaks it permanently.
+    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
