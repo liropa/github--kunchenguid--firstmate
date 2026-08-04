@@ -1301,6 +1301,41 @@ test_beacon_stays_fresh_across_the_coalescing_linger() {
   pass "the liveness beacon keeps advancing across the coalescing linger and is fresh at cycle exit"
 }
 
+test_beacon_linger_preserves_decimal_duration() {
+  local dir state fakebin out sleeps total
+  dir=$(make_case beacon-linger-decimal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'needs-decision: pick A or B\n' > "$state/task.status"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_FAKE_SLEEP_LOG"
+SH
+  chmod +x "$fakebin/sleep"
+
+  sleeps="$dir/fractional.sleeps"
+  PATH="$fakebin:$PATH" FM_FAKE_SLEEP_LOG="$sleeps" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_SIGNAL_GRACE=4.5 FM_BEACON_MAX_AGE=2 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out"
+  [ "$(tr '\n' ',' < "$sleeps")" = "2,2,0.5," ] \
+    || fail "fractional linger was not chunked without retiming: $(tr '\n' ',' < "$sleeps")"
+
+  printf 'needs-decision: pick choice C or D\n' > "$state/task.status"
+  sleeps="$dir/leading-zero-grace.sleeps"
+  PATH="$fakebin:$PATH" FM_FAKE_SLEEP_LOG="$sleeps" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_SIGNAL_GRACE=030 FM_BEACON_MAX_AGE=10 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out"
+  total=$(awk '{ total += $1 } END { print total + 0 }' "$sleeps")
+  [ "$total" = 30 ] || fail "leading-zero grace slept ${total}s instead of 30s"
+
+  printf 'needs-decision: pick final choice E or F\n' > "$state/task.status"
+  sleeps="$dir/leading-zero-cap.sleeps"
+  PATH="$fakebin:$PATH" FM_FAKE_SLEEP_LOG="$sleeps" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_SIGNAL_GRACE=30 FM_BEACON_MAX_AGE=010 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out"
+  total=$(awk '{ total += $1 } END { print total + 0 }' "$sleeps")
+  [ "$total" = 30 ] || fail "leading-zero beacon cap slept ${total}s instead of 30s"
+  pass "fractional and leading-zero linger values stay chunked without changing duration"
+}
+
 # The linger exists so a crewmate's status write and the same turn's turn-end hook
 # cost ONE firstmate turn instead of two. Chunking the wait must not change that:
 # the trailing signal still has to be folded into the same single wake.
@@ -1423,6 +1458,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_beacon_stays_fresh_across_the_coalescing_linger
+test_beacon_linger_preserves_decimal_duration
 test_linger_still_coalesces_a_trailing_signal
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

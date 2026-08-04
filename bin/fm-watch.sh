@@ -161,7 +161,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 BEACON_MAX_AGE=${FM_BEACON_MAX_AGE:-10}   # cap on liveness-beacon age while this
                                       # watcher waits INSIDE a cycle; see beacon_sleep
-case "$BEACON_MAX_AGE" in ''|*[!0-9]*|0) BEACON_MAX_AGE=10 ;; esac
+case "$BEACON_MAX_AGE" in
+  ''|*[!0-9]*) BEACON_MAX_AGE=10 ;;
+  *) (( 10#$BEACON_MAX_AGE > 0 )) || BEACON_MAX_AGE=10 ;;
+esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -512,21 +515,22 @@ beacon_touch() {
 # side of the trade - a watcher KILLED mid-wait now looks alive for at most one
 # chunk longer, instead of for the whole configured grace.
 beacon_sleep() {  # <seconds>
-  local remaining=$1
+  local remaining=$1 whole fraction chunk
   beacon_touch
-  # Chunk a plain-integer wait only; a fractional grace is far below the cap in
-  # every practical configuration, so it waits whole.
-  case "$remaining" in
-    ''|*[!0-9]*) : ;;
-    *)
-      while [ "$remaining" -gt "$BEACON_MAX_AGE" ]; do
-        sleep "$BEACON_MAX_AGE"
-        remaining=$(( remaining - BEACON_MAX_AGE ))
-        beacon_touch
-      done
-      ;;
-  esac
-  sleep "$remaining"
+  chunk=$(( 10#$BEACON_MAX_AGE ))
+  if [[ $remaining =~ ^([0-9]+)(\.[0-9]+)?$ ]]; then
+    whole=$(( 10#${BASH_REMATCH[1]} ))
+    fraction=${BASH_REMATCH[2]}
+    while (( whole >= chunk )); do
+      sleep "$chunk"
+      whole=$(( whole - chunk ))
+      beacon_touch
+    done
+    remaining="${whole}${fraction}"
+  fi
+  if [[ $remaining != 0 && $remaining != 0.0* ]]; then
+    sleep "$remaining"
+  fi
   beacon_touch
 }
 
