@@ -59,9 +59,7 @@ The second consequence is easy to miss: the suspended command may itself be a st
 A lapse then postpones real work as well as monitoring, because the crewmate instruction waits exactly as long as the supervision does.
 
 Nothing reports the gap while it is open, and that is structural rather than a defect in either guard.
-`bin/fm-guard.sh` is pull-based and warns only when some other fleet-touching command runs.
-`bin/fm-turnend-guard.sh` is push-based but fires only at turn end.
-A turn stalled mid-tool-call reaches neither boundary, because no further command runs and the turn never ends.
+As the guard-boundary contract in `docs/turnend-guard.md` implies, a turn stalled mid-tool-call reaches neither boundary, because no further command runs and the turn never ends.
 The `WATCHER DOWN - SUPERVISION IS OFF` banner therefore surfaces after the fact, carrying a beacon age that already encodes the whole elapsed gap.
 
 `state/.watch-cycle-exits.log` is the decisive evidence store for diagnosing any of this, and the first thing to read.
@@ -71,7 +69,7 @@ Measured bounds come from a 570-cycle ledger in one home, reported in that home'
 74 of 569 gaps exceeded the grace window, or 13.0%, with a median lapse of 680 seconds.
 That ledger contained zero kill signatures, so no lapse in it was a killed watcher.
 The same report records that 44 of the 570 recorded cycles were arm-interrupted with `rc=143` and a `TERM` signal, and only 5 of those 44 preceded a grace-exceeding lapse.
-This contradictory result proves that external arm termination is a real second mechanism, distinct from the main finding and not its cause.
+These records establish external arm termination as a real second mechanism that can precede a grace-exceeding lapse, but distinguish it from the main turn-suspension mechanism.
 Those figures predate the in-cycle beacon refresh now bounded by `FM_BEACON_MAX_AGE` (`docs/configuration.md`), which changed how much grace a live watcher consumes inside a cycle but not the inter-cycle gap measured here.
 
 The durable wake queue holds across a lapse.
