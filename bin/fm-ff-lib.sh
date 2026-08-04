@@ -8,12 +8,17 @@
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no origin dependency.
+#     base_mode is that local commit, with NO NETWORK dependency.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
-# shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# shared object store, so its local-HEAD sync is a purely local fast-forward.
+# A standalone clone has its own object store and can genuinely lack that commit.
+# When such a clone was made FROM the primary checkout its origin is the primary's
+# own path, so the missing objects are already on this disk and are copied across
+# with a local-filesystem fetch (fetch_from_local_primary) before the base check is
+# retried - a disk read, not a network call, which is what keeps the mode's
+# no-network property intact. A clone of a real remote has no local source for the
+# commit and is still skipped until the origin path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
@@ -190,7 +195,7 @@ validate_secondmate_home() {
 
 # A single fetch refreshes every worktree that shares an object store, so fetch
 # each distinct git-common-dir at most once. Used ONLY by the origin base mode;
-# the local-HEAD sync never fetches.
+# the local-HEAD sync's own object top-up is fetch_from_local_primary below.
 FETCHED=""
 fetch_once() {
   local dir=$1 common
@@ -205,6 +210,32 @@ fetch_once() {
     return 0
   fi
   return 1
+}
+
+# Local-HEAD mode object top-up for a STANDALONE-CLONE target (see header).
+# Refuses unless the target's origin RESOLVES to the same real directory as the
+# primary checkout: the comparison is between resolved paths, never a string or
+# prefix guess, and an https:// or scp-style origin is not a directory at all, so
+# it can never match and never triggers a fetch. That refusal is what preserves
+# the mode's no-network property.
+#
+# Copies OBJECTS ONLY, moving no local ref: the refspec has no destination, so
+# nothing is written under refs/remotes or refs/heads; --no-tags keeps tag
+# auto-follow from creating refs/tags entries; and it never prunes. The primary's
+# default-branch tip IS the base commit the local-HEAD callers resolve
+# (primary_head_commit), so fetching that one ref brings it and nothing wider.
+#
+# Returns 0 only when the fetch succeeded. The caller re-checks for the base commit
+# itself and keeps its ordinary skip when the commit still did not arrive.
+fetch_from_local_primary() {
+  local dir=$1 origin_url origin_real primary_real primary_default
+  [ -n "${FM_ROOT:-}" ] || return 1
+  origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  origin_real=$(resolved_existing_dir "$origin_url") || return 1
+  primary_real=$(resolved_existing_dir "$FM_ROOT") || return 1
+  [ "$origin_real" = "$primary_real" ] || return 1
+  primary_default=$(default_branch "$primary_real") || return 1
+  git -C "$dir" fetch --no-tags --quiet "$primary_real" "refs/heads/$primary_default" 2>/dev/null
 }
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).
@@ -273,13 +304,16 @@ live_secondmate_meta_records() {
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
 #                  path); requires an origin remote and network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
-#                  dependency (the local-HEAD secondmate sync). The commit must
-#                  already exist in the target's object store, which it always does
-#                  for a worktree of this same repo; a standalone clone that lacks
-#                  it is skipped rather than fetched.
+#   <commit-ish> - advance to that LOCAL commit with NO NETWORK and no origin
+#                  dependency (the local-HEAD secondmate sync). A worktree of this
+#                  same repo always already has the commit; a standalone clone of
+#                  the primary gets it copied in over the local filesystem
+#                  (fetch_from_local_primary), and any other target that lacks it
+#                  is skipped as before.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# dirty, diverged, or wrong-branch target and leave its work untouched. The local
+# top-up runs only where a missing base would already have skipped, so it never
+# widens which targets get advanced.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
@@ -317,9 +351,16 @@ ff_target() {
     base="$base_mode"
   fi
 
+  # A missing base is terminal in origin mode. In local-HEAD mode a standalone
+  # clone of the primary can still be topped up from disk; every other target
+  # falls through to the same skip it has always printed.
   if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-    echo "$label: skipped: $base does not exist"
-    return 0
+    if [ "$base_mode" = origin ] \
+      || ! fetch_from_local_primary "$dir" \
+      || ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+      echo "$label: skipped: $base does not exist"
+      return 0
+    fi
   fi
 
   cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
