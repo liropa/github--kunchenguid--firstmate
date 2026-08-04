@@ -49,11 +49,10 @@ The one-shot design above has a direct operational consequence worth stating pla
 Supervision is a chain of cycles joined only by the next arm, so every interval between one cycle's exit and the next arm starting is unsupervised by construction rather than by failure.
 The normal interval is 10 to 40 seconds, comfortably inside the 300-second grace, and `bin/fm-guard.sh` stays deliberately silent for it.
 
-For Claude, Grok, and Codex, what stretches that interval into a lapse is anything that suspends the operator's turn.
-Claude and Grok use a harness-tracked background task whose exit notifies the model, while Codex uses a bounded foreground checkpoint, so re-arm in all three depends on the model's turn.
+For Claude, Grok, and Codex, re-arm depends on the model's turn, so anything that suspends the operator's turn stretches that interval into a lapse.
 A turn held at a permission prompt, or otherwise suspended mid-tool-call, therefore suspends supervision for exactly as long as it lasts in those harnesses.
-Pi and OpenCode do not carry this turn-coupled exposure because their continuity is extension-owned and plugin-owned, respectively, and a successor is started and verified off the model's turn before wake delivery.
-The harness-specific arm mechanisms are owned by `docs/supervision-protocols/`, with `pi.md` and `opencode.md` defining the two turn-decoupled mechanisms.
+For Pi and OpenCode, re-arm does not depend on the model's turn, so they do not carry this turn-coupled exposure.
+The harness-specific arm mechanisms are owned by `docs/supervision-protocols/`, with `docs/supervision-protocols/pi.md` and `docs/supervision-protocols/opencode.md` owning the two turn-decoupled mechanisms.
 The measured instance came from a Claude home and was a permission prompt that held one turn for 19m51s.
 
 The second consequence is easy to miss: the suspended command may itself be a steer.
