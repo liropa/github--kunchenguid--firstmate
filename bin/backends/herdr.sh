@@ -205,7 +205,7 @@ fm_backend_herdr_run_capture() {  # <command...>
 # purpose: naming a cause the text does not support is the defect this replaced.
 fm_backend_herdr_stderr_is_unreachable_socket() {  # <stderr-text>
   case "$1" in
-    *PermissionDenied*|*'Operation not permitted'*|*'Permission denied'*) return 0 ;;
+    *'Error: Os {'*'code: 1'*'kind: PermissionDenied'*'message: "Operation not permitted"'*'}'*) return 0 ;;
   esac
   return 1
 }
@@ -764,16 +764,28 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i rc=0
-  running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-  [ "$running" = "true" ] && return 0
+  local session=$1 running out i rc=0 status_succeeded=0 last_failure_rc=0 last_failure_err=
+  fm_backend_herdr_run_capture fm_backend_herdr_cli "$session" status --json
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    status_succeeded=1
+    running=$(printf '%s' "$FM_BACKEND_HERDR_OUT" | jq -r '.server.running // false' 2>/dev/null)
+    [ "$running" = "true" ] && return 0
+  else
+    last_failure_rc=$rc
+    last_failure_err=$FM_BACKEND_HERDR_ERR
+  fi
   ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     fm_backend_herdr_run_capture fm_backend_herdr_cli "$session" status --json
     rc=$?
     if [ "$rc" -eq 0 ]; then
+      status_succeeded=1
       running=$(printf '%s' "$FM_BACKEND_HERDR_OUT" | jq -r '.server.running // false' 2>/dev/null)
       [ "$running" = "true" ] && return 0
+    else
+      last_failure_rc=$rc
+      last_failure_err=$FM_BACKEND_HERDR_ERR
     fi
     sleep 0.5
   done
@@ -782,11 +794,11 @@ fm_backend_herdr_server_ensure() {  # <session>
   # stderr is the explanation and a "did not report running in time" message
   # would blame the wrong thing - the same misattribution this file used to make
   # in fm_backend_herdr_version_check.
-  if [ "$rc" -ne 0 ]; then
-    fm_backend_herdr_report_cli_failure "'herdr status --json' for session '$session'" "$rc" "$FM_BACKEND_HERDR_ERR"
+  if [ "$status_succeeded" -eq 0 ]; then
+    fm_backend_herdr_report_cli_failure "'herdr status --json' for session '$session'" "$last_failure_rc" "$last_failure_err"
     return 1
   fi
-  echo "error: herdr server for session '$session' answered for 10s without ever reporting running" >&2
+  echo "error: herdr server for session '$session' status succeeded during the 10s wait but never reported running" >&2
   return 1
 }
 
