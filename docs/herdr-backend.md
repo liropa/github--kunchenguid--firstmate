@@ -70,7 +70,7 @@ What that refusal SAYS when the probe itself fails is owned by "Failed-probe dia
 
 ## Failed-probe diagnosis: an unreachable socket is not a bad install
 
-When a herdr call fails, the adapter keeps herdr's own stderr and quotes it.
+When one of the blocking probes listed below fails, the adapter keeps herdr's own stderr and quotes it.
 It names a cause only for the one signature that is genuinely distinguishable, an unreachable control socket, and otherwise reports herdr's error text with no cause attached.
 A failure that produces no stderr at all is reported as undetermined rather than guessed.
 `fm_backend_herdr_run_capture`, `fm_backend_herdr_stderr_is_unreachable_socket`, and `fm_backend_herdr_report_cli_failure` in `bin/backends/herdr.sh` own this; `fm_backend_herdr_version_check`, `fm_backend_herdr_server_ensure`, and `fm_backend_herdr_resolve_bare_selector` route their blocking diagnostics through it.
