@@ -294,11 +294,37 @@ test_stderr_classifier_matches_only_observed_signatures() {
   out=$( bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_stderr_is_unreachable_socket "$1" && printf "denied-yes " || printf "denied-no "
-    fm_backend_herdr_stderr_is_unreachable_socket "Error: failed to parse config" && printf "other-yes" || printf "other-no"
+    fm_backend_herdr_stderr_is_unreachable_socket "Error: failed to parse config: PermissionDenied" && printf "permission-yes " || printf "permission-no "
+    fm_backend_herdr_stderr_is_unreachable_socket "Error: config file: Operation not permitted" && printf "operation-yes" || printf "operation-no"
   ' "$ROOT" "$HERDR_SOCKET_PERMISSION_STDERR" )
-  [ "$out" = "denied-yes other-no" ] \
+  [ "$out" = "denied-yes permission-no operation-no" ] \
     || fail "the unreachable-socket classifier should match the observed PermissionDenied signature and nothing else, got '$out'"
   pass "fm_backend_herdr_stderr_is_unreachable_socket: matches the observed signature, not unrelated herdr errors"
+}
+
+test_server_ensure_uses_complete_status_history() {
+  local out
+  out=$( bash -c '
+    . "$0/bin/backends/herdr.sh"
+    call=0
+    fm_backend_herdr_cli() { return 0; }
+    fm_backend_herdr_run_capture() {
+      call=$((call + 1))
+      FM_BACKEND_HERDR_OUT='"'"'{"server":{"running":false}}'"'"'
+      FM_BACKEND_HERDR_ERR=
+      if [ "$call" -eq 21 ]; then
+        FM_BACKEND_HERDR_OUT=
+        FM_BACKEND_HERDR_ERR="final transport failure"
+        return 7
+      fi
+      return 0
+    }
+    sleep() { :; }
+    fm_backend_herdr_server_ensure demo
+  ' "$ROOT" 2>&1 )
+  assert_contains "$out" "status succeeded during the 10s wait" "a final failed poll erased earlier successful status responses"
+  assert_not_contains "$out" "final transport failure" "a reachable server was diagnosed from only the final failed poll"
+  pass "fm_backend_herdr_server_ensure: terminal diagnosis uses the complete poll history"
 }
 
 test_bare_selector_reports_an_unreachable_session_listing() {
@@ -2935,6 +2961,7 @@ test_version_check_names_unreachable_socket_not_a_bad_install
 test_version_check_quotes_an_unrecognized_failure_without_guessing
 test_version_check_calls_a_silent_failure_undetermined
 test_stderr_classifier_matches_only_observed_signatures
+test_server_ensure_uses_complete_status_history
 test_bare_selector_reports_an_unreachable_session_listing
 test_bare_selector_still_reports_a_genuinely_absent_tab
 test_workspace_label_primary_home_no_marker
