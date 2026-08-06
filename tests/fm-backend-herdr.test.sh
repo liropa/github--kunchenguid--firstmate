@@ -30,6 +30,11 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
 # on success in the real CLI - verified in herdr-verification-p2.md).
+# Two optional siblings script a FAILING call: <n>.exit sets a non-zero exit
+# status, and <n>.err is written to the fake's stderr before it exits. The
+# stderr file is what lets a test assert that the adapter's diagnostics quote
+# herdr's own error text rather than guessing a cause; both are absent by
+# default, so every pre-existing response script behaves exactly as before.
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -51,6 +56,7 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.err" ] && cat "$RESP/$n.err" >&2
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -220,6 +226,109 @@ test_version_check_refuses_missing_herdr() {
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
   assert_contains "$out" "not installed" "version_check did not report herdr as missing"
   pass "fm_backend_herdr_version_check: refuses loudly when herdr is not installed"
+}
+
+# --- failed-probe diagnosis ---------------------------------------------------
+# The adapter used to answer EVERY failed `herdr status --json` with "is herdr
+# installed correctly?", discarding herdr's own stderr on the way. Observed
+# 2026-08-05 (macOS, herdr 0.7.5): run inside a command sandbox the call fails
+# with an OS PermissionDenied because ~/.config/herdr/herdr.sock is unreachable,
+# while the identical call outside the sandbox succeeds - so the message sent
+# the operator to reinstall a herdr that was working perfectly. These assert the
+# diagnosis, never the pass/fail decision, which is covered above and unchanged.
+
+# The exact stderr the real herdr 0.7.5 client emitted in the observed case.
+HERDR_SOCKET_PERMISSION_STDERR='Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }'
+
+test_version_check_names_unreachable_socket_not_a_bad_install() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/version-socket-denied"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$HERDR_SOCKET_PERMISSION_STDERR" > "$resp/1.err"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should still refuse when 'herdr status --json' fails"
+  assert_contains "$out" "PermissionDenied" "the diagnostic dropped herdr's own error text"
+  assert_contains "$out" "Operation not permitted" "the diagnostic dropped herdr's own error text"
+  assert_contains "$out" "control socket" "the diagnostic did not name the unreachable socket"
+  assert_not_contains "$out" "installed correctly" "the diagnostic still questions the install"
+  assert_contains "$out" "not a broken herdr install" "the diagnostic did not rule the install out"
+  pass "fm_backend_herdr_version_check: an unreachable socket is reported as unreachable, not as a bad install"
+}
+
+test_version_check_quotes_an_unrecognized_failure_without_guessing() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/version-other-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'Error: failed to parse config at line 4\n' > "$resp/1.err"
+  printf '3\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should refuse when 'herdr status --json' fails"
+  assert_contains "$out" "failed to parse config at line 4" "the diagnostic dropped herdr's own error text"
+  assert_contains "$out" "exit 3" "the diagnostic did not report herdr's exit status"
+  assert_not_contains "$out" "installed correctly" "the diagnostic guessed a broken install"
+  assert_not_contains "$out" "control socket" "the diagnostic guessed an unreachable socket it has no evidence for"
+  pass "fm_backend_herdr_version_check: an unrecognized failure is quoted, not attributed to a guessed cause"
+}
+
+test_version_check_calls_a_silent_failure_undetermined() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/version-silent-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '4\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should refuse when 'herdr status --json' fails"
+  assert_contains "$out" "could not be determined" "a failure with no stderr should say the cause is undetermined"
+  assert_not_contains "$out" "installed correctly" "a failure with no stderr should not guess a broken install"
+  pass "fm_backend_herdr_version_check: a failure with no error output is reported as undetermined, not guessed"
+}
+
+test_stderr_classifier_matches_only_observed_signatures() {
+  local out
+  out=$( bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_stderr_is_unreachable_socket "$1" && printf "denied-yes " || printf "denied-no "
+    fm_backend_herdr_stderr_is_unreachable_socket "Error: failed to parse config" && printf "other-yes" || printf "other-no"
+  ' "$ROOT" "$HERDR_SOCKET_PERMISSION_STDERR" )
+  [ "$out" = "denied-yes other-no" ] \
+    || fail "the unreachable-socket classifier should match the observed PermissionDenied signature and nothing else, got '$out'"
+  pass "fm_backend_herdr_stderr_is_unreachable_socket: matches the observed signature, not unrelated herdr errors"
+}
+
+test_bare_selector_reports_an_unreachable_session_listing() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/bare-selector-denied"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$HERDR_SOCKET_PERMISSION_STDERR" > "$resp/1.err"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_resolve_bare_selector fm-demo' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolve_bare_selector should fail when the session listing fails"
+  assert_contains "$out" "PermissionDenied" "the diagnostic dropped herdr's own error text"
+  assert_contains "$out" "could not determine whether" "an unreachable listing should not answer the existence question"
+  assert_not_contains "$out" "no herdr tab named" "an unreachable listing must not report a confident 'no such tab'"
+  pass "fm_backend_herdr_resolve_bare_selector: an unreachable session listing is reported as such, not as a missing tab"
+}
+
+test_bare_selector_still_reports_a_genuinely_absent_tab() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/bare-selector-absent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"sessions":[{"name":"default","running":true}]}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_resolve_bare_selector fm-demo' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolve_bare_selector should fail when the tab genuinely does not exist"
+  assert_contains "$out" "no herdr tab named fm-demo" "a reachable listing with no match should still report the tab as absent"
+  pass "fm_backend_herdr_resolve_bare_selector: a reachable listing still reports a genuinely absent tab"
 }
 
 # --- workspace_label: per-firstmate-HOME resolution (P3, herdr-sm-spaces-k4) -
@@ -2822,6 +2931,12 @@ test_wait_transition_clean_timeout_returns_1() {
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
+test_version_check_names_unreachable_socket_not_a_bad_install
+test_version_check_quotes_an_unrecognized_failure_without_guessing
+test_version_check_calls_a_silent_failure_undetermined
+test_stderr_classifier_matches_only_observed_signatures
+test_bare_selector_reports_an_unreachable_session_listing
+test_bare_selector_still_reports_a_genuinely_absent_tab
 test_workspace_label_primary_home_no_marker
 test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
