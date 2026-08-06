@@ -66,6 +66,65 @@ Auto-detecting tmux stays silent, since that reproduces today's unconfigured def
 Only when none of that resolves anything does firstmate fall back to the hard default, tmux.
 Absent `backend=` in a task's meta always means `tmux`; a herdr task carries an explicit `backend=herdr` line, while other experimental adapters carry their own backend values.
 A herdr spawn refuses loudly if `herdr` or `jq` is missing, or if the installed herdr's protocol is older than the verified minimum (`fm_backend_herdr_version_check`).
+What that refusal SAYS when the probe itself fails is owned by "Failed-probe diagnosis" below.
+
+## Failed-probe diagnosis: an unreachable socket is not a bad install
+
+When a herdr call fails, the adapter keeps herdr's own stderr and quotes it.
+It names a cause only for the one signature that is genuinely distinguishable, an unreachable control socket, and otherwise reports herdr's error text with no cause attached.
+A failure that produces no stderr at all is reported as undetermined rather than guessed.
+`fm_backend_herdr_run_capture`, `fm_backend_herdr_stderr_is_unreachable_socket`, and `fm_backend_herdr_report_cli_failure` in `bin/backends/herdr.sh` own this; `fm_backend_herdr_version_check`, `fm_backend_herdr_server_ensure`, and `fm_backend_herdr_resolve_bare_selector` route their blocking diagnostics through it.
+This changes diagnosis only and never a pass/fail decision: a too-old protocol and a missing binary still refuse exactly as before.
+
+`fm_backend_herdr_version_check` previously answered every failed probe with `is herdr installed correctly?` after discarding herdr's stderr with `2>/dev/null`.
+That guess was wrong in the observed case and self-contradicting in general, because `fm_backend_herdr_tool_check` has already found the binary on `PATH` one line earlier.
+
+### Evidence (2026-08-05, herdr 0.7.5, protocol 17, macOS aarch64)
+
+The same probe fails inside this machine's command sandbox and succeeds outside it, because `~/.config/herdr/herdr.sock` is not reachable from a sandboxed command.
+
+```
+# sandboxed
+$ herdr status --json; echo "---exit=$?"
+Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+---exit=1
+
+# unsandboxed, same machine, same moment
+$ herdr status --json; echo "---exit=$?"
+{"client":{"version":"0.7.5","channel":"stable","protocol":17,"binary":"/opt/homebrew/bin/herdr","session":null},"server":{"status":"running","running":true,"version":"0.7.5","protocol":17,"capabilities":{"live_handoff":true,"detached_server_daemon":true},"compatible":true,"socket":"/Users/lp1/.config/herdr/herdr.sock","session":null,"restart_needed":false},"update":{"restart_needed":false}}
+---exit=0
+```
+
+Before the change, the sandboxed gate blamed the install:
+
+```
+$ bash -c '. bin/backends/herdr.sh; fm_backend_herdr_version_check; echo exit=$?'
+error: 'herdr status --json' failed; is herdr installed correctly?
+exit=1
+```
+
+After the change, the same sandboxed run names the real obstacle and rules the install out:
+
+```
+$ bash -c '. bin/backends/herdr.sh; fm_backend_herdr_version_check; echo exit=$?'
+error: 'herdr status --json' could not reach herdr's control socket (exit 1): Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+error: herdr is installed at /opt/homebrew/bin/herdr; this is a permission problem reaching that socket, not a broken herdr install
+exit=1
+```
+
+The unsandboxed run of that same command still passes the gate (`exit=0`), confirming the decision is unchanged.
+
+One implementation detail is load-bearing on macOS: `fm_backend_herdr_run_capture` spells its `mktemp` template against `TMPDIR` explicitly.
+macOS `mktemp` with no template ignores `TMPDIR` and uses the confstr `_CS_DARWIN_USER_TEMP_DIR` path, which a restricted environment blocks, so the bare form fails in exactly the case this diagnosis exists to explain.
+Observed on the same machine and date, with `TMPDIR=/tmp/claude-501` set and writable:
+
+```
+$ t=$(mktemp) && echo "ok: $t" || echo "mktemp FAILED rc=$?"
+mktemp: mkstemp failed on /var/folders/j9/fg4mbzh15pbgjk89h91xvyc40000gn/T/tmp.z87MRvKFxt: Operation not permitted
+mktemp FAILED rc=1
+```
+
+Regression coverage is in `tests/fm-backend-herdr.test.sh` ("failed-probe diagnosis"), using the fake `herdr` stub's `<n>.err` response file to script herdr's stderr.
 
 ## Worktree provider stays treehouse
 

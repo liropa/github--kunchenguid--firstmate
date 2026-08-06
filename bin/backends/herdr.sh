@@ -158,6 +158,85 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   HERDR_SESSION="$session" herdr "$@" --session "$session"
 }
 
+# fm_backend_herdr_run_capture: run "$@", leaving its stdout in
+# FM_BACKEND_HERDR_OUT and its stderr in FM_BACKEND_HERDR_ERR, and returning the
+# command's own exit status. Both streams are kept deliberately: a failed herdr
+# call's stderr is the ONLY text that says what actually went wrong, so any
+# diagnostic built on top of it can quote the real cause instead of guessing
+# one. Use this wherever a herdr failure produces an operator-facing message
+# that blocks a launch, recovery, or supervision action; a plain
+# `2>/dev/null` stays correct for internal boolean probes whose caller handles
+# the false without printing anything.
+# A temp file is the readable way to split the two streams. Its template is
+# spelled out against TMPDIR on purpose: macOS `mktemp` with no template ignores
+# TMPDIR and uses the confstr _CS_DARWIN_USER_TEMP_DIR path instead, which is
+# exactly what a restricted environment blocks - so the bare form fails in the
+# very case this helper exists to explain. If no temp file can be made at all,
+# the command still runs with its stderr INHERITED, so herdr's own text still
+# reaches the operator's terminal; only firstmate's ability to quote it is lost,
+# and FM_BACKEND_HERDR_ERR says so rather than claiming there was no output.
+FM_BACKEND_HERDR_ERR_UNCAPTURED='herdr wrote its error output directly to this terminal; firstmate could not capture it (no writable temp file)'
+fm_backend_herdr_run_capture() {  # <command...>
+  local tmp rc
+  FM_BACKEND_HERDR_OUT=
+  FM_BACKEND_HERDR_ERR=
+  if ! tmp=$(mktemp "${TMPDIR:-/tmp}/fm-herdr-stderr.XXXXXX" 2>/dev/null); then
+    FM_BACKEND_HERDR_OUT=$("$@")
+    rc=$?
+    [ "$rc" -eq 0 ] || FM_BACKEND_HERDR_ERR=$FM_BACKEND_HERDR_ERR_UNCAPTURED
+    return "$rc"
+  fi
+  FM_BACKEND_HERDR_OUT=$("$@" 2>"$tmp")
+  rc=$?
+  FM_BACKEND_HERDR_ERR=$(cat "$tmp" 2>/dev/null)
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# fm_backend_herdr_stderr_is_unreachable_socket: is <stderr-text> the one
+# failure signature that is genuinely DISTINGUISHABLE - herdr's control socket
+# could not be opened - as opposed to an error herdr raised about its own state?
+# Verified on macOS 2026-08-05 against herdr 0.7.5 / protocol 17: the same
+# `herdr status --json` fails inside this session's command sandbox with
+#   Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+# because ~/.config/herdr/herdr.sock is not reachable from a sandboxed command,
+# and succeeds outside it. Only signatures actually observed are matched here.
+# Everything else is left to the caller's "cause undetermined" branch on
+# purpose: naming a cause the text does not support is the defect this replaced.
+fm_backend_herdr_stderr_is_unreachable_socket() {  # <stderr-text>
+  case "$1" in
+    *PermissionDenied*|*'Operation not permitted'*|*'Permission denied'*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_herdr_report_cli_failure: emit the operator-facing diagnostic for a
+# failed herdr call, quoting herdr's own stderr.
+# It names a cause ONLY for the unreachable-socket signature above, and reports
+# anything else as herdr's own error text with no cause attached - or, with no
+# stderr at all, says outright that the cause could not be determined.
+# The message this replaced asked "is herdr installed correctly?" for every
+# failure, which sent an operator to reinstall a perfectly good herdr when the
+# real obstacle was socket permissions; in fm_backend_herdr_version_check that
+# guess was also self-contradicting, since fm_backend_herdr_tool_check has
+# already found the binary on PATH one line earlier.
+fm_backend_herdr_report_cli_failure() {  # <what> <exit-status> <stderr-text>
+  local what=$1 rc=$2 err=$3 binary
+  err=${err//$'\n'/ }
+  binary=$(command -v herdr 2>/dev/null)
+  if fm_backend_herdr_stderr_is_unreachable_socket "$err"; then
+    echo "error: $what could not reach herdr's control socket (exit $rc): $err" >&2
+    echo "error: herdr is installed at ${binary:-an unknown path}; this is a permission problem reaching that socket, not a broken herdr install" >&2
+    return 0
+  fi
+  if [ -n "$err" ]; then
+    echo "error: $what failed (exit $rc): $err" >&2
+  else
+    echo "error: $what failed (exit $rc) and printed no error output; the cause could not be determined" >&2
+  fi
+  return 0
+}
+
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
 fm_backend_herdr_tool_check() {
   command -v herdr >/dev/null 2>&1 || { echo "error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev) (dual-licensed AGPL-3.0-or-later/commercial)" >&2; return 1; }
@@ -170,8 +249,14 @@ fm_backend_herdr_tool_check() {
 # .client.protocol; client info is session-independent, unlike .server).
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
-  local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  local status protocol version rc
+  fm_backend_herdr_run_capture herdr status --json
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fm_backend_herdr_report_cli_failure "'herdr status --json'" "$rc" "$FM_BACKEND_HERDR_ERR"
+    return 1
+  fi
+  status=$FM_BACKEND_HERDR_OUT
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -679,16 +764,29 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i rc=0
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
   ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
-    running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-    [ "$running" = "true" ] && return 0
+    fm_backend_herdr_run_capture fm_backend_herdr_cli "$session" status --json
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      running=$(printf '%s' "$FM_BACKEND_HERDR_OUT" | jq -r '.server.running // false' 2>/dev/null)
+      [ "$running" = "true" ] && return 0
+    fi
     sleep 0.5
   done
-  echo "error: herdr server for session '$session' did not report running within 10s" >&2
+  # Two genuinely different failures reach here, and only one of them is a
+  # slow-starting server. If the status call itself never succeeded, herdr's own
+  # stderr is the explanation and a "did not report running in time" message
+  # would blame the wrong thing - the same misattribution this file used to make
+  # in fm_backend_herdr_version_check.
+  if [ "$rc" -ne 0 ]; then
+    fm_backend_herdr_report_cli_failure "'herdr status --json' for session '$session'" "$rc" "$FM_BACKEND_HERDR_ERR"
+    return 1
+  fi
+  echo "error: herdr server for session '$session' answered for 10s without ever reporting running" >&2
   return 1
 }
 
@@ -1890,8 +1988,19 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 # server the way a single tmux server is. Rare path in practice (herdr tasks
 # normally carry meta), best-effort.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
-  local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  local name=$1 sessions session tabs tab_id wsid pane_id rc
+  fm_backend_herdr_run_capture herdr session list --json
+  rc=$?
+  # A session list that never arrived cannot support the "no such tab" verdict
+  # below: with no sessions to search, the search finds nothing for a reason
+  # that has nothing to do with <name>. Report the unreachable listing instead
+  # of a confident negative about a tab this never got to look for.
+  if [ "$rc" -ne 0 ]; then
+    fm_backend_herdr_report_cli_failure "'herdr session list --json'" "$rc" "$FM_BACKEND_HERDR_ERR"
+    echo "error: could not determine whether a herdr tab named $name exists" >&2
+    return 1
+  fi
+  sessions=$(printf '%s' "$FM_BACKEND_HERDR_OUT" | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
