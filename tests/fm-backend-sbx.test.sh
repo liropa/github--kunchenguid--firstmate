@@ -1401,7 +1401,7 @@ test_keepalive_script_capped_verdicts() {
 test_keepalive_script_pins_busy_worker_across_turn_end() {
   # THE issue #12 regression: the v1 keeper released on the secondmate's own
   # turn-end, so an in-guest crewmate mid-implementation lost its only pin and
-  # the VM died 45-100 s later. A busy worker pane must hold the pin across
+  # the VM died about 35.4 s later. A busy worker pane must hold the pin across
   # the secondmate's turn boundary, and the pin must still release - bounded -
   # once the guest goes genuinely idle.
   local w fb script te pid i
