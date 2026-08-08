@@ -349,6 +349,122 @@ EOF
   pass "session-start digest renders data/captain-shared.md with the shared read-only label"
 }
 
+# --- sbx guest read-through -------------------------------------------------
+#
+# An sbx secondmate's guest home does NOT receive a second copy: the host home
+# gets the copy above, and the guest reaches it through a symlink onto clone
+# mode's RO source mount (docs/sbx-backend.md "Guest-home provisioning"). The
+# host home and the guest clone sit at the SAME absolute path on different
+# disks, which is what FM_FAKE_SBX_GUEST_HOME models, and FM_SBX_SOURCE_MOUNT
+# points the fixture at a directory standing in for the mount - so a mount that
+# does not carry what the host home has is expressible, which is the whole
+# point: that shape was measured live on 2026-07-23 and is why the read path is
+# an inheritance channel rather than a delivery one.
+
+# shellcheck source=tests/sbx-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
+
+# new_sbx_readthrough_world <name> <mount-has-file> <host-has-file>: a fixture
+# host home, guest clone, and stand-in source mount. Echoes "host|guest|mount".
+new_sbx_readthrough_world() {  # <name> <mount-has-file> <host-has-file>
+  local name=$1 mount_has=$2 host_has=$3 w host guest mount
+  w="$TMP_ROOT/$name"
+  host="$w/sm"; guest="$w/guest-clone"; mount="$w/source-mount"
+  mkdir -p "$host/data" "$host/config" "$guest" "$mount/data" "$mount/config"
+  [ "$host_has" = yes ] && write_shared "$host/data/captain-shared.md" "shared from primary"
+  [ "$mount_has" = yes ] && write_shared "$mount/data/captain-shared.md" "shared from primary"
+  printf '%s|%s|%s\n' "$host" "$guest" "$mount"
+}
+
+# run_provision <world-dir> <host> <guest> <mount>: run the real provisioning
+# pass against the fixture. Echoes stderr; returns the pass's own rc.
+run_provision() {  # <world-dir> <host> <guest> <mount>
+  local w=$1 host=$2 guest=$3 mount=$4 fakebin
+  fakebin=$(make_fake_sbx "$w")
+  # Only the pass's stderr is the subject here; its stdout is noise.
+  # shellcheck disable=SC2016  # single quotes deliberate: $0 expands in the inner bash
+  { PATH="$fakebin:$BASE_PATH" \
+    FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_GUEST_HOME="$guest" \
+    FM_FAKE_SBX_GUEST_USER_HOME="$w/guest-user-home" \
+    FM_SBX_SOURCE_MOUNT="$mount" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source sbx; fm_backend_sbx_provision_guest_home fm-x "$1" x "$2"' \
+    "$ROOT" "$host" "$w/signals/x" >/dev/null; } 2>&1
+}
+
+test_sbx_guest_link_is_the_absence_convergence_when_primary_never_published() {
+  local rec host guest mount err rc
+  rec=$(new_sbx_readthrough_world sbx-absent no no)
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-absent" "$host" "$guest" "$mount"); rc=$?
+
+  [ "$rc" = 0 ] || fail "provisioning should succeed with no shared file anywhere, got rc $rc"
+  [ -L "$guest/data/captain-shared.md" ] \
+    || fail "the guest read path must be a symlink even with nothing to read"
+  [ "$(readlink "$guest/data/captain-shared.md")" = "$mount/data/captain-shared.md" ] \
+    || fail "the guest link must point at the source mount"
+  [ ! -f "$guest/data/captain-shared.md" ] \
+    || fail "a dangling link must read as absent, the way the session digest's [ -f ] test does"
+  [ -z "$err" ] || fail "a designed absence must stay silent, got: $err"
+  pass "sbx guest: an unpublished shared file leaves a dangling link that reads ABSENT, silently"
+}
+
+test_sbx_guest_reads_a_published_shared_file_through_the_mount() {
+  local rec host guest mount err rc
+  rec=$(new_sbx_readthrough_world sbx-published yes yes)
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-published" "$host" "$guest" "$mount"); rc=$?
+
+  [ "$rc" = 0 ] || fail "provisioning should succeed when the read path resolves, got rc $rc"
+  [ -f "$guest/data/captain-shared.md" ] \
+    || fail "a mount carrying the file must make the guest link resolve"
+  cmp -s "$mount/data/captain-shared.md" "$guest/data/captain-shared.md" \
+    || fail "the guest must read the mount's bytes, not a copy of its own"
+  [ -z "$err" ] || fail "a working read path must stay silent, got: $err"
+  pass "sbx guest: a published shared file is read through the link, with no second copy"
+}
+
+test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry() {
+  local rec host guest mount err rc
+  # The measured 2026-07-23 shape: the host home has the file, the mount does
+  # not carry it. Re-asserting the link cannot fix this, so the pass says so.
+  rec=$(new_sbx_readthrough_world sbx-stale no yes)
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-stale" "$host" "$guest" "$mount"); rc=$?
+
+  [ "$rc" = 0 ] || fail "an unreadable shared file must warn, never fail the spawn or the steer"
+  [ -L "$guest/data/captain-shared.md" ] || fail "the link must still be asserted"
+  assert_contains "$err" "cannot read data/captain-shared.md through its guest link" \
+    "the warning must name the file the guest cannot read"
+  assert_contains "$err" "$mount" "the warning must name the mount that is not carrying it"
+  pass "sbx guest: a published shared file the mount does not carry is reported, not silently absent"
+}
+
+test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared() {
+  local rec host guest mount err rc
+  # The opposite direction, same cause: the primary cleared the file and the
+  # host home mirrored that absence, but the mount still carries the old bytes.
+  rec=$(new_sbx_readthrough_world sbx-retracted yes no)
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-retracted" "$host" "$guest" "$mount"); rc=$?
+
+  [ "$rc" = 0 ] || fail "a retracted-but-readable shared file must warn, never fail"
+  assert_contains "$err" "still reads data/captain-shared.md through its guest link" \
+    "the warning must say the guest is acting on retracted preferences"
+  pass "sbx guest: still reading a shared file the primary cleared is reported"
+}
+
 test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
@@ -357,5 +473,9 @@ test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
 test_session_start_digest_labels_shared_file_and_read_once_rule
+test_sbx_guest_link_is_the_absence_convergence_when_primary_never_published
+test_sbx_guest_reads_a_published_shared_file_through_the_mount
+test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry
+test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared
 
 echo "# all fm-shared-captain-inheritance tests passed"

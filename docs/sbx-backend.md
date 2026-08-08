@@ -164,6 +164,49 @@ Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idem
 
 Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
 
+### What the shared captain file's read-through does and does not deliver (2026-08-08)
+
+A guest's `data/captain-shared.md` is a symlink onto the mount from the moment the guest is provisioned, created before any target exists.
+That dangling link is **not** a defect - it is how absence converges, and the three cases below settle why.
+
+| primary `data/captain-shared.md` | secondmate **host** home | guest reads | verdict |
+| --- | --- | --- | --- |
+| never published | nothing written (`unchanged`) | `ABSENT` through the dangling link | correct by design |
+| published | copy written at mode 444 | the mount's bytes, **if the mount carries them** | correct only when the mount is fresh |
+| published, then cleared | local copy quarantined, then removed | `ABSENT`, **once the mount drops it** | correct only when the mount is fresh |
+
+The host half is unconditional: `propagate_shared_captain_preferences` (`bin/fm-config-inherit-lib.sh`) writes, quarantines, and removes at every convergence point, and mirrors a cleared primary as absence.
+The guest half is not, and the difference is the mount.
+`[ -f ]` follows a symlink, so `bin/fm-session-start.sh`'s `print_file_or_absent` renders a dangling link as `ABSENT` - byte-for-byte the inherit lib's absence mirroring, which is what makes case 1 a converged absence rather than a broken link.
+
+**The trigger that re-asserts the guest link is `fm_backend_sbx_provision_guest_home`**, which runs at spawn (after `sbx create`) and again at every resurrection, before the agent relaunches.
+It re-asserts the **link**, never the mount's contents, so it cannot repair cases 2 and 3: a host write the mount does not carry stays invisible however many times the link is rewritten.
+No firstmate-owned trigger refreshes the mount, and this repo records no measurement establishing that any VM lifecycle event does.
+The 2026-07-23 measurement in "Backlog handoff" below is the same `data/` directory: a freshly filed item was **absent from the whole mount**, and an existing file's mtime was hours behind host reality.
+
+Because that cannot be fixed from firstmate's side without turning the read path into a copy pipeline, provisioning **reports** it instead.
+The guest compares its own read against what the host home has and exits 9 when the host published a file it cannot read, or 8 when it still reads one the primary cleared; the host turns each into one stderr line naming the file and the mount.
+Both are warnings, never refusals - a secondmate stranded at launch is worse than one launching without shared captain preferences - and both are silent in the two correct cases, including the designed absence.
+
+**Verified** (2026-08-08, macOS 26.5.2 arm64, bash 3.2.57) against the fixtures in `tests/fm-shared-captain-inheritance.test.sh`, which drive the real provisioning pass with `FM_FAKE_SBX_GUEST_HOME` splitting the guest clone from the host home and `FM_SBX_SOURCE_MOUNT` pointed at a stand-in mount, so a mount that does not carry what the host home has is expressible:
+
+```
+$ bash tests/fm-shared-captain-inheritance.test.sh
+...
+ok - sbx guest: an unpublished shared file leaves a dangling link that reads ABSENT, silently
+ok - sbx guest: a published shared file is read through the link, with no second copy
+ok - sbx guest: a published shared file the mount does not carry is reported, not silently absent
+ok - sbx guest: still reading a shared file the primary cleared is reported
+# all fm-shared-captain-inheritance tests passed
+```
+
+Each of the two reporting cases was confirmed failing against the pre-change adapter before being accepted as passing (`missing: 'cannot read data/captain-shared.md through its guest link'` and `missing: 'still reads data/captain-shared.md through its guest link'`), while the two designed-behaviour cases pass both before and after - they lock in existing behaviour rather than the new check.
+
+**Not proven, and what would prove it**: no live sandbox was created or exec'd for this work, so nothing here measures what a real guest sees after the primary publishes a shared captain file.
+Two things remain open - whether the mount ever picks up a host write made after guest creation, and if so which lifecycle event does it.
+Proving them needs a disposable sbx secondmate (never the captain's live one): publish `data/captain-shared.md` in the primary, run the bootstrap sweep so the host home has it, then read `sbx exec fm-<id> -- cat <home>/data/captain-shared.md` and `sbx exec fm-<id> -- ls -la $FM_SBX_SOURCE_MOUNT/data/` before a stop, after `sbx stop` plus a steer-driven resurrection, and after a fresh `sbx create`.
+Until that runs, treat the warning above as the only thing standing between a published shared file and a guest that silently never sees it.
+
 ## Guest shell-profile env (`CLAUDE_CODE_OAUTH_TOKEN`)
 
 sbx plants `CLAUDE_CODE_OAUTH_TOKEN=<placeholder>` into the guest env once, at sandbox creation, and the claude agent does not pass it down to the processes it spawns.
@@ -898,6 +941,7 @@ Verified only against the fixtures in `tests/fm-backlog-handoff-sbx.test.sh`, `t
 - **A clean release that lands on live work is still not alarmed** - and the reasoning, including why the fourth arm is the remedy rather than a new alarm, is recorded under "Why a clean release still raises no alarm" above. The short form: any alarm would have to be derived from arms that read idle by definition at the deciding poll, and every candidate proxy also fires after ordinary completed work.
 - **A mid-task stop with no keeper alive is deliberately not alarmed** - the mid-task-stop marker is written by the keep-alive wrapper, so it needs a keeper from a prior turn-submitting delivery to still be running when the VM dies. Guest work killed after every keeper released or capped (or with keep-alives disabled, or after the host process tree that armed them went away) produces no marker. This is scoped out rather than solved with a watcher-side VM state poll, because **`stopped` is the healthy resting state of an idle secondmate**: state alone cannot separate "idle, correctly stopped" from "stopped on top of live child work", and the keeper is the only host-side observer of in-guest child work there is. Alarming on stopped-plus-anything would reintroduce exactly the false-positive class this beacon was fixed for. The unacknowledged-delivery arm still catches the sub-case where the stop killed the delivered turn itself (nothing comes back), and the pending-reply guard still notices a marked request that was never reported; a stop that kills only child work *after* the secondmate's own turn ended stays uncovered.
 - **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
+- **Whether the RO source mount ever picks up a post-creation host write is unmeasured** - so a shared captain file the primary publishes after a guest exists may never reach that guest. Provisioning now reports the mismatch instead of leaving it silent, and "What the shared captain file's read-through does and does not deliver" above records the three cases, the reporting contract, and the live run that would close this.
 - **Projects-bearing homes stay refused at spawn** until an in-guest re-clone story exists (the remaining deferral from the guest-home provisioning v2 scope; the other half - tracked files frozen at spawn HEAD - is closed by "Tracked-file sync" above, after the 2026-07-24 staleness evidence showed it biting).
 - **The sandboxed watcher cannot steer a secondmate at all** - it has no route to the sbx daemon ("Caller reachability" above), so no automatic recovery, nudge, or repost it wants to send can leave the host, whatever the guest's power state. The pending-reply guard now defers those sends unspent and escalates them as owed rather than reporting a delivery it never made, but the delivery itself still has to come from a context that can reach the daemon. Closing this needs a sanctioned route for nested `sbx` calls from watcher-context scripts, which lives in the agent-dotfiles sandbox policy, not here; `excludedCommands` cannot supply it because it exempts only top-level commands.
 - **Host OAuth rotation strands running claude guests** - the guest env carries a placeholder substituted host-side per request, so rotating the host token (e.g. a host-side `/login`) plus a stale custom secret 401s in-guest claude; refreshing the secret (`sbx secret set-custom ...`) hot-applies to running sandboxes, **but an already-401'd claude TUI caches its logged-out state and never recovers in place** - stop the VM and let the next steer's resurrection relaunch the process (verified live: 3 stranded guests all recovered on `sbx stop` + steer; codex guests were unaffected). The beacon's unacknowledged-delivery arm (above) now names the pattern for the captain - the arm that does not depend on turn-ends, because this variant produces none; the recovery itself is still manual.
