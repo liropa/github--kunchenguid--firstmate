@@ -35,9 +35,22 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
   Extra workspace mounts (the signal directory) are plain bind mounts at the same absolute path, read-write, with sub-millisecond guest-to-host visibility for both appends and mtime-only touches (Gate 0, agent-dotfiles design doc §10).
 - Clone mode **refuses linked git worktrees** outright (`ERROR: --clone is not supported when run from a Git worktree (...); run from the main repository instead`, verified 2026-07-19).
   Secondmate homes for this backend must be **plain clones** - `fm-home-seed.sh <id> <path>`'s git-clone path, never a treehouse lease; `fm_backend_sbx_create_task` refuses a `.git`-file home before creating anything.
-- **Auto-stop is HOST-CONNECTION-based, not guest-workload-based** (measured 2026-07-19): a VM with no live `sbx exec`/attach stops within roughly 45-100 s of the last connection closing, **even with a CPU-busy guest process**; one held `sbx exec sleep 130` kept the VM running for its full duration and the VM stopped ~45 s after it exited.
+- **Auto-stop is HOST-CONNECTION-based, not guest-workload-based** (measured 2026-07-19): a VM with no live `sbx exec`/attach stops after the last connection closes, **even with a CPU-busy guest process**; one held `sbx exec sleep 130` kept the VM running for its full duration and the VM stopped shortly after it exited.
   A detached in-guest tmux agent therefore gets **no auto-stop protection at all** - unlike agent-as-exec rigs, where the run itself is the connection.
-  This is why every turn-submitting delivery starts a keep-alive (below); the exact grace is Docker's heuristic and may change under us.
+  This is why every turn-submitting delivery starts a keep-alive (below).
+- **The auto-stop grace is 30.000 s of configured deferral plus ~5.4 s of stop execution: ~35.4 s in total** (measured 2026-08-07, 6 runs of 6 across two days).
+  This **corrects** the "roughly 45-100 s" figure this document carried from 2026-07-19, which was inferred from observed VM deaths rather than read from the mechanism.
+  The value is now readable directly, and named by the actor itself, in `~/Library/Application Support/com.docker.sandboxes/sandboxes/sandboxd/daemon.log`:
+
+  ```json
+  {"time":"2026-08-07T01:22:01.945408-04:00","msg":"session disconnected, deferring auto-stop","runtime":"fm-agent-dotfiles","delay":30000000000,"gen":81}
+  {"time":"2026-08-07T01:22:31.946009-04:00","msg":"auto-stop grace period expired, stopping runtime","runtime":"fm-agent-dotfiles"}
+  {"time":"2026-08-07T01:22:37.331276-04:00","msg":"auto-stopped runtime after last session disconnected","runtime":"fm-agent-dotfiles"}
+  ```
+
+  `delay: 30000000000` ns is an **explicit configured deferral**, not a heuristic band, so the old warning that "the grace may change under us" is now checkable rather than a standing unknown: read this log rather than re-inferring it.
+  `FM_SBX_MIDTASK_STOP_SETTLE` (120 s) still covers it comfortably.
+  Read against a running sandbox by the 2026-08-07 investigation (`data/sbx-test-step-kill-investigation/report.md` §2.2, §3.1); the four fatal releases measured 34.8-35.8 s from keeper release to the guest's last write, and 35.4-36.3 s to the completed stop.
 - **codex 0.142.5 gates a fresh home's first interactive launch behind TUI dialogs** that no one is in the pane to answer: a directory-trust dialog (cleared by seeding `[projects."<home>"] trust_level = "trusted"` into the guest's `~/.codex/config.toml` - the exact shape codex itself persists on accept) and a hooks-review gate for the home's committed `.codex/hooks.json` (cleared with `--dangerously-bypass-hook-trust` on the launch/resume commands; its `trusted_hash` scheme is codex-internal - not a plain sha256 of the hook command or its JSON object, probed empirically - so it cannot be pre-seeded).
   `--dangerously-bypass-approvals-and-sandbox` covers **neither** gate.
 - **A freshly resumed codex TUI eats first keystrokes nondeterministically**: stable-looking notices swallow typed text without a trace, while the identical keys land fine seconds later (observed twice).
@@ -368,13 +381,14 @@ Retries exhausted stays the conservative `unknown`.
 Every successful turn-submitting delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
 Literal typing and standalone special keys, including Enter, do not prove that a turn started, so they neither arm the delivery alarm nor start a keep-alive.
 Verified text submissions and spawn's explicit literal-plus-composed-submit path do both.
-The loop releases only when the id's `turn-ended` mount file has advanced past its delivery baseline (the original v1 condition) AND the guest shows no work on any of three arms: no tmux pane whose visible tail matches the busy regex (`FM_BUSY_REGEX`, the same busy idiom the watcher and the submit verify use), no `*.status`/`*.turn-ended` file under the guest home's `state/` (an in-guest child worker's signals) touched within `FM_SBX_GUEST_ACTIVE_WINDOW` (default 120 s), and - only while a crewmate task is registered in the guest home's `state/` - no change in the captured pane set since the previous poll.
-Releasing on the secondmate's own turn-end alone re-opened the auto-stop trap one level down: an in-guest crewmate holds no host connection, so the VM died 45-100 s after the secondmate's turn ended and killed the mid-implementation worker (fork issue #12, proven three times 2026-07-23, the third taking an in-guest no-mistakes daemon and a live validation run with it).
+The loop releases only when the id's `turn-ended` mount file has advanced past its delivery baseline (the original v1 condition) AND the guest shows no work on any of four arms: no tmux pane whose visible tail matches the busy regex (`FM_BUSY_REGEX`, the same busy idiom the watcher and the submit verify use), no `*.status`/`*.turn-ended` file under the guest home's `state/` (an in-guest child worker's signals) touched within `FM_SBX_GUEST_ACTIVE_WINDOW` (default 120 s), no change in the captured pane set since the previous poll - only while a crewmate task is registered in the guest home's `state/` - and no file under the guest's own `$HOME/.no-mistakes/logs/` touched within the same activity window ("Gate-activity arm" below).
+Releasing on the secondmate's own turn-end alone re-opened the auto-stop trap one level down: an in-guest crewmate holds no host connection, so the VM died inside the auto-stop grace after the secondmate's turn ended and killed the mid-implementation worker (fork issue #12, proven three times 2026-07-23, the third taking an in-guest no-mistakes daemon and a live validation run with it).
 The busy-pane probe is the first activity signal because worker status appends are sparse by contract (a mid-implementation worker may write nothing for half an hour); the child-signal window is the second leg, bridging a worker's short between-turns gaps.
 Both of those read idle while a crewmate was genuinely running on 2026-07-31 and the VM died on top of it again, a recurrence of fork issue #12 after its fix had shipped.
 The keeper was armed and alive throughout, so this was the v2 release logic failing rather than the no-keeper residual below: the last turn-submitting delivery landed 02:13:27Z and the guest agent went on running until its own turn-end at 02:27:00Z, which an intervening auto-stop could not have allowed because it kills the guest process tree, so a pin was held across all 13.5 minutes - well inside the 7200 s cap - and no mid-task-stop marker was recorded, so the keeper exited through a clean `released-idle` rather than a death.
-The VM then stopped inside the measured 45-100 s grace and killed a worker that had already committed `23e4652` and was driving a no-mistakes run parked at its test step - a worker inside one long operation appends no signal for far longer than the activity window, and its busy tail is not continuously present the way the v2 contract assumed.
+The VM then stopped inside the measured grace and killed a worker that had already committed `23e4652` and was driving a no-mistakes run parked at its test step - a worker inside one long operation appends no signal for far longer than the activity window, and its busy tail is not continuously present the way the v2 contract assumed.
 The pane-change arm reads what the other two only proxy: a redrawing pane is direct evidence of guest work, and a static pane set is direct evidence of quiescence.
+All three of those, however, read a terminal screen or a status mtime, which is why a fourth arm was added on 2026-08-07 after four validation runs died to exactly that limit ("Gate-activity arm" below).
 The pin stays bounded: an idle-parked worker TUI (no busy tail, no recent signals, a static pane) is not work and never pins - recovering it after a stop is the secondmate's own stuck-worker playbook - so a finished worker awaiting cleanup and a genuinely idle guest both still auto-stop and §8's stopped-is-healthy premise is preserved.
 Gating the pane-change arm on a registered crewmate task keeps it off entirely for the ordinary idle secondmate, whose auto-stop behaviour is exactly what it was before.
 While work is visible, the loop touches the mount's `<id>.guest-active` breadcrumb (guest-written and untrusted, only ever stat'ed, never read), giving the host a pure-stat view of in-guest activity.
@@ -390,20 +404,72 @@ In-guest daemons do not come back on VM start.
 The one an in-guest workflow depends on - the no-mistakes daemon - is restored by resurrection itself (below); anything else remains the resumed agent's own job, and its brief owns that knowledge.
 Such a daemon inherits its credentials from the guest shell profiles ("Guest shell-profile env" above), not from the agent's own env.
 
+### Gate-activity arm (the fourth arm, 2026-08-07)
+
+The first three arms all read a **terminal screen** or a **status file mtime**.
+A no-mistakes run is neither: it is a gate-daemon child that writes to `$HOME/.no-mistakes/logs/<run>/` and never touches a pane.
+The fourth arm reads that instead - the newest mtime under the guest's own `$HOME/.no-mistakes/logs/`, counted as work inside the same `FM_SBX_GUEST_ACTIVE_WINDOW` every other arm uses.
+
+**The evidence, and it is not thin.**
+A 2026-08-07 investigation (`data/sbx-test-step-kill-investigation/report.md`) proved with matched host and guest timestamps, 6 runs of 6, that nothing killed the guest *process*: `sandboxd` powered the whole VM off ~35.4 s after the keeper released its pin, and the keeper released because all three arms read 0.
+The guest gate daemon was making **four IPC calls per second** through the exact window in which the keeper recorded `arm1=0 arm2=0 arm3=0` (report §5.1).
+Four validation runs were destroyed this way on 2026-08-05 and 2026-08-07.
+A hand-run `make test` survived the identical suite only because its output scrolls on a pane the keeper was watching - that difference, and nothing about the test step itself, is the whole fault.
+
+**This reverses a refusal this document recorded, and the reversal is the captain's** (decision `keeper-activity-blind-spot`, 2026-08-07, recorded at `data/sbx-test-step-kill-investigation/`).
+The refusal was carried in "Remaining gaps" as four standing objections against a "real in-guest process-activity probe".
+Those objections were referenced by **count** and never listed, which made them uncheckable; they are enumerated here, from the passages that stated them, and answered one by one.
+A captain's decision overrides a refusal - it does not waive the reasoning behind it.
+
+1. **"It costs an exec per poll."**
+   **Addressed by design, and the objection does not transfer.**
+   It was written against a *host-side* probe that would have to open its own `sbx exec` on every poll.
+   This arm is *guest-side*: it runs inside the keeper's already-open exec, beside the three arms that were always there, so the poll path gains no `sbx` call at all.
+   Its per-poll cost is one `ls` and one `stat`, and only on polls where the first three arms already read idle.
+2. **"A probe that polls the VM can resurrect the VM it is watching."**
+   **Addressed by design, for the same reason, and this one was the sharper risk.**
+   `sbx exec` auto-starts a stopped sandbox ("Empirical CLI facts" above), so an exec-based activity probe would keep alive exactly the guests it was meant to observe and quietly destroy `stopped`-is-healthy.
+   Adding no exec is what avoids it: the fixtures below execute the loop with **no `sbx` binary present at all**, which is a direct proof that the arm needs none.
+3. **"`stopped` is an idle secondmate's healthy resting state, so a work signal that never goes quiet destroys the auto-stop premise."**
+   **Addressed by design and confirmed by measurement.**
+   The arm reads a **work** artifact, not a **liveness** artifact: it asks whether a run is writing, not whether a daemon exists.
+   Measured 2026-08-07 on the host, no-mistakes v1.40.2: a **running but idle** gate daemon left everything under `~/.no-mistakes/logs/` untouched for **5.5 hours** (`daemon.log` mtime 14:34:22 EDT, read at 20:02 EDT, daemon up since 2026-07-21).
+   An idle guest's newest gate mtime therefore falls outside the 120 s window within one window of its last run, the arm reads 0, the pin releases, and the VM auto-stops exactly as before.
+   Both directions are pinned by fixtures.
+4. **"Still too thin a basis - revisit at two or three confirmed silent-pane releases."**
+   **Met on its own terms, before the captain's decision is even needed.**
+   The threshold this document set is now exceeded: the investigation counts nine releases of the recorded shape, four of them fatal, against a bar of "two or three".
+
+**What it does not cover, stated rather than assumed.**
+The arm sees a run only while something under `logs/` is being written, and that is **driver-dependent**.
+In the four fatal guest releases the driving worker polled `get_run` about four times a second, so `daemon.log` was hot and this arm would have held the pin.
+On the host, however, run `01KZEKQ9BHQ23KNRM84RY96KF6` (2026-08-07, same no-mistakes version) left **nothing** under `logs/` touched for **57 minutes** mid-run: `daemon.log` had a 3415 s gap (13:20:05 to 14:17:00) and a further 764 s gap, while `test.log` carried a single write at step completion (14:19:04) rather than streaming.
+A step whose driver is not polling and whose step log is written only at the end can therefore still go silent past the window.
+That residual is recorded under "Remaining gaps", and the verdict log's new `nmlog=` field makes the next occurrence decidable from one line instead of a forensic dig.
+
+Verified against fixtures in `tests/fm-backend-sbx.test.sh`: an off-screen gate run pins the VM where a registered worker's status is an hour stale and every pane is static (the 2026-08-07 shape); a run's nested step log counts, not only the top-level daemon log; and an idle-but-present gate root, or none at all, still releases and still leaves the guest-active breadcrumb untouched.
+Run against the pre-fix loop the first of those reproduces the incident exactly, `not ok - an off-screen gate run must pin the VM, not read as idle`, and removing the nested glob alone fails the second - each was confirmed failing before being accepted as passing.
+Not verified end to end against a real sandbox VM: the fleet's live sandbox holds a secondmate's private records and driving it was out of scope for this change.
+
 ### Keep-alive verdict log (`fm_backend_sbx_keepalive_log`)
 
 Every keeper exit appends one line to `state/.sbx-keepalive-<key>.log`, keyed the same way as the mid-task-stop marker:
 
 ```
-2026-08-03T18:22:31Z released-idle pin=743s arm1=0 arm2=0 arm3=0 crew=1 status=1785512635
+2026-08-03T18:22:31Z released-idle pin=743s arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635 nmlog=1786127662
 ```
 
-The verdict is one of `released-idle`, `capped-idle`, `capped-active`, or `no-verdict` (the exec died without printing one), `pin=` is how long the host held the connection, and the trailing fields are the guest loop's own report of the deciding poll: how each of the three activity arms read, whether a crewmate task was registered (`crew`), and - on `released-idle` with one registered - the newest `*.status` mtime under the guest home's `state/`.
+The verdict is one of `released-idle`, `capped-idle`, `capped-active`, or `no-verdict` (the exec died without printing one), `pin=` is how long the host held the connection, and the trailing fields are the guest loop's own report of the deciding poll: how each of the four activity arms read, whether a crewmate task was registered (`crew`), how many tmux panes the guest had (`panes`), and - on `released-idle` with a task registered - the newest `*.status` mtime under the guest home's `state/`, plus the newest gate-log mtime whenever one was read (`nmlog`).
+
+**`panes=` and `nmlog=` were added on 2026-08-07 to settle a question the previous shape could not.**
+That investigation could prove all three arms read 0 but not *why*, and listed four candidates it deliberately declined to choose between: the run was parented by a detached process with no pane; the driving TUI had ended its turn and showed a settled screen; the pane was parked on a static screen; or there were no tmux panes at all (report §7).
+`panes=` settles the fourth outright and `nmlog=` settles whether a gate run was writing at that instant, which is the distinction the whole fix turns on.
+Both are reads the loop already performs on the deciding poll, so neither costs a call it was not making.
 
 **This exists because a released pin used to leave no trace at all.**
 A clean release discarded the guest's verdict with its stdout, so "a keeper was armed and released" and "no keeper ever started" were indistinguishable after the fact.
 Establishing which of those happened on 2026-07-30 and 2026-07-31 took a multi-hour dig across four unrelated evidence stores and still landed at *moderate-to-high* rather than high confidence, because connection-grace arithmetic was the only available inference (2026-08-03 investigation, §3.2/§3.4).
-The two log shapes now separate the healthy case from the defect directly: `crew=0` is the gate correctly shut with no in-guest task to protect, while `crew=1` with all three arms 0 and a recent `status=` is the silent-worker residual under "Remaining gaps" below - a registered, recently-active worker whose pin was released anyway.
+The two log shapes now separate the healthy case from the defect directly: `crew=0` is the gate correctly shut with no in-guest task to protect, while `crew=1` with all arms 0 and a recent `status=` is a registered, recently-active worker whose pin was released anyway.
 
 **It is a log, never an alarm, and nothing in firstmate reads it.**
 No wake, marker, or captain-facing signal is derived from it, deliberately: `stopped` is an idle secondmate's healthy resting state, so alarming on stopped-plus-anything would reintroduce exactly the false-positive class "Remaining gaps" refuses on stated grounds.
@@ -411,10 +477,24 @@ It is written host-side after the exec has already ended, so it can reach neithe
 Growth is bounded by `FM_SBX_KEEPALIVE_LOG_LINES` (default 200), trimmed to the newest lines at twice that count so the rewrite is rare.
 The file deliberately survives teardown: it is post-mortem evidence about a VM that is by then gone, and its timestamps keep a re-provisioned same-id home unambiguous.
 
-The instrumentation changed no keep-alive behaviour - same three arms, same poll cadence, same pin and release conditions, and no added `sbx exec` anywhere in the poll path.
-In the guest loop the arm flags are assigned beside the existing `work=1` assignments and are never read by any condition; the pin/release fixtures named under "Steering and resurrection" above are unchanged and are the regression net for that claim.
-Guest stdout stays untrusted: the wrapper admits the report only in its exact shape, so nothing but `0`/`1` flags and a digit timestamp can reach the log, and a garbled or forged line is dropped while the verdict line still lands.
-Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (every verdict logged with its timestamp and pin duration, the two release shapes distinguished, a forged report rejected, an unwritable log harmless, and growth bounded) - not against a real sandbox VM.
+The reporting itself changes no keep-alive behaviour, and adds no `sbx exec` anywhere in the poll path.
+In the guest loop the arm flags are assigned beside the existing `work=1` assignments and are never read by any condition; the pin/release fixtures named under "Steering and resurrection" above are the regression net for that claim.
+Guest stdout stays untrusted: the wrapper admits the report only in its exact shape, so nothing but `0`/`1` flags, a small pane count and digit timestamps can reach the log, and a garbled or forged line is dropped while the verdict line still lands.
+The whitelist is matched **exactly**, so the superseded three-arm shape is dropped rather than logged as though the gate arm had reported nothing - a fixture pins that too.
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (every verdict logged with its timestamp and pin duration, the two release shapes distinguished, a forged report and a superseded-shape report both rejected, an unwritable log harmless, and growth bounded) - not against a real sandbox VM.
+
+#### Why a clean release still raises no alarm
+
+A clean `released-idle` is what killed the four validation runs: the keeper released, and ~35.4 s later sandboxd powered the VM off on top of live work.
+The wrapper's suspicious-exit branch never ran, so **no `state/.sbx-midtask-stop-` marker was ever written** and the captain was never told, across four kills (confirmed absent, report §8.3).
+The uncovered case is therefore not the documented "a stop with no keeper alive" but "a stop caused by the keeper's own clean release".
+
+It is deliberately still not alarmed, and the fourth arm is the reason it does not need to be.
+An alarm here could only be derived from the same arms that, at the deciding poll, read idle **by definition** - that is what a release is.
+Every candidate proxy fires on the healthy release too: the `guest-active` breadcrumb is about one poll old at the end of any normal turn, because arm 1 was reading the busy tail right up to the turn-end; and gate-log staleness cannot separate a run that finished from one that stalled.
+Alarming on either would fire after ordinary completed work, which is precisely the false-positive class "Remaining gaps" refuses on stated grounds.
+The right fix for "the keeper released on top of live work" is to make the keeper **see** the work, which the gate-activity arm now does for the proven failure shape; the verdict log's `panes=`/`nmlog=` fields close the diagnosability half at zero false-positive cost.
+Revisit only if a release is recorded with a fresh `nmlog=` and a stop still lands on live work - that shape would be new evidence, not a re-argument of this one.
 
 ### Guest no-mistakes daemon restore (`fm_backend_sbx_restore_nomistakes_daemon`)
 
@@ -608,7 +688,7 @@ Verified end to end on real sandboxes (design doc §10 "Then (v1)" items 2, 3, 4
     When the mount returns, `[ -e ]` passes, the mount alarm re-arms, and the next real write is detected normally (verified: wake resumed, `.seen-*` advanced).
     Note macOS `stat -L` on a dangling link returns the *link's own* size:mtime rather than failing, so the `[ -e ]` gate - not `stat_sig`'s `|| continue` - is what keeps fresh spawns quiescent until the mount writes real signal files.
 - **Multi-secondmate soak** (step 4, 2026-07-20, two claude secondmates): **no data cross-talk** - each secondmate wrote only its own mount's status file (the per-id symlink allowlist holds); per-row wake-queue attribution is correct (each row names its own id's file). When two secondmates' turns end in the *same* grace window the watcher coalesces them into **one** firstmate wake whose reason lists all involved files across both ids - intended cost-bounding (N simultaneous turn-ends → 1 wake), not cross-talk, because the individual queue rows stay per-id. Each VM's auto-stop is independent (one stopped while the other stayed up under its own connection activity); idle supervision stays structurally zero sbx CLI calls regardless of count (secondmates are exempt from the watcher's pane-staleness capture).
-- **Keep-alive**: with a pinned exec the VM survives the whole guest turn (measured inversely: unpinned VMs die ~45-100 s after the last connection, busy or not).
+- **Keep-alive**: with a pinned exec the VM survives the whole guest turn (measured inversely: unpinned VMs die ~35.4 s after the last connection, busy or not).
 - **Five-secondmate soak** (2026-07-20 evening, 3× claude adf-claude:v3 + 2× codex adf-codex:v2, ~2 h 15 m on a 16 GB/8-core host): isolation, per-id wake attribution, and grace coalescing all hold at N=5 (a same-window burst of turn-ends coalesces to one wake naming every id's files; per-row attribution stays per-id; each guest's `data/soak-notes.md` contains only its own turns). Independent per-VM auto-stop, idle watcher structurally quiet. **Concurrent resurrection**: steering all 5 stopped VMs simultaneously lands every steer in 25-32 s each (vs the 23-24 s single-VM baseline - mild contention only); a 3-way claude round after re-auth took 26 s each. Host resource ceilings were never approached: Docker-family RSS stayed ~2-3.4 GB total across all 5 VMs, load average low single digits, no swap growth beyond the spawn ramp. The soak surfaced the stale-needle submit-verify defect above (fixed) and the token-rotation recovery note below.
 - **Teardown landed-work probe, live**: a deliberately dirtied guest (`README.md` edit in-VM) made non-`--force` `fm-teardown.sh` REFUSE with the VM and home preserved; after restoring the file the same command proceeded (`sbx rm`), and four more clean secondmates retired the same way. Both probe paths verified on real sandboxes.
 
@@ -737,7 +817,7 @@ The three fault shapes share one symptom (a secondmate that stops making progres
 | Fault | Initiating trigger | What masks or exposes it | Covered by |
 | --- | --- | --- | --- |
 | Healthy status-sparse supervision | A long in-guest pipeline; the secondmate's own turns are legitimately sparse | Exposed as a false alarm by counting bare turn-ends; masked (correctly) by a fresh `guest-active` breadcrumb | Breadcrumb suppression on both arms - **silent** |
-| Auto-stopped VM, work mid-flight | Docker's connection-based auto-stop, ~45-100 s after the last exec drops | A stopped VM emits no turn-ends, so any turn-end counter is blind | Keep-alive pin (prevention) + `sbx-midtask-stop` (naming), and the unacknowledged-delivery arm when the stop killed the delivered turn itself |
+| Auto-stopped VM, work mid-flight | Docker's connection-based auto-stop, ~35.4 s after the last exec drops | A stopped VM emits no turn-ends, so any turn-end counter is blind | Keep-alive pin (prevention) + `sbx-midtask-stop` (naming), and the unacknowledged-delivery arm when the stop killed the delivered turn itself |
 | Auth-dead TUI | A host OAuth rotation against a running guest; the TUI caches its logged-out state | Produces **no turn-ends and no status writes at all**, so every event-driven check stays silent forever | Unacknowledged-delivery arm |
 
 Verified at the beacon level 2026-07-27 against implementation commit `1c20123701ef51590aa612aab690b1edd55f7c41` with `bash tests/fm-watch-sbx-signals.test.sh`, covering both directions - the silence cases are proven silent, not asserted.
@@ -813,8 +893,9 @@ Verified only against the fixtures in `tests/fm-backlog-handoff-sbx.test.sh`, `t
 
 ## Remaining gaps
 
-- **Keep-alive covers only windows where a keeper is armed** - pins are created by turn-submitting deliveries (launch and verified text submissions) and released when the guest goes genuinely idle, so in-guest child work and guest-initiated turns are protected only while at least one keeper from a prior turn-submitting delivery is alive and under its cap ("Steering and resurrection" above). Guest work that starts after every keeper has released or capped can still die with the ~45-100 s post-disconnect stop; the no-keeper alarm gap is documented next. The auto-stop grace is Docker's heuristic and may change under us; revisit if sbx grows a keep-alive/idle knob.
-- **A crewmate whose pane never redraws is still invisible to the keeper** - all three activity arms are guest-observable proxies, so a registered worker blocked on a background job that redraws nothing, with no status append or turn-end inside the activity window, reads as idle and releases the pin. The 2026-07-31 recurrence ("Steering and resurrection" above) was the streaming case, which the pane-change arm now covers; a fully silent one would need a real in-guest process-activity probe rather than a screen-scrape, which costs an exec per poll and is not worth it until one is actually observed. One has since been observed **once**, on 2026-07-31 at ~15:43Z (11:43 local -04:00), with the pane-change arm already live for 58 minutes - still too thin a basis for that probe, and the four standing risks against it are unchanged, so the keep-alive verdict log ("Keep-alive verdict log" above) was added instead to make the next occurrence decidable from one file rather than the multi-hour forensic dig that one cost. Revisit the probe at two or three confirmed silent-pane releases - a `released-idle` line carrying `crew=1`, all three arms 0, and a recent `status=`.
+- **Keep-alive covers only windows where a keeper is armed** - pins are created by turn-submitting deliveries (launch and verified text submissions) and released when the guest goes genuinely idle, so in-guest child work and guest-initiated turns are protected only while at least one keeper from a prior turn-submitting delivery is alive and under its cap ("Steering and resurrection" above). Guest work that starts after every keeper has released or capped can still die with the ~35.4 s post-disconnect stop; the no-keeper alarm gap is documented next. The grace is an explicit configured deferral readable from sandboxd's own log ("Empirical CLI facts" above), so a change is checkable rather than a standing unknown; revisit if sbx grows a keep-alive/idle knob.
+- **A run whose driver stops polling can still go silent past the activity window** - this is what is left of the silent-worker gap after the gate-activity arm ("Gate-activity arm" above) closed the proven failure shape. The arm sees a validation run only while something under `$HOME/.no-mistakes/logs/` is being written, and that depends on the driver: in the four fatal 2026-08-05/07 releases the in-guest worker polled `get_run` about four times a second so the daemon log was continuously hot, but on the host the same no-mistakes version left the whole log tree untouched for **57 minutes** mid-run (measured 2026-08-07, run `01KZEKQ9BHQ23KNRM84RY96KF6`: a 3415 s daemon-log gap, with the step log written once at completion rather than streamed). A step that neither streams its log nor is polled therefore still reads idle on all four arms. Widening this would mean a genuine in-guest **process** probe - the thing the four standing objections were about, three of which the guest-side placement already answers ("Gate-activity arm" above) - so it is cheap to reconsider, but it should wait for a recorded occurrence rather than be built on this inference. The shape to watch for is a `released-idle` line carrying `crew=1`, all four arms 0, and an `nmlog=` that is stale but recent enough to bracket a run.
+- **A clean release that lands on live work is still not alarmed** - and the reasoning, including why the fourth arm is the remedy rather than a new alarm, is recorded under "Why a clean release still raises no alarm" above. The short form: any alarm would have to be derived from arms that read idle by definition at the deciding poll, and every candidate proxy also fires after ordinary completed work.
 - **A mid-task stop with no keeper alive is deliberately not alarmed** - the mid-task-stop marker is written by the keep-alive wrapper, so it needs a keeper from a prior turn-submitting delivery to still be running when the VM dies. Guest work killed after every keeper released or capped (or with keep-alives disabled, or after the host process tree that armed them went away) produces no marker. This is scoped out rather than solved with a watcher-side VM state poll, because **`stopped` is the healthy resting state of an idle secondmate**: state alone cannot separate "idle, correctly stopped" from "stopped on top of live child work", and the keeper is the only host-side observer of in-guest child work there is. Alarming on stopped-plus-anything would reintroduce exactly the false-positive class this beacon was fixed for. The unacknowledged-delivery arm still catches the sub-case where the stop killed the delivered turn itself (nothing comes back), and the pending-reply guard still notices a marked request that was never reported; a stop that kills only child work *after* the secondmate's own turn ended stays uncovered.
 - **Mid-session death detection is still session-start-only** - the beacon scan alarms on mount loss and stranding, but a secondmate whose VM goes *absent* mid-session (stale beat + gone sandbox) is still only caught by the next session-start sweep or a failing steer. Wiring a stale-beat → `sbx ls` probe into the beacon scan is the natural extension if this bites.
 - **Projects-bearing homes stay refused at spawn** until an in-guest re-clone story exists (the remaining deferral from the guest-home provisioning v2 scope; the other half - tracked files frozen at spawn HEAD - is closed by "Tracked-file sync" above, after the 2026-07-24 staleness evidence showed it biting).

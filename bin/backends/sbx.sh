@@ -70,9 +70,9 @@ FM_SBX_KEEPALIVE_POLL=${FM_SBX_KEEPALIVE_POLL:-5}
 FM_SBX_GUEST_ACTIVE_WINDOW=${FM_SBX_GUEST_ACTIVE_WINDOW:-120}
 
 # Wait (seconds) after a suspicious keep-alive exit before the wrapper reads
-# the sandbox state once: covers the measured 45-100 s post-disconnect
-# auto-stop grace, so the wrapper classifies the settled outcome (stopped)
-# rather than the transition.
+# the sandbox state once: covers the measured ~35.4 s post-disconnect
+# auto-stop grace (docs/sbx-backend.md "Empirical CLI facts"), so the wrapper
+# classifies the settled outcome (stopped) rather than the transition.
 FM_SBX_MIDTASK_STOP_SETTLE=${FM_SBX_MIDTASK_STOP_SETTLE:-120}
 
 # Lines kept when the per-task keep-alive verdict log is trimmed
@@ -476,15 +476,16 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # Pin/release contract (docs/sbx-backend.md "Steering and resurrection"):
 #   - Pin at least until the turn-ended mount file advances past its delivery
 #     baseline (the original v1 condition: the delivered turn must not die).
-#   - Past that, keep pinning while the guest shows WORK, read from three
+#   - Past that, keep pinning while the guest shows WORK, read from four
 #     independent arms: any tmux pane whose visible tail matches the busy regex
 #     (the same busy idiom the watcher and the submit verify use); a
 #     status/turn-ended file under the guest home's state/ (an in-guest child
 #     worker's signals) touched within the activity window; or, WHILE A
 #     CREWMATE TASK IS REGISTERED in the guest home's state/, any change in the
-#     captured pane set since the previous poll. An in-guest crewmate therefore
-#     keeps the VM alive across the secondmate's own turn boundaries (fork
-#     issue #12).
+#     captured pane set since the previous poll; or a file under the guest's
+#     own $HOME/.no-mistakes/logs/ touched within the activity window. An
+#     in-guest crewmate therefore keeps the VM alive across the secondmate's
+#     own turn boundaries (fork issue #12).
 #   - The third arm exists because the first two both read idle while a
 #     crewmate was genuinely running (2026-07-31, fork issue #12 recurring
 #     after its fix shipped): a worker inside one long operation - there,
@@ -494,6 +495,23 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     direct evidence of guest work; a static pane set is direct evidence of
 #     quiescence. Gating it on a registered crewmate task keeps the arm off for
 #     the ordinary idle secondmate, whose auto-stop behaviour is unchanged.
+#   - The FOURTH arm exists because all three of the above read a TERMINAL
+#     SCREEN or a status mtime, and a no-mistakes run does neither: it is a
+#     daemon child writing to $HOME/.no-mistakes/logs/<run>/. On 2026-08-07 a
+#     scout proved with matched host and guest timestamps, 6 runs of 6, that
+#     the keeper released with all three arms reading 0 while the guest gate
+#     daemon was making four IPC calls per second, and sandboxd powered the VM
+#     off 35.4 s later; four validation runs died that way (data/
+#     sbx-test-step-kill-investigation/report.md; captain's decision
+#     keeper-activity-blind-spot, 2026-08-07). A hand-run `make test` survived
+#     only because its output scrolls on screen. This arm reads the WORK
+#     instead: the newest mtime under the guest's own gate log root, which an
+#     idle daemon never advances (measured: a live-but-idle daemon left its
+#     logs untouched for 5.5 h; docs/sbx-backend.md "Gate-activity arm"). It is
+#     a pure in-guest stat and adds no `sbx exec` to the poll path.
+#   - Arm precedence is arm1, arm2, arm3, arm4 - arm4 is evaluated last, so a
+#     poll the existing three already called work reports exactly the flag it
+#     reported before.
 #   - Release ("released-idle") once the turn ended AND no work is visible: a
 #     genuinely idle guest still auto-stops (stopped-is-healthy stays true).
 #     An idle-parked worker TUI - no busy tail, no recent signals, a static
@@ -505,15 +523,19 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     the HOST gets a pure-stat view of in-guest activity (the wrapper's
 #     mid-task-stop check below, and fm-watch.sh's stranding suppression).
 #   - On the way out, print ONE "fm-keepalive detail" line before the verdict,
-#     reporting how each arm read on the deciding poll (a1/a2/a3), whether the
-#     crewmate gate was open (crew), and - on released-idle with a crewmate
-#     registered - the newest in-guest *.status mtime. The wrapper logs it.
-#     This is INSTRUMENTATION ONLY: a1/a2/a3 are assigned beside the existing
-#     work=1 assignments and are never read by any condition, so the arms, the
-#     poll cadence, and the pin/release conditions are byte-for-byte the ones
-#     the fixtures above already pin. It exists because a released pin left no
+#     reporting how each arm read on the deciding poll (a1/a2/a3/a4), whether
+#     the crewmate gate was open (crew), how many tmux panes were visible
+#     (panes), the newest in-guest *.status mtime on released-idle with a
+#     crewmate registered (status), and the newest gate-log mtime whenever one
+#     was read (nmlog). The wrapper logs it. This is INSTRUMENTATION ONLY: the
+#     arm flags are assigned beside the existing work=1 assignments and are
+#     never read by any condition. It exists because a released pin left no
 #     durable trace at all, which cost a multi-hour forensic dig to reconstruct
-#     (2026-08-03 scout; docs/sbx-backend.md "Keep-alive verdict log").
+#     (2026-08-03 scout; docs/sbx-backend.md "Keep-alive verdict log"), and
+#     panes/nmlog were added because the 2026-08-07 scout could prove all three
+#     arms read 0 but could NOT say why, and declined to guess among four
+#     candidates: pane count and gate-log freshness are both reads the loop
+#     already performs, and either one settles it from a single line.
 # Plain POSIX sh, GNU-first portable stat (the guest is Linux; the BSD arm
 # exists so the host-side unit tests can run the same script on macOS).
 fm_backend_sbx_keepalive_script() {
@@ -521,6 +543,7 @@ fm_backend_sbx_keepalive_script() {
   printf '%s' '
     t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6
     act=${t%.turn-ended}.guest-active
+    gate=$HOME/.no-mistakes/logs
     mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
     emit() {
       extra=
@@ -533,7 +556,8 @@ fm_backend_sbx_keepalive_script() {
         done
         [ "$last" -gt 0 ] && extra=" status=$last"
       fi
-      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 crew=$crew$extra"
+      [ "$nm" -gt 0 ] && extra="$extra nmlog=$nm"
+      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 arm4=$a4 crew=$crew panes=$panes$extra"
       echo "fm-keepalive $1"
     }
     start=$(date +%s)
@@ -546,6 +570,9 @@ fm_backend_sbx_keepalive_script() {
       a1=0
       a2=0
       a3=0
+      a4=0
+      panes=0
+      nm=0
       snap=
       if [ -n "$home" ]; then
         for f in "$home"/state/*.meta; do
@@ -555,6 +582,7 @@ fm_backend_sbx_keepalive_script() {
         done
       fi
       for p in $(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null); do
+        panes=$((panes + 1))
         pane=$(tmux capture-pane -p -t "$p" 2>/dev/null)
         snap="$snap|$p|$pane"
         if [ "$work" = 0 ] \
@@ -578,6 +606,16 @@ fm_backend_sbx_keepalive_script() {
         a3=1
       fi
       prev=$sig
+      if [ "$work" = 0 ] && [ -d "$gate" ]; then
+        newest=$(ls -td "$gate"/* "$gate"/*/* 2>/dev/null | head -1)
+        if [ -n "$newest" ]; then
+          nm=$(mt "$newest")
+          if [ "$nm" -gt 0 ] && [ $((now - nm)) -le "$window" ]; then
+            work=1
+            a4=1
+          fi
+        fi
+      fi
       if [ "$work" = 1 ]; then touch "$act" 2>/dev/null; fi
       if [ $((now - start)) -ge "$max" ]; then
         if [ "$work" = 1 ]; then emit capped-active; else emit capped-idle; fi
@@ -634,19 +672,20 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 # fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until the
 # guest is done working or FM_SBX_KEEPALIVE_MAX elapses. Why this exists:
 # Docker Sandboxes' auto-stop is HOST-CONNECTION-based, not guest-workload-
-# based - a VM with no live exec/attach stops within roughly a minute even
-# with a CPU-busy guest process (verified live; a detached in-guest tmux
-# agent gets no protection at all, unlike agent-as-exec rigs where the run
-# IS the connection). Without a keeper, any launch or steered turn that
-# outlasts the post-disconnect grace is killed mid-work: the turn never
-# ends, no signal lands, and the secondmate silently freezes until the next
-# steer resurrects it into the same trap. Releasing on the secondmate's own
-# turn-end alone re-opened the same trap one level down: an in-guest crewmate
-# holds no host connection, so the VM died 45-100 s after the secondmate's
-# turn ended and killed the mid-implementation worker (fork issue #12, proven
-# three times 2026-07-23). The keeper is the narrow fix: one connection, held
-# exactly while the guest shows work (fm_backend_sbx_keepalive_script above),
-# self-terminating on the guest side, so an idle VM still auto-stops.
+# based - a VM with no live exec/attach stops ~35.4 s after the last
+# connection closes even with a CPU-busy guest process (verified live; a
+# detached in-guest tmux agent gets no protection at all, unlike agent-as-exec
+# rigs where the run IS the connection). Without a keeper, any launch or
+# steered turn that outlasts the post-disconnect grace is killed mid-work: the
+# turn never ends, no signal lands, and the secondmate silently freezes until
+# the next steer resurrects it into the same trap. Releasing on the
+# secondmate's own turn-end alone re-opened the same trap one level down: an
+# in-guest crewmate holds no host connection, so the VM died inside that grace
+# after the secondmate's turn ended and killed the mid-implementation worker
+# (fork issue #12, proven three times 2026-07-23). The keeper is the narrow
+# fix: one connection, held exactly while the guest shows work
+# (fm_backend_sbx_keepalive_script above), self-terminating on the guest side,
+# so an idle VM still auto-stops.
 # Fire-and-forget: callers never wait on it, and a keeper left pinned by work
 # that never ends is bounded by the cap. Multiple keepers (one per steer) are
 # harmless - all release on the same idle reading.
@@ -660,8 +699,23 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 # silent ones included, also appends one evidence line to the per-task verdict
 # log (fm_backend_sbx_keepalive_log above). Guest stdout is untrusted data:
 # only the fixed fm-keepalive verdict and detail shapes are matched - the
-# detail whitelist admits nothing but 0/1 flags and a digit timestamp - and
-# the breadcrumb is stat'ed, never read.
+# detail whitelist admits nothing but 0/1 flags, a small pane count, and digit
+# timestamps - and the breadcrumb is stat'ed, never read.
+#
+# A CLEAN released-idle STAYS SILENT, deliberately, even though a clean
+# release is what killed four validation runs on 2026-08-05/07: the keeper
+# released, and 35.4 s later sandboxd powered the VM off on top of live work.
+# The wrapper's suspicious-exit branch never ran, so no marker was ever
+# written and the captain was never told. The remedy is the fourth arm above -
+# make the keeper SEE the work - not an alarm, because an alarm would have to
+# be derived from the same arms that by definition read idle at the deciding
+# poll. Every candidate proxy fires on the healthy release too: the
+# guest-active breadcrumb is ~1 poll old at the end of any normal turn, and
+# gate-log staleness cannot separate a finished run from a stalled one. That
+# is exactly the false-positive class docs/sbx-backend.md "Remaining gaps"
+# refuses on stated grounds, since `stopped` is an idle secondmate's HEALTHY
+# resting state. The verdict log's new panes=/nmlog= fields close the
+# diagnosability half at zero false-positive cost instead.
 fm_backend_sbx_keepalive() {  # <name> <id> [home]
   local name=$1 id=$2 home=${3:-} turnend script busy key marker log
   [ "$FM_SBX_KEEPALIVE_MAX" -gt 0 ] 2>/dev/null || return 0
@@ -679,7 +733,7 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
     verdict=$(printf '%s\n' "$out" \
       | grep -E '^fm-keepalive (released-idle|capped-idle|capped-active)$' | tail -1)
     detail=$(printf '%s\n' "$out" \
-      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] crew=[01]( status=[0-9]{1,19})?$' \
+      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] arm4=[01] crew=[01] panes=[0-9]{1,6}( status=[0-9]{1,19})?( nmlog=[0-9]{1,19})?$' \
       | tail -1)
     case "$verdict" in
       'fm-keepalive released-idle') outcome=released-idle ;;
