@@ -172,7 +172,7 @@ That dangling link is **not** a defect - it is how absence converges, and the th
 | primary `data/captain-shared.md` | secondmate **host** home | guest reads | verdict |
 | --- | --- | --- | --- |
 | never published | nothing written (`unchanged`) | `ABSENT` through the dangling link | correct by design |
-| published | copy written at mode 444 | the mount's bytes, **if the mount carries them** | correct only when the mount is fresh |
+| published | copy written at mode 444 | the mount's bytes, **if the mount carries the current bytes** | correct only when the mount is fresh; missing or outdated bytes are reported |
 | published, then cleared | local copy quarantined, then removed | `ABSENT`, **once the mount drops it** | correct only when the mount is fresh |
 
 The host half is unconditional: `propagate_shared_captain_preferences` (`bin/fm-config-inherit-lib.sh`) writes, quarantines, and removes at every convergence point, and mirrors a cleared primary as absence.
@@ -185,8 +185,8 @@ No firstmate-owned trigger refreshes the mount, and this repo records no measure
 The 2026-07-23 measurement in "Backlog handoff" below is the same `data/` directory: a freshly filed item was **absent from the whole mount**, and an existing file's mtime was hours behind host reality.
 
 Because that cannot be fixed from firstmate's side without turning the read path into a copy pipeline, provisioning **reports** it instead.
-The guest compares its own read against what the host home has and exits 9 when the host published a file it cannot read, or 8 when it still reads one the primary cleared; the host turns each into one stderr line naming the file and the mount.
-Both are warnings, never refusals - a secondmate stranded at launch is worse than one launching without shared captain preferences - and both are silent in the two correct cases, including the designed absence.
+The guest compares its own read against what the host home has and exits 9 when the host published a file it cannot read, 7 when it reads different bytes, or 8 when it still reads one the primary cleared; the host turns each into one stderr line naming the file and the mount.
+All three are warnings, never refusals - a secondmate stranded at launch is worse than one launching without shared captain preferences - and all are silent in the two correct cases, including the designed absence. If either side cannot compute a digest, the published-file check degrades to presence only because a missing hasher is not evidence of drift.
 
 **Verified** (2026-08-08, macOS 26.5.2 arm64, bash 3.2.57) against the fixtures in `tests/fm-shared-captain-inheritance.test.sh`, which drive the real provisioning pass with `FM_FAKE_SBX_GUEST_HOME` splitting the guest clone from the host home and `FM_SBX_SOURCE_MOUNT` pointed at a stand-in mount, so a mount that does not carry what the host home has is expressible:
 
@@ -196,11 +196,12 @@ $ bash tests/fm-shared-captain-inheritance.test.sh
 ok - sbx guest: an unpublished shared file leaves a dangling link that reads ABSENT, silently
 ok - sbx guest: a published shared file is read through the link, with no second copy
 ok - sbx guest: a published shared file the mount does not carry is reported, not silently absent
+ok - sbx guest: outdated shared bytes in the mount are reported
 ok - sbx guest: still reading a shared file the primary cleared is reported
 # all fm-shared-captain-inheritance tests passed
 ```
 
-Each of the two reporting cases was confirmed failing against the pre-change adapter before being accepted as passing (`missing: 'cannot read data/captain-shared.md through its guest link'` and `missing: 'still reads data/captain-shared.md through its guest link'`), while the two designed-behaviour cases pass both before and after - they lock in existing behaviour rather than the new check.
+Each of the three reporting cases was confirmed failing against the pre-change adapter before being accepted as passing (`missing: 'cannot read data/captain-shared.md through its guest link'`, `missing: 'outdated data/captain-shared.md through its guest link'`, and `missing: 'still reads data/captain-shared.md through its guest link'`), while the two designed-behaviour cases pass both before and after - they lock in existing behaviour rather than the new check.
 
 **Not proven, and what would prove it**: no live sandbox was created or exec'd for this work, so nothing here measures what a real guest sees after the primary publishes a shared captain file.
 Two things remain open - whether the mount ever picks up a host write made after guest creation, and if so which lifecycle event does it.
