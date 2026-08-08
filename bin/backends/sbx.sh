@@ -1230,10 +1230,11 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # has and reports a disagreement: exit 9 when the host published a file the
 # guest cannot read (it is silently running without the primary's captain
 # preferences), exit 8 when the guest still reads one the primary cleared (it
-# is silently acting on retracted ones). Each becomes one host stderr line.
-# Both are warnings, never refusals: shared preferences are worth naming and
-# never worth stranding a secondmate over. A transport failure that happened
-# to return 8 or 9 costs a spurious warning and nothing else.
+# is silently acting on retracted ones), and exit 7 when both have a file but
+# the guest reads older bytes. Each becomes one host stderr line. All are
+# warnings, never refusals: shared preferences are worth naming and never
+# worth stranding a secondmate over. A transport failure that happened to
+# return 7, 8, or 9 costs a spurious warning and nothing else.
 #
 # The same pass also plants the guest shell-profile env snippet
 # (docs/sbx-backend.md "Guest shell-profile env"). sbx plants
@@ -1255,17 +1256,18 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # Debian `~/.bashrc` early return for non-interactive shells - the failing case
 # is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
-  local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 rc=0
+  local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 captain_hash= rc=0
   # Host-side, because only the host can see whether the primary has published
   # anything to read. Cleared primary -> want 0 -> a dangling link is the
   # designed absence and stays silent.
   if [ -f "$home_abs/$FM_SHARED_CAPTAIN_REL" ]; then
     want_captain=1
+    captain_hash=$(fm_inherit_sha256 "$home_abs/$FM_SHARED_CAPTAIN_REL") || captain_hash=
   fi
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$6, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$7, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
   # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   sbx exec "$name" -- sh -c '
-    home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6; shift 6
+    home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6 captain_hash=$7; shift 7
     cd "$home" || exit 1
     mkdir -p config data || exit 1
     for item; do
@@ -1310,14 +1312,27 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     # what the mount actually carries - not just the link.
     if [ "$want_captain" = 1 ]; then
       [ -f "$captain" ] || exit 9
+      guest_hash=
+      if [ -n "$captain_hash" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+          guest_hash=$(sha256sum "$captain" 2>/dev/null | awk "{print \$1}") || guest_hash=
+        elif command -v shasum >/dev/null 2>&1; then
+          guest_hash=$(shasum -a 256 "$captain" 2>/dev/null | awk "{print \$1}") || guest_hash=
+        fi
+        [ -z "$guest_hash" ] || [ "$guest_hash" = "$captain_hash" ] || exit 7
+      fi
     else
       [ ! -f "$captain" ] || exit 8
     fi
     exit 0
   ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" \
-    "$want_captain" $FM_INHERITABLE_CONFIG || rc=$?
+    "$want_captain" "$captain_hash" $FM_INHERITABLE_CONFIG || rc=$?
   case "$rc" in
     0) return 0 ;;
+    7)
+      printf 'firstmate sbx: sandbox %s reads an outdated %s through its guest link: %s still carries older bytes than the host home, so the guest is acting on superseded shared captain preferences (docs/sbx-backend.md "Guest-home provisioning")\n' \
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+      ;;
     8)
       printf 'firstmate sbx: sandbox %s still reads %s through its guest link after the primary cleared it: %s has not dropped the file, so the guest keeps acting on retracted shared captain preferences (docs/sbx-backend.md "Guest-home provisioning")\n' \
         "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2

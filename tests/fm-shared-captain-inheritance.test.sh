@@ -364,15 +364,16 @@ EOF
 # shellcheck source=tests/sbx-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
-# new_sbx_readthrough_world <name> <mount-has-file> <host-has-file>: a fixture
-# host home, guest clone, and stand-in source mount. Echoes "host|guest|mount".
-new_sbx_readthrough_world() {  # <name> <mount-has-file> <host-has-file>
-  local name=$1 mount_has=$2 host_has=$3 w host guest mount
+# new_sbx_readthrough_world <name> <mount-has-file> <host-has-file> [mount-bytes]:
+# a fixture host home, guest clone, and stand-in source mount. Echoes
+# "host|guest|mount".
+new_sbx_readthrough_world() {  # <name> <mount-has-file> <host-has-file> [mount-bytes]
+  local name=$1 mount_has=$2 host_has=$3 mount_bytes=${4:-shared from primary} w host guest mount
   w="$TMP_ROOT/$name"
   host="$w/sm"; guest="$w/guest-clone"; mount="$w/source-mount"
   mkdir -p "$host/data" "$host/config" "$guest" "$mount/data" "$mount/config"
   [ "$host_has" = yes ] && write_shared "$host/data/captain-shared.md" "shared from primary"
-  [ "$mount_has" = yes ] && write_shared "$mount/data/captain-shared.md" "shared from primary"
+  [ "$mount_has" = yes ] && write_shared "$mount/data/captain-shared.md" "$mount_bytes"
   printf '%s|%s|%s\n' "$host" "$guest" "$mount"
 }
 
@@ -465,6 +466,21 @@ EOF
   pass "sbx guest: still reading a shared file the primary cleared is reported"
 }
 
+test_sbx_guest_reports_outdated_shared_bytes_in_the_mount() {
+  local rec host guest mount err rc
+  rec=$(new_sbx_readthrough_world sbx-outdated yes yes "superseded shared preferences")
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-outdated" "$host" "$guest" "$mount"); rc=$?
+
+  [ "$rc" = 0 ] || fail "outdated shared bytes must warn, never fail"
+  assert_contains "$err" "outdated data/captain-shared.md through its guest link" \
+    "the warning must name the outdated file the guest reads"
+  pass "sbx guest: outdated shared bytes in the mount are reported"
+}
+
 test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
@@ -476,6 +492,7 @@ test_session_start_digest_labels_shared_file_and_read_once_rule
 test_sbx_guest_link_is_the_absence_convergence_when_primary_never_published
 test_sbx_guest_reads_a_published_shared_file_through_the_mount
 test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry
+test_sbx_guest_reports_outdated_shared_bytes_in_the_mount
 test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared
 
 echo "# all fm-shared-captain-inheritance tests passed"
