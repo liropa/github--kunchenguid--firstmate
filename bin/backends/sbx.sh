@@ -1256,7 +1256,7 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # Debian `~/.bashrc` early return for non-interactive shells - the failing case
 # is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
-  local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 captain_hash= rc=0
+  local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 captain_hash='' rc=0
   # Host-side, because only the host can see whether the primary has published
   # anything to read. Cleared primary -> want 0 -> a dangling link is the
   # designed absence and stays silent.
