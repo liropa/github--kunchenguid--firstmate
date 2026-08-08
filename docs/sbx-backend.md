@@ -201,12 +201,54 @@ ok - sbx guest: still reading a shared file the primary cleared is reported
 # all fm-shared-captain-inheritance tests passed
 ```
 
+How that vector reaches the guest is a separate matter, and it shipped broken; "The empty-cmd-element outage" below owns that.
+
 Each of the three reporting cases was confirmed failing against the pre-change adapter before being accepted as passing (`missing: 'cannot read data/captain-shared.md through its guest link'`, `missing: 'outdated data/captain-shared.md through its guest link'`, and `missing: 'still reads data/captain-shared.md through its guest link'`), while the two designed-behaviour cases pass both before and after - they lock in existing behaviour rather than the new check.
 
 **Not proven, and what would prove it**: no live sandbox was created or exec'd for this work, so nothing here measures what a real guest sees after the primary publishes a shared captain file.
 Two things remain open - whether the mount ever picks up a host write made after guest creation, and if so which lifecycle event does it.
 Proving them needs a disposable sbx secondmate (never the captain's live one): publish `data/captain-shared.md` in the primary, run the bootstrap sweep so the host home has it, then read `sbx exec fm-<id> -- cat <home>/data/captain-shared.md` and `sbx exec fm-<id> -- ls -la $FM_SBX_SOURCE_MOUNT/data/` before a stop, after `sbx stop` plus a steer-driven resurrection, and after a fresh `sbx create`.
 Until that runs, treat the warning above as the only thing standing between a published shared file and a guest that silently never sees it.
+
+### The empty-cmd-element outage (2026-08-08)
+
+The reporting check above shipped with a defect in how it reached the guest, and the defect stopped resurrection outright for every sbx secondmate that had no `data/captain-shared.md` - which is the default state, and was the state of the whole fleet.
+`captain_hash` was passed as a bare positional to `sbx exec`, and it is empty exactly when nothing is published, so the vector carried an empty element.
+
+Reported from the host by firstmate (not observed in this repo's own runs):
+
+```
+$ FM_HOME=<primary> bin/fm-send.sh agent-dotfiles '<nudge text>'
+ERROR: request failed: 400 Bad Request: cmd element 10 is empty
+error: cannot resurrect fm-agent-dotfiles: guest-home provisioning re-assert failed
+```
+
+Counting from zero, cmd element 10 is `captain_hash`: `sh`, `-c`, script, `_`, home, source mount, id, captain path, signals dir, want-captain, **hash**.
+Confirmed at file level here by rebuilding the same vector with no shared captain file present, which prints `element 10: <EMPTY>`.
+
+The fix is `FM_SBX_NO_VALUE` (`bin/backends/sbx.sh`, which owns the mechanism): an optional positional with no value travels as `-`, and the guest maps it back by testing the value's **shape**, never one literal token, so the two sides cannot drift apart.
+`fm_backend_sbx_guest_args_ok` checks each vector before it is sent, so a future optional positional that can go empty fails as a named local refusal rather than an opaque upstream 400 mid-resurrection.
+The detection the check performs is unchanged - only how its inputs travel.
+
+The same class had a **second** live instance, found by the test suite rather than by the outage: `fm_backend_sbx_keepalive`'s `home` is `fm_meta_get`'s empty string for any record without `home=`, and it is armed on every delivery.
+It now carries the same token and is mapped back by shape (only an absolute path is a home).
+`fm_backend_sbx_unlanded_work`'s `git -C "$home"` is deliberately left alone: an empty home there fails the probe, and a failed probe already means teardown refuses, which is the documented fail-safe reading.
+
+**Verified** (2026-08-08, macOS 26.5.2 arm64, bash 3.2.57, ShellCheck 0.11.0). `tests/sbx-helpers.sh` now refuses any exec whose vector carries an empty element, so the enforcement is suite-wide rather than per-assertion - necessary because `$*` joins the vector and an empty element leaves no trace in the joined form, which is precisely how the pre-existing assertion `... $sig 0  crew-dispatch.json ...` passed over its own double space:
+
+```
+$ bash tests/fm-shared-captain-inheritance.test.sh
+...
+ok - sbx guest: provisioning with no shared captain file sends no empty guest argument
+# all fm-shared-captain-inheritance tests passed
+```
+
+Both suites were confirmed failing against the reverted fix before being accepted as passing - `fm-shared-captain-inheritance` at `not ok - provisioning should succeed with no shared file anywhere, got rc 1`, and `fm-backend-sbx` at `not ok - a steer of a resurrectable sandbox should succeed`, which is the reported outage path.
+`tests/fm-backend-sbx.test.sh` carries one unrelated pre-existing failure in this environment (`test_sweep_respawns_confirmed_absent_secondmate`, which reads the checkout's branch); it fails identically at the pristine base commit on the same branch name.
+
+**Not proven here**: the `400` itself, and the live secondmate's recovery.
+No sandbox was created, exec'd, or repaired for this work.
+Whether the reported resurrection now succeeds is firstmate's to verify against the real sandbox.
 
 ## Guest shell-profile env (`CLAUDE_CODE_OAUTH_TOKEN`)
 

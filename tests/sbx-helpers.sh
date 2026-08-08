@@ -155,6 +155,24 @@ case "$cmd" in
         *) shift ;;
       esac
     done
+    # No element of a guest command may be empty. This is firstmate's own
+    # invariant on every vector it builds, and it is enforced HERE - once, for
+    # every suite - because `$*` joins the arguments and so cannot show an
+    # empty one: a suite asserting the joined string passes whether or not the
+    # vector is well formed, which is exactly how an empty element shipped.
+    # It is also what the real API does: an empty element was reported live on
+    # 2026-08-08 as `400 Bad Request: cmd element 10 is empty`, stopping every
+    # resurrection of a secondmate with no data/captain-shared.md. That report
+    # is host evidence relayed to this repo, not a run observed here, so the
+    # wording below is deliberately the invariant, not a claimed API quote.
+    empty_element=0
+    for arg in "$@"; do
+      [ -n "$arg" ] || empty_element=1
+    done
+    if [ "$empty_element" = 1 ]; then
+      printf 'fake sbx: refusing exec: a guest command element is empty\n' >&2
+      exit 1
+    fi
     guest="$*"
     case "$guest" in
       "tmux has-session"*)

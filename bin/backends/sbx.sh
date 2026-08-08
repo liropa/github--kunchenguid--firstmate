@@ -95,6 +95,37 @@ FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
 # this one-line config fix rather than a code change.
 FM_SBX_SOURCE_MOUNT=${FM_SBX_SOURCE_MOUNT:-/run/sandbox/source}
 
+# Stand-in for an OPTIONAL guest-script positional that currently has no value.
+# `sbx exec` rejects an empty cmd element outright - reported live 2026-08-08 as
+# `400 Bad Request: cmd element 10 is empty`, which stopped every resurrection of
+# a secondmate with no data/captain-shared.md - so "no value" has to travel as a
+# value the guest script recognises, never as "". Any token that cannot collide
+# with a real value works; `-` matches this repo's existing "not supplied"
+# spelling (bin/fm-home-seed.sh's home argument).
+FM_SBX_NO_VALUE='-'
+
+# fm_backend_sbx_guest_args_ok <name> <what> <arg>...
+# The enforcement half of FM_SBX_NO_VALUE, shared by every `sbx exec` vector
+# that carries an OPTIONAL positional. `$*` joins arguments, so an empty one is
+# invisible in any logged or eyeballed form of the vector - it has to be
+# checked as a vector, before it is sent, or not at all. A named local refusal
+# also beats an opaque upstream 400 on the resurrection and delivery paths,
+# where the failure surfaces far from its cause.
+# `sh`, `-c` and the script are cmd elements 0-2, so this reports the same
+# index sbx itself does.
+fm_backend_sbx_guest_args_ok() {  # <name> <what> <arg>...
+  local name=$1 what=$2 element=3 arg
+  shift 2
+  for arg in "$@"; do
+    if [ -z "$arg" ]; then
+      echo "error: refusing $what for $name: guest command element $element is empty, and sbx exec rejects an empty element; an optional positional must carry '$FM_SBX_NO_VALUE' instead (bin/backends/sbx.sh FM_SBX_NO_VALUE)" >&2
+      return 1
+    fi
+    element=$((element + 1))
+  done
+  return 0
+}
+
 # The guest-home provisioning pass links each declared FM_INHERITABLE_CONFIG
 # item plus the shared captain file; fm-config-inherit-lib.sh owns both
 # declarations (the single declared list), and this adapter is sourced
@@ -546,6 +577,10 @@ fm_backend_sbx_keepalive_script() {
   # shellcheck disable=SC2016  # single quotes deliberate: $1..$6 expand in the guest sh loop, not here
   printf '%s' '
     t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6
+    # Only an absolute path is a home; anything else means "no home", which is
+    # how FM_SBX_NO_VALUE arrives. Testing the SHAPE rather than one literal
+    # token keeps host and guest from drifting apart.
+    case $home in /*) ;; *) home= ;; esac
     act=${t%.turn-ended}.guest-active
     gate=$HOME/.no-mistakes/logs
     mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -722,6 +757,7 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 # diagnosability half at zero false-positive cost instead.
 fm_backend_sbx_keepalive() {  # <name> <id> [home]
   local name=$1 id=$2 home=${3:-} turnend script busy key marker log
+  local -a guest_args
   [ "$FM_SBX_KEEPALIVE_MAX" -gt 0 ] 2>/dev/null || return 0
   turnend="$FM_SBX_SIGNALS_ROOT/$id/$id.turn-ended"
   script=$(fm_backend_sbx_keepalive_script)
@@ -729,11 +765,20 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
   key=$(fm_state_key_encode "$id")
   marker="$(fm_backend_sbx_state_dir)/.sbx-midtask-stop-$key"
   log="$(fm_backend_sbx_state_dir)/.sbx-keepalive-$key.log"
+  # `home` is the second optional positional in this adapter: fm_meta_get
+  # returns "" for a meta record with no home= (older records exist - see
+  # AGENTS.md section 2), and the script itself treats no home as "no crew
+  # state to inspect". So it travels as FM_SBX_NO_VALUE, exactly like the
+  # provisioning pass's hash, and the guest maps it back by SHAPE below.
+  guest_args=(_ "$turnend" "$FM_SBX_KEEPALIVE_MAX" "$FM_SBX_KEEPALIVE_POLL" \
+    "$FM_SBX_GUEST_ACTIVE_WINDOW" "${home:-$FM_SBX_NO_VALUE}" "$busy")
+  # Checked before the keeper is armed, not inside it: a warning printed from
+  # the background subshell would land in an unpredictable place.
+  fm_backend_sbx_guest_args_ok "$name" "the keep-alive" "${guest_args[@]}" || return 0
   (
     trap '' HUP
     started=$(date +%s)
-    out=$(sbx exec "$name" -- sh -c "$script" _ "$turnend" "$FM_SBX_KEEPALIVE_MAX" \
-      "$FM_SBX_KEEPALIVE_POLL" "$FM_SBX_GUEST_ACTIVE_WINDOW" "$home" "$busy" 2>/dev/null) || true
+    out=$(sbx exec "$name" -- sh -c "$script" "${guest_args[@]}" 2>/dev/null) || true
     verdict=$(printf '%s\n' "$out" \
       | grep -E '^fm-keepalive (released-idle|capped-idle|capped-active)$' | tail -1)
     detail=$(printf '%s\n' "$out" \
@@ -1236,6 +1281,10 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # worth stranding a secondmate over. A transport failure that happened to
 # return 7, 8, or 9 costs a spurious warning and nothing else.
 #
+# The guest command vector carries no empty element, ever: sbx's exec API
+# refuses one, and this pass runs on the resurrection path where a refusal
+# strands a live secondmate. The build-then-check below owns that invariant.
+#
 # The same pass also plants the guest shell-profile env snippet
 # (docs/sbx-backend.md "Guest shell-profile env"). sbx plants
 # CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox creation, and the
@@ -1257,6 +1306,7 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
   local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 captain_hash='' rc=0
+  local -a guest_args
   # Host-side, because only the host can see whether the primary has published
   # anything to read. Cleared primary -> want 0 -> a dangling link is the
   # designed absence and stays silent.
@@ -1264,10 +1314,26 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     want_captain=1
     captain_hash=$(fm_inherit_sha256 "$home_abs/$FM_SHARED_CAPTAIN_REL") || captain_hash=
   fi
+  # Built as a vector so it can be CHECKED before it is sent. sbx's exec API
+  # refuses an empty cmd element, so the one positional that can legitimately
+  # have no value travels as FM_SBX_NO_VALUE (see that constant for the outage
+  # that proved it). The loop below is the class guard rather than a second fix
+  # for that one argument: any future positional that can go empty now produces
+  # a named local refusal instead of an opaque upstream 400 mid-resurrection.
+  guest_args=(_ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" \
+    "$signals_dir" "$want_captain" "${captain_hash:-$FM_SBX_NO_VALUE}")
+  # shellcheck disable=SC2206  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
+  guest_args+=($FM_INHERITABLE_CONFIG)
+  fm_backend_sbx_guest_args_ok "$name" "guest-home provisioning" "${guest_args[@]}" || return 1
   # shellcheck disable=SC2016  # single quotes deliberate: $1..$7, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
-  # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   sbx exec "$name" -- sh -c '
     home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6 captain_hash=$7; shift 7
+    # Anything that is not a hex digest means "no hash to compare against".
+    # That is how FM_SBX_NO_VALUE arrives, and equally how a malformed digest
+    # would; testing the SHAPE instead of one literal token keeps the two sides
+    # from drifting apart, and landing here is the documented presence-only
+    # degrade rather than a silent pass.
+    case $captain_hash in *[!0-9a-f]*) captain_hash= ;; esac
     cd "$home" || exit 1
     mkdir -p config data || exit 1
     for item; do
@@ -1325,8 +1391,7 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
       [ ! -f "$captain" ] || exit 8
     fi
     exit 0
-  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" \
-    "$want_captain" "$captain_hash" $FM_INHERITABLE_CONFIG || rc=$?
+  ' "${guest_args[@]}" || rc=$?
   case "$rc" in
     0) return 0 ;;
     7)
