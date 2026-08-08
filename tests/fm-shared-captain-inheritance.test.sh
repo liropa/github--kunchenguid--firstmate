@@ -481,6 +481,36 @@ EOF
   pass "sbx guest: outdated shared bytes in the mount are reported"
 }
 
+test_sbx_provisioning_sends_no_empty_guest_argument() {
+  local rec host guest mount err rc
+  # The 2026-08-08 outage: with no shared captain file published, the host had
+  # no hash to send, sent "" for it, and sbx refused the whole exec with
+  # `400 Bad Request: cmd element 10 is empty` - so EVERY resurrection of a
+  # secondmate without the file failed, and absent is the default state.
+  # Absent-everywhere is deliberately the fixture, because that is the shape
+  # that broke. tests/sbx-helpers.sh refuses an empty element on every exec,
+  # so a regression fails the run; this case additionally pins the vector so
+  # the failure names the cause instead of only the symptom.
+  rec=$(new_sbx_readthrough_world sbx-no-empty-arg no no)
+  IFS='|' read -r host guest mount <<EOF
+$rec
+EOF
+
+  err=$(run_provision "$TMP_ROOT/sbx-no-empty-arg" "$host" "$guest" "$mount"); rc=$?
+
+  # rc 0 IS the empty-element assertion: tests/sbx-helpers.sh refuses any exec
+  # whose vector carries one, so this fails the moment the regression returns.
+  # It cannot be asserted from the log, because the log joins the vector with
+  # spaces and an empty element leaves no trace there - which is exactly how
+  # the old `$sig 0  crew-dispatch.json` assertion passed over the defect.
+  [ "$rc" = 0 ] \
+    || fail "provisioning with no shared captain file must succeed, got rc $rc: $err"
+  assert_grep "data/captain-shared.md $TMP_ROOT/sbx-no-empty-arg/signals/x 0 -" \
+    "$TMP_ROOT/sbx-no-empty-arg/sbx.log" \
+    "no published file should send want=0 plus the no-value token, never an empty element"
+  pass "sbx guest: provisioning with no shared captain file sends no empty guest argument"
+}
+
 test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
@@ -494,5 +524,6 @@ test_sbx_guest_reads_a_published_shared_file_through_the_mount
 test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry
 test_sbx_guest_reports_outdated_shared_bytes_in_the_mount
 test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared
+test_sbx_provisioning_sends_no_empty_guest_argument
 
 echo "# all fm-shared-captain-inheritance tests passed"

@@ -388,8 +388,14 @@ test_spawn_provisions_guest_home() {
 
   # The pass must ride ONE guest exec (the fake executes it against the world
   # home - clone mode puts the guest home at the same absolute path).
+  # The captain-state slot reads `0 -`: no shared file published, and no hash
+  # to compare - the second carried as FM_SBX_NO_VALUE, never as an empty
+  # element. It read `0  ` (an empty element) until 2026-08-08, and this
+  # assertion locked that in, because `$*` joins the vector and an empty
+  # element is invisible in the joined form. tests/sbx-helpers.sh now refuses
+  # an empty element outright; this line only documents the intended shape.
   assert_contains "$(cat "$w/sbx.log")" \
-    "_ $home /run/sandbox/source smx data/captain-shared.md $sig 0  crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
+    "_ $home /run/sandbox/source smx data/captain-shared.md $sig 0 - crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
     "the provisioning exec should carry home, mount root, id, captain file, signals dir, captain state, and the declared inheritable list"
 
   for item in crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces; do
