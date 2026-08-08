@@ -389,8 +389,8 @@ test_spawn_provisions_guest_home() {
   # The pass must ride ONE guest exec (the fake executes it against the world
   # home - clone mode puts the guest home at the same absolute path).
   assert_contains "$(cat "$w/sbx.log")" \
-    "_ $home /run/sandbox/source smx data/captain-shared.md $sig crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
-    "the provisioning exec should carry home, mount root, id, captain file, signals dir, and the declared inheritable list"
+    "_ $home /run/sandbox/source smx data/captain-shared.md $sig 0  crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
+    "the provisioning exec should carry home, mount root, id, captain file, signals dir, captain state, and the declared inheritable list"
 
   for item in crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces; do
     [ -L "$home/config/$item" ] || fail "config/$item should be a symlink after provisioning"
