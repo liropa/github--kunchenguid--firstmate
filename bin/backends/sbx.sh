@@ -83,7 +83,11 @@ FM_SBX_KEEPALIVE_LOG_LINES=${FM_SBX_KEEPALIVE_LOG_LINES:-200}
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
 
-# Clone mode's read-only live bind mount of the host home inside the guest.
+# Clone mode's read-only bind mount of the host home inside the guest.
+# NOT a live view: a host write made after the guest was created has been
+# measured absent from the whole mount (docs/sbx-backend.md "Guest-home
+# provisioning"), so treat it as an inheritance read path only, never as a
+# delivery channel.
 # The path is an sbx implementation detail, not a documented upstream contract
 # (verified live, Gate P1 2026-07-21; agent-dotfiles
 # docs/firstmate-sbx-guest-home-provisioning.md §3/§8) - so spawn probes it
@@ -1219,6 +1223,18 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # agent - healing guest-side link/marker damage (self-blinding only, the mount
 # stays RO) and picking up FM_INHERITABLE_CONFIG items declared since spawn.
 #
+# The pass also REPORTS what the read path cannot deliver by itself.
+# Re-asserting a link only fixes the link; it cannot refresh what the mount
+# carries, and the mount is not a live view of the host home. So the guest
+# compares its own read of data/captain-shared.md against what the host home
+# has and reports a disagreement: exit 9 when the host published a file the
+# guest cannot read (it is silently running without the primary's captain
+# preferences), exit 8 when the guest still reads one the primary cleared (it
+# is silently acting on retracted ones). Each becomes one host stderr line.
+# Both are warnings, never refusals: shared preferences are worth naming and
+# never worth stranding a secondmate over. A transport failure that happened
+# to return 8 or 9 costs a spurious warning and nothing else.
+#
 # The same pass also plants the guest shell-profile env snippet
 # (docs/sbx-backend.md "Guest shell-profile env"). sbx plants
 # CLAUDE_CODE_OAUTH_TOKEN into the guest env once, at sandbox creation, and the
@@ -1239,11 +1255,17 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # Debian `~/.bashrc` early return for non-interactive shells - the failing case
 # is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
-  local name=$1 home_abs=$2 id=$3 signals_dir=$4
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$5, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
+  local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 rc=0
+  # Host-side, because only the host can see whether the primary has published
+  # anything to read. Cleared primary -> want 0 -> a dangling link is the
+  # designed absence and stays silent.
+  if [ -f "$home_abs/$FM_SHARED_CAPTAIN_REL" ]; then
+    want_captain=1
+  fi
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$6, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
   # shellcheck disable=SC2086  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   sbx exec "$name" -- sh -c '
-    home=$1 src=$2 id=$3 captain=$4 signals=$5; shift 5
+    home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6; shift 6
     cd "$home" || exit 1
     mkdir -p config data || exit 1
     for item; do
@@ -1284,8 +1306,29 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
         rm -f "$f.fm-sbx-tmp"
       done
     fi
+    # [ -f ] follows the link, so this reads the whole path - the link plus
+    # what the mount actually carries - not just the link.
+    if [ "$want_captain" = 1 ]; then
+      [ -f "$captain" ] || exit 9
+    else
+      [ ! -f "$captain" ] || exit 8
+    fi
     exit 0
-  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" $FM_INHERITABLE_CONFIG
+  ' _ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" "$signals_dir" \
+    "$want_captain" $FM_INHERITABLE_CONFIG || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    8)
+      printf 'firstmate sbx: sandbox %s still reads %s through its guest link after the primary cleared it: %s has not dropped the file, so the guest keeps acting on retracted shared captain preferences (docs/sbx-backend.md "Guest-home provisioning")\n' \
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+      ;;
+    9)
+      printf 'firstmate sbx: sandbox %s cannot read %s through its guest link: the host home has the file but %s does not carry it, so the guest reads shared captain preferences as ABSENT (docs/sbx-backend.md "Guest-home provisioning")\n' \
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+      ;;
+    *) return "$rc" ;;
+  esac
+  return 0
 }
 
 # fm_backend_sbx_reconcile_claude_trust: bring the guest's shared
