@@ -134,6 +134,8 @@ test_twice_deleted_content_is_marked() {
 
   # PR 70: the captain-approved reinforcement line, and the note recording that
   # the captain chose it deliberately. The document step deleted both.
+  # The backticks are literal Markdown code-span text.
+  # shellcheck disable=SC2016
   skill_content_lines=$(grep -nF 'A mid-session `data/captain-shared.md` push takes effect' "$skill" | cut -d: -f1)
   [ "$(printf '%s\n' "$skill_content_lines" | grep -c .)" -eq 1 ] ||
     fail "the captain-approved timing line in secondmate-provisioning is missing or no longer unique"
