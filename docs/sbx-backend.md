@@ -246,10 +246,29 @@ ok - sbx guest: provisioning with no shared captain file sends no empty guest ar
 Both suites were confirmed failing against the reverted fix before being accepted as passing - `fm-shared-captain-inheritance` at `not ok - provisioning should succeed with no shared file anywhere, got rc 1`, and `fm-backend-sbx` at `not ok - a steer of a resurrectable sandbox should succeed`, which is the reported outage path.
 `tests/fm-backend-sbx.test.sh` carries one unrelated pre-existing failure in this environment (`test_sweep_respawns_confirmed_absent_secondmate`, which reads the checkout's branch); it fails identically at the pristine base commit on the same branch name.
 
-**Not proven here**: the reported upstream 400 was not reproduced against the real sbx API, and this branch was not used to recover or inspect the captain's live secondmate.
-No sandbox was created, started, or exec'd for this work.
-Firstmate must verify the live recovery from a context that is allowed to reach the sandbox.
-The hermetic suites cover both the guest-home provisioning path and the keep-alive path for an older meta record with no `home=`.
+**What the worker proved, and what it did not**: every check above this line is hermetic.
+The worker that wrote the fix created, started, and exec'd no sandbox, and reproduced nothing against the real sbx API.
+Its suites cover the guest-home provisioning path and the keep-alive path for an older meta record with no `home=`.
+That is a statement about the worker's own scope, not about this change as a whole; firstmate's host observations are the other half, and neither substitutes for the other.
+
+**What firstmate observed on the host**, with the captain's authorisation, is the AFTER half of the BEFORE reading above - same live home, same live sandbox, running this branch's code at `6ea5b11`:
+
+```
+$ FM_HOME=/Users/lp1/dev/repos/github--kunchenguid--firstmate \
+    <worktree>/bin/fm-send.sh agent-dotfiles '<re-read nudge>'
+sandbox fm-agent-dotfiles guest: already current
+
+$ sbx ls
+fm-agent-dotfiles   codex   running   127.0.0.1:49303->9418/tcp   ...
+```
+
+The sandbox that read `stopped` before the fix reads `running` after it.
+A silent send is not proof of delivery on its own, so firstmate also observed `state/.sbx-delivered-agent-dotfiles` refreshed at 18:02:55, and read the guest pane with `sbx exec fm-agent-dotfiles -- bash -lc 'tmux capture-pane -p -t fm:0'` to see the marked message `[fm-from-firstmate]corr=2deb73c7807a1a35` arrive and the secondmate working on it.
+The same command, against the same sandbox, refused every resurrection before the fix and completed one after it: the real sbx API rejection is reproduced, and the real recovery is confirmed.
+
+Two limits on that live proof.
+The AFTER run deliberately used this branch's code, not merged code, against a live machine, because that machine was already unreachable so a failed attempt cost nothing - it was not a clean post-merge verification and not a routine check.
+It covers the guest-home provisioning path only: the keep-alive instance of the same defect was never exercised live, and its coverage is the hermetic suites alone.
 
 ## Guest shell-profile env (`CLAUDE_CODE_OAUTH_TOKEN`)
 
