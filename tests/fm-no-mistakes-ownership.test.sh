@@ -129,35 +129,40 @@ test_authority_markers_are_well_formed() {
 test_twice_deleted_content_is_marked() {
   local skill="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
   local doc="$ROOT/docs/sbx-backend.md"
-  local skill_marker_line skill_content_line doc_marker_line doc_content_line
-  local observation_marker_line observation_content_line observation_end_line observation_closer_line
+  local skill_content_lines skill_content_line doc_content_lines doc_content_line
+  local observation_content_lines observation_content_line observation_end_lines observation_end_line
 
   # PR 70: the captain-approved reinforcement line, and the note recording that
   # the captain chose it deliberately. The document step deleted both.
-  skill_marker_line=$(grep -nF '<!-- fm-authority: captain-decision' "$skill" | cut -d: -f1)
-  skill_content_line=$(grep -nF 'A mid-session `data/captain-shared.md` push takes effect' "$skill" | cut -d: -f1)
-  [ -n "$skill_marker_line" ] && [ -n "$skill_content_line" ] &&
-    [ "$skill_marker_line" -eq "$((skill_content_line - 1))" ] ||
-    fail "the captain-approved timing line in secondmate-provisioning carries no adjacent authority marker"
+  skill_content_lines=$(grep -nF 'A mid-session `data/captain-shared.md` push takes effect' "$skill" | cut -d: -f1)
+  [ "$(printf '%s\n' "$skill_content_lines" | grep -c .)" -eq 1 ] ||
+    fail "the captain-approved timing line in secondmate-provisioning is missing or no longer unique"
+  skill_content_line=$skill_content_lines
+  assert_contains "$(sed -n "$((skill_content_line - 1))p" "$skill")" 'fm-authority: captain-decision' \
+    "the captain-approved timing line in secondmate-provisioning carries no adjacent authority marker"
 
-  doc_marker_line=$(grep -nF '<!-- fm-authority: captain-decision' "$doc" | cut -d: -f1)
-  doc_content_line=$(grep -nF "By the captain's 2026-08-09 decision" "$doc" | cut -d: -f1)
-  [ -n "$doc_marker_line" ] && [ -n "$doc_content_line" ] &&
-    [ "$doc_marker_line" -eq "$((doc_content_line - 1))" ] ||
-    fail "the note recording the captain's skill-one-owner decision carries no adjacent authority marker"
+  doc_content_lines=$(grep -nF "By the captain's 2026-08-09 decision" "$doc" | cut -d: -f1)
+  [ "$(printf '%s\n' "$doc_content_lines" | grep -c .)" -eq 1 ] ||
+    fail "the note recording the captain's skill-one-owner decision is missing or no longer unique"
+  doc_content_line=$doc_content_lines
+  assert_contains "$(sed -n "$((doc_content_line - 1))p" "$doc")" 'fm-authority: captain-decision' \
+    "the note recording the captain's skill-one-owner decision carries no adjacent authority marker"
 
   # PR 69: the live host observation the document step replaced with its opposite.
-  observation_marker_line=$(grep -nF '<!-- fm-authority: firstmate-observation' "$doc" | cut -d: -f1)
-  observation_content_line=$(grep -nF '**What firstmate observed on the host**' "$doc" | cut -d: -f1)
-  observation_end_line=$(grep -nF 'its coverage is the hermetic suites alone.' "$doc" | cut -d: -f1)
-  observation_closer_line=$(grep -nFx '<!-- /fm-authority -->' "$doc" | cut -d: -f1)
-  [ -n "$observation_marker_line" ] && [ -n "$observation_content_line" ] &&
-    [ "$observation_marker_line" -lt "$observation_content_line" ] &&
-    [ "$observation_marker_line" -eq "$((observation_content_line - 1))" ] ||
-    fail "firstmate's live host observation carries no adjacent authority marker"
-  [ -n "$observation_end_line" ] && [ -n "$observation_closer_line" ] &&
-    [ "$observation_content_line" -lt "$observation_closer_line" ] &&
-    [ "$observation_closer_line" -eq "$((observation_end_line + 1))" ] ||
+  observation_content_lines=$(grep -nF '**What firstmate observed on the host**' "$doc" | cut -d: -f1)
+  [ "$(printf '%s\n' "$observation_content_lines" | grep -c .)" -eq 1 ] ||
+    fail "firstmate's live host observation start is missing or no longer unique"
+  observation_content_line=$observation_content_lines
+  assert_contains "$(sed -n "$((observation_content_line - 1))p" "$doc")" 'fm-authority: firstmate-observation' \
+    "firstmate's live host observation carries no adjacent authority marker"
+
+  observation_end_lines=$(grep -nF 'its coverage is the hermetic suites alone.' "$doc" | cut -d: -f1)
+  [ "$(printf '%s\n' "$observation_end_lines" | grep -c .)" -eq 1 ] ||
+    fail "firstmate's live host observation end is missing or no longer unique"
+  observation_end_line=$observation_end_lines
+  [ "$observation_content_line" -lt "$observation_end_line" ] ||
+    fail "firstmate's live host observation boundaries are out of order"
+  [ "$(sed -n "$((observation_end_line + 1))p" "$doc")" = '<!-- /fm-authority -->' ] ||
     fail "the multi-line host observation is not closed immediately after its protected content"
   pass "both twice-deleted passages carry the marker that would have protected them"
 }
