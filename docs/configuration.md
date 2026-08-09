@@ -277,7 +277,7 @@ When an allowlisted config item changes for an already-running home, it sends th
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
-An sbx (VM) secondmate needs no separate in-guest push command: its guest home reads inherited items through read-through symlinks, while [`docs/sbx-backend.md`](sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns the stale-mount caveat and why runtime handoff data uses the signal bridge instead.
+An sbx (VM) secondmate needs no separate in-guest push command: [`docs/sbx-backend.md`](sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns its guest read paths, including the stale-mount caveat for inherited config and the signal-bridge delivery path for shared captain preferences.
 One nuance of that read path: the symlink set is created from the `FM_INHERITABLE_CONFIG` list at spawn, so an item *added to the declared list* later reaches existing sbx guests at their next resurrection or respawn, not at the next push.
 
 ## X mode (.env)

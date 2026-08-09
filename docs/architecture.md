@@ -164,7 +164,7 @@ After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific
 Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
 Secondmate host homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
-The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract; [`docs/sbx-backend.md`](sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns sbx's in-guest read-through path and its stale-mount caveat.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract; [`docs/sbx-backend.md`](sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns sbx's in-guest read paths and delivery timing.
 
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
