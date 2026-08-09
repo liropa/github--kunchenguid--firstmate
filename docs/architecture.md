@@ -124,6 +124,10 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
 The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
+The same file's `document.instructions` is trusted the same way, and closes a different gap: the document step polices duplication correctly but cannot tell that a line's justification is external to the diff, so it twice deleted material it had no authority over - a captain decision and a firstmate host observation - and passed its checks afterwards both times.
+The instructions declare the `fm-authority` marker that makes such content visible to the step, which reports a conflict against it instead of resolving one; no-mistakes appends them beneath its built-in placement policy and states that repository rules may narrow it but never weaken it, so ordinary duplicate removal is untouched.
+Because the value is read only from the default branch, a marker added on a branch protects nothing until that change lands.
+The `firstmate-coding-guidelines` skill owns when and how to mark content.
 Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
