@@ -296,10 +296,12 @@ assert_anchor_rejects_duplicates() {
   awk '{ print }' "$file" >"$unpadded"
   printf '%s\n' "$anchor" >>"$unpadded"
 
-  [ -s "$padded" ] && grep -qF -- "$anchor" "$padded" ||
+  if ! [ -s "$padded" ] || ! grep -qF -- "$anchor" "$padded"; then
     fail "the padded duplicate scratch copy is empty or lost its anchor: $anchor"
-  [ -s "$unpadded" ] && grep -qF -- "$anchor" "$unpadded" ||
+  fi
+  if ! [ -s "$unpadded" ] || ! grep -qF -- "$anchor" "$unpadded"; then
     fail "the unpadded duplicate scratch copy is empty or lost its anchor: $anchor"
+  fi
   [ "$(fixed_string_occurrences "$padded" "$anchor")" -ne 1 ] ||
     fail "a padded duplicate left the file-wide uniqueness check green: $anchor"
   [ "$(fixed_string_occurrences "$unpadded" "$anchor")" -ne 1 ] ||
@@ -324,8 +326,9 @@ assert_anchor_rejects_overlapping_duplicate() {
     { print }
   ' "$file" >"$overlapping"
 
-  [ -s "$overlapping" ] && grep -qF -- "$anchor" "$overlapping" ||
+  if ! [ -s "$overlapping" ] || ! grep -qF -- "$anchor" "$overlapping"; then
     fail "the overlapping duplicate scratch copy is empty or lost its anchor: $anchor"
+  fi
   [ "$(fixed_string_occurrences "$overlapping" "$anchor")" -ne 1 ] ||
     fail "an overlapping duplicate left the file-wide uniqueness check green: $anchor"
 }
