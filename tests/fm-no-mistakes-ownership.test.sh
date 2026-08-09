@@ -74,6 +74,24 @@ lines_ending_with() {
   ' "$1"
 }
 
+fixed_string_occurrences() {
+  needle=$2 awk '
+    BEGIN { n = ENVIRON["needle"]; len = length(n); count = 0 }
+    {
+      line = $0
+      while ((at = index(line, n)) > 0) {
+        count++
+        line = substr(line, at + len)
+      }
+    }
+    END { print count }
+  ' "$1"
+}
+
+assert_fixed_string_occurs_once() {
+  [ "$(fixed_string_occurrences "$1" "$2")" -eq 1 ] || fail "$3"
+}
+
 test_document_instructions_protect_external_authority() {
   local instructions
   instructions=$(document_instructions)
@@ -165,6 +183,8 @@ test_twice_deleted_content_is_marked() {
 
   # PR 70: the captain-approved reinforcement line, and the note recording that
   # the captain chose it deliberately. The document step deleted both.
+  assert_fixed_string_occurs_once "$skill" "$SKILL_TIMING_START" \
+    "the captain-approved timing line in secondmate-provisioning is missing or no longer unique"
   skill_content_lines=$(lines_starting_with "$skill" "$SKILL_TIMING_START")
   [ "$(printf '%s\n' "$skill_content_lines" | grep -c .)" -eq 1 ] ||
     fail "the captain-approved timing line in secondmate-provisioning is missing, padded, or no longer unique"
@@ -172,6 +192,8 @@ test_twice_deleted_content_is_marked() {
   assert_contains "$(sed -n "$((skill_content_line - 1))p" "$skill")" 'fm-authority: captain-decision' \
     "the captain-approved timing line in secondmate-provisioning carries no adjacent authority marker"
 
+  assert_fixed_string_occurs_once "$doc" "$DOC_DECISION_START" \
+    "the note recording the captain's skill-one-owner decision is missing or no longer unique"
   doc_content_lines=$(lines_starting_with "$doc" "$DOC_DECISION_START")
   [ "$(printf '%s\n' "$doc_content_lines" | grep -c .)" -eq 1 ] ||
     fail "the note recording the captain's skill-one-owner decision is missing, padded, or no longer unique"
@@ -180,6 +202,8 @@ test_twice_deleted_content_is_marked() {
     "the note recording the captain's skill-one-owner decision carries no adjacent authority marker"
 
   # PR 69: the live host observation the document step replaced with its opposite.
+  assert_fixed_string_occurs_once "$doc" "$OBSERVATION_START" \
+    "firstmate's live host observation start is missing or no longer unique"
   observation_content_lines=$(lines_starting_with "$doc" "$OBSERVATION_START")
   [ "$(printf '%s\n' "$observation_content_lines" | grep -c .)" -eq 1 ] ||
     fail "firstmate's live host observation start is missing, padded, or no longer unique"
@@ -187,6 +211,8 @@ test_twice_deleted_content_is_marked() {
   assert_contains "$(sed -n "$((observation_content_line - 1))p" "$doc")" 'fm-authority: firstmate-observation' \
     "firstmate's live host observation carries no adjacent authority marker"
 
+  assert_fixed_string_occurs_once "$doc" "$OBSERVATION_END" \
+    "firstmate's live host observation end is missing or no longer unique"
   observation_end_lines=$(lines_ending_with "$doc" "$OBSERVATION_END")
   [ "$(printf '%s\n' "$observation_end_lines" | grep -c .)" -eq 1 ] ||
     fail "firstmate's live host observation end is missing, padded, or no longer unique"
@@ -254,6 +280,46 @@ test_anchors_reject_padded_protected_lines() {
   pass "padding a protected passage breaks its anchor instead of leaving the placement test green"
 }
 
+assert_anchor_rejects_duplicates() {
+  local file=$1 anchor=$2 tmp=$3 padded unpadded
+  [ -s "$file" ] || fail "cannot negative-test uniqueness with an empty or missing protected file: $file"
+  [ "$(fixed_string_occurrences "$file" "$anchor")" -eq 1 ] ||
+    fail "cannot negative-test an anchor that does not occur exactly once: $anchor"
+
+  padded=$(mktemp "$tmp/padded-duplicate.XXXXXX") ||
+    fail "could not create the padded duplicate scratch copy: $anchor"
+  unpadded=$(mktemp "$tmp/unpadded-duplicate.XXXXXX") ||
+    fail "could not create the unpadded duplicate scratch copy: $anchor"
+  awk '{ print }' "$file" >"$padded"
+  printf 'Note: %s duplicated elsewhere.\n' "$anchor" >>"$padded"
+  awk '{ print }' "$file" >"$unpadded"
+  printf '%s\n' "$anchor" >>"$unpadded"
+
+  [ -s "$padded" ] && grep -qF -- "$anchor" "$padded" ||
+    fail "the padded duplicate scratch copy is empty or lost its anchor: $anchor"
+  [ -s "$unpadded" ] && grep -qF -- "$anchor" "$unpadded" ||
+    fail "the unpadded duplicate scratch copy is empty or lost its anchor: $anchor"
+  [ "$(fixed_string_occurrences "$padded" "$anchor")" -ne 1 ] ||
+    fail "a padded duplicate left the file-wide uniqueness check green: $anchor"
+  [ "$(fixed_string_occurrences "$unpadded" "$anchor")" -ne 1 ] ||
+    fail "an unpadded duplicate left the file-wide uniqueness check green: $anchor"
+}
+
+test_anchors_reject_duplicate_text() {
+  local skill="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
+  local doc="$ROOT/docs/sbx-backend.md"
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-anchor-duplicates.XXXXXX")
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
+  FM_TEST_CLEANUP_DIRS+=("$tmp")
+
+  assert_anchor_rejects_duplicates "$skill" "$SKILL_TIMING_START" "$tmp"
+  assert_anchor_rejects_duplicates "$doc" "$DOC_DECISION_START" "$tmp"
+  assert_anchor_rejects_duplicates "$doc" "$OBSERVATION_START" "$tmp"
+  assert_anchor_rejects_duplicates "$doc" "$OBSERVATION_END" "$tmp"
+  pass "padded and unpadded anchor duplicates break file-wide uniqueness"
+}
+
 test_marker_convention_is_documented_for_authors() {
   local skill="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 
@@ -273,4 +339,5 @@ test_document_instructions_keep_duplication_policing
 test_authority_markers_are_well_formed
 test_twice_deleted_content_is_marked
 test_anchors_reject_padded_protected_lines
+test_anchors_reject_duplicate_text
 test_marker_convention_is_documented_for_authors
