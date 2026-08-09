@@ -205,7 +205,7 @@ How that vector reaches the guest is a separate matter, and it shipped broken; "
 
 Each of the three reporting cases was confirmed failing against the pre-change adapter before being accepted as passing (`missing: 'cannot read data/captain-shared.md through its guest link'`, `missing: 'outdated data/captain-shared.md through its guest link'`, and `missing: 'still reads data/captain-shared.md through its guest link'`), while the two designed-behaviour cases pass both before and after - they lock in existing behaviour rather than the new check.
 
-**Not proven, and what would prove it**: no live sandbox was created or exec'd for this work, so nothing here measures what a real guest sees after the primary publishes a shared captain file.
+**Not proven, and what would prove it**: no live sandbox was created or exec'd for the shared captain file's read-through investigation, so nothing here measures what a real guest sees after the primary publishes a shared captain file.
 Two things remain open - whether the mount ever picks up a host write made after guest creation, and if so which lifecycle event does it.
 Proving them needs a disposable sbx secondmate (never the captain's live one): publish `data/captain-shared.md` in the primary, run the bootstrap sweep so the host home has it, then read `sbx exec fm-<id> -- cat <home>/data/captain-shared.md` and `sbx exec fm-<id> -- ls -la $FM_SBX_SOURCE_MOUNT/data/` before a stop, after `sbx stop` plus a steer-driven resurrection, and after a fresh `sbx create`.
 Until that runs, treat the warning above as the only thing standing between a published shared file and a guest that silently never sees it.
