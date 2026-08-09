@@ -75,13 +75,14 @@ lines_ending_with() {
 }
 
 fixed_string_occurrences() {
+  [ -n "$2" ] || fail "cannot count occurrences of an empty fixed string"
   needle=$2 awk '
     BEGIN { n = ENVIRON["needle"]; len = length(n); count = 0 }
     {
       line = $0
       while ((at = index(line, n)) > 0) {
         count++
-        line = substr(line, at + len)
+        line = substr(line, at + 1)
       }
     }
     END { print count }
@@ -305,6 +306,30 @@ assert_anchor_rejects_duplicates() {
     fail "an unpadded duplicate left the file-wide uniqueness check green: $anchor"
 }
 
+assert_anchor_rejects_overlapping_duplicate() {
+  local file=$1 anchor=$2 tmp=$3 overlapping
+  [ -s "$file" ] || fail "cannot negative-test uniqueness with an empty or missing protected file: $file"
+  [ "$(fixed_string_occurrences "$file" "$anchor")" -eq 1 ] ||
+    fail "cannot negative-test an anchor that does not occur exactly once: $anchor"
+
+  overlapping=$(mktemp "$tmp/overlapping-duplicate.XXXXXX") ||
+    fail "could not create the overlapping duplicate scratch copy: $anchor"
+  needle=$anchor replacement="${anchor}${anchor:2}" awk '
+    BEGIN { n = ENVIRON["needle"]; r = ENVIRON["replacement"]; replaced = 0 }
+    !replaced && (at = index($0, n)) > 0 {
+      print substr($0, 1, at - 1) r substr($0, at + length(n))
+      replaced = 1
+      next
+    }
+    { print }
+  ' "$file" >"$overlapping"
+
+  [ -s "$overlapping" ] && grep -qF -- "$anchor" "$overlapping" ||
+    fail "the overlapping duplicate scratch copy is empty or lost its anchor: $anchor"
+  [ "$(fixed_string_occurrences "$overlapping" "$anchor")" -ne 1 ] ||
+    fail "an overlapping duplicate left the file-wide uniqueness check green: $anchor"
+}
+
 test_anchors_reject_duplicate_text() {
   local skill="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
   local doc="$ROOT/docs/sbx-backend.md"
@@ -317,7 +342,8 @@ test_anchors_reject_duplicate_text() {
   assert_anchor_rejects_duplicates "$doc" "$DOC_DECISION_START" "$tmp"
   assert_anchor_rejects_duplicates "$doc" "$OBSERVATION_START" "$tmp"
   assert_anchor_rejects_duplicates "$doc" "$OBSERVATION_END" "$tmp"
-  pass "padded and unpadded anchor duplicates break file-wide uniqueness"
+  assert_anchor_rejects_overlapping_duplicate "$doc" "$OBSERVATION_START" "$tmp"
+  pass "padded, unpadded, and overlapping anchor duplicates break file-wide uniqueness"
 }
 
 test_marker_convention_is_documented_for_authors() {
