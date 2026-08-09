@@ -53,6 +53,27 @@ marked_files() {
   git -C "$ROOT" ls-files -- '*.md' | sed "s|^|$ROOT/|"
 }
 
+# Line numbers whose line starts, or ends, with a fixed string.
+#
+# The placement test below computes its adjacency and block-end assertions FROM
+# the line number these return, so a search that matched anywhere in the line
+# could bind to a line whose boundary had already moved. Anchoring each search
+# makes padding a protected passage break the search loudly instead.
+#
+# The needle crosses into awk through the environment rather than -v, because -v
+# runs backslash escape processing over the value and these needles are literal
+# Markdown that may grow an escape.
+lines_starting_with() {
+  needle=$2 awk 'BEGIN { n = ENVIRON["needle"] } index($0, n) == 1 { print NR }' "$1"
+}
+
+lines_ending_with() {
+  needle=$2 awk '
+    BEGIN { n = ENVIRON["needle"]; len = length(n) }
+    length($0) >= len && substr($0, length($0) - len + 1) == n { print NR }
+  ' "$1"
+}
+
 test_document_instructions_protect_external_authority() {
   local instructions
   instructions=$(document_instructions)
@@ -126,6 +147,16 @@ test_authority_markers_are_well_formed() {
   pass "every authority marker names a declared kind, a date, and a reason"
 }
 
+# The four protected passages the placement test anchors on. Named once so the
+# negative self-test below pins exactly the strings that test searches for.
+# Three are the START of their line; the observation's closer is the END of its.
+# The backticks are literal Markdown code-span text.
+# shellcheck disable=SC2016
+SKILL_TIMING_START='A mid-session `data/captain-shared.md` push takes effect'
+DOC_DECISION_START="By the captain's 2026-08-09 decision"
+OBSERVATION_START='**What firstmate observed on the host**'
+OBSERVATION_END='its coverage is the hermetic suites alone.'
+
 test_twice_deleted_content_is_marked() {
   local skill="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
   local doc="$ROOT/docs/sbx-backend.md"
@@ -134,39 +165,93 @@ test_twice_deleted_content_is_marked() {
 
   # PR 70: the captain-approved reinforcement line, and the note recording that
   # the captain chose it deliberately. The document step deleted both.
-  # The backticks are literal Markdown code-span text.
-  # shellcheck disable=SC2016
-  skill_content_lines=$(grep -nF 'A mid-session `data/captain-shared.md` push takes effect' "$skill" | cut -d: -f1)
+  skill_content_lines=$(lines_starting_with "$skill" "$SKILL_TIMING_START")
   [ "$(printf '%s\n' "$skill_content_lines" | grep -c .)" -eq 1 ] ||
-    fail "the captain-approved timing line in secondmate-provisioning is missing or no longer unique"
+    fail "the captain-approved timing line in secondmate-provisioning is missing, padded, or no longer unique"
   skill_content_line=$skill_content_lines
   assert_contains "$(sed -n "$((skill_content_line - 1))p" "$skill")" 'fm-authority: captain-decision' \
     "the captain-approved timing line in secondmate-provisioning carries no adjacent authority marker"
 
-  doc_content_lines=$(grep -nF "By the captain's 2026-08-09 decision" "$doc" | cut -d: -f1)
+  doc_content_lines=$(lines_starting_with "$doc" "$DOC_DECISION_START")
   [ "$(printf '%s\n' "$doc_content_lines" | grep -c .)" -eq 1 ] ||
-    fail "the note recording the captain's skill-one-owner decision is missing or no longer unique"
+    fail "the note recording the captain's skill-one-owner decision is missing, padded, or no longer unique"
   doc_content_line=$doc_content_lines
   assert_contains "$(sed -n "$((doc_content_line - 1))p" "$doc")" 'fm-authority: captain-decision' \
     "the note recording the captain's skill-one-owner decision carries no adjacent authority marker"
 
   # PR 69: the live host observation the document step replaced with its opposite.
-  observation_content_lines=$(grep -nF '**What firstmate observed on the host**' "$doc" | cut -d: -f1)
+  observation_content_lines=$(lines_starting_with "$doc" "$OBSERVATION_START")
   [ "$(printf '%s\n' "$observation_content_lines" | grep -c .)" -eq 1 ] ||
-    fail "firstmate's live host observation start is missing or no longer unique"
+    fail "firstmate's live host observation start is missing, padded, or no longer unique"
   observation_content_line=$observation_content_lines
   assert_contains "$(sed -n "$((observation_content_line - 1))p" "$doc")" 'fm-authority: firstmate-observation' \
     "firstmate's live host observation carries no adjacent authority marker"
 
-  observation_end_lines=$(grep -nF 'its coverage is the hermetic suites alone.' "$doc" | cut -d: -f1)
+  observation_end_lines=$(lines_ending_with "$doc" "$OBSERVATION_END")
   [ "$(printf '%s\n' "$observation_end_lines" | grep -c .)" -eq 1 ] ||
-    fail "firstmate's live host observation end is missing or no longer unique"
+    fail "firstmate's live host observation end is missing, padded, or no longer unique"
   observation_end_line=$observation_end_lines
   [ "$observation_content_line" -lt "$observation_end_line" ] ||
     fail "firstmate's live host observation boundaries are out of order"
   [ "$(sed -n "$((observation_end_line + 1))p" "$doc")" = '<!-- /fm-authority -->' ] ||
     fail "the multi-line host observation is not closed immediately after its protected content"
   pass "both twice-deleted passages carry the marker that would have protected them"
+}
+
+# Pad the one line an anchor matches, in a scratch copy of the real file, and
+# require the anchor to find nothing. Padding is the exact way a loose anchor
+# goes wrong: the passage keeps its text, so an unanchored search stays green
+# while the line it reports no longer bounds what the marker protects.
+assert_start_anchor_rejects_padding() {
+  local file=$1 anchor=$2 tmp=$3 line padded
+  line=$(lines_starting_with "$file" "$anchor")
+  [ "$(printf '%s\n' "$line" | grep -c .)" -eq 1 ] ||
+    fail "cannot negative-test a start anchor that does not match exactly one line: $anchor"
+  padded=$(mktemp "$tmp/padded.XXXXXX") ||
+    fail "could not create the scratch copy this negative test needs: $anchor"
+  awk -v n="$line" 'NR == n { print "Note: " $0; next } { print }' "$file" >"$padded"
+  # The passage must survive the padding verbatim. Without this the test would
+  # pass on an empty or missing scratch copy, proving nothing at all.
+  grep -qF -- "$anchor" "$padded" ||
+    fail "the padded scratch copy lost the passage, so this negative test proves nothing: $anchor"
+  [ -z "$(lines_starting_with "$padded" "$anchor")" ] ||
+    fail "text added in front of a protected passage left its start anchor matching: $anchor"
+}
+
+assert_end_anchor_rejects_padding() {
+  local file=$1 anchor=$2 tmp=$3 line padded
+  line=$(lines_ending_with "$file" "$anchor")
+  [ "$(printf '%s\n' "$line" | grep -c .)" -eq 1 ] ||
+    fail "cannot negative-test an end anchor that does not match exactly one line: $anchor"
+  padded=$(mktemp "$tmp/padded.XXXXXX") ||
+    fail "could not create the scratch copy this negative test needs: $anchor"
+  awk -v n="$line" 'NR == n { print $0 " (see above)"; next } { print }' "$file" >"$padded"
+  grep -qF -- "$anchor" "$padded" ||
+    fail "the padded scratch copy lost the passage, so this negative test proves nothing: $anchor"
+  [ -z "$(lines_ending_with "$padded" "$anchor")" ] ||
+    fail "text added after a protected passage left its end anchor matching: $anchor"
+}
+
+# The placement test passing on the current tree is no evidence that its anchors
+# are strict - before they were anchored, every one of these padded cases still
+# passed. Prove the strictness directly instead, against the real protected
+# files and the same anchor strings the placement test uses.
+test_anchors_reject_padded_protected_lines() {
+  local skill="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
+  local doc="$ROOT/docs/sbx-backend.md"
+  local tmp
+  # Not fm_test_tmproot: its first call installs an EXIT trap that, fired on this
+  # command-substitution subshell, deletes the dir before use - the same trap
+  # tests/wake-helpers.sh documents. Register for the shared cleanup by hand.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-anchor-padding.XXXXXX")
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
+  FM_TEST_CLEANUP_DIRS+=("$tmp")
+
+  assert_start_anchor_rejects_padding "$skill" "$SKILL_TIMING_START" "$tmp"
+  assert_start_anchor_rejects_padding "$doc" "$DOC_DECISION_START" "$tmp"
+  assert_start_anchor_rejects_padding "$doc" "$OBSERVATION_START" "$tmp"
+  assert_end_anchor_rejects_padding "$doc" "$OBSERVATION_END" "$tmp"
+  pass "padding a protected passage breaks its anchor instead of leaving the placement test green"
 }
 
 test_marker_convention_is_documented_for_authors() {
@@ -187,4 +272,5 @@ test_document_instructions_protect_external_authority
 test_document_instructions_keep_duplication_policing
 test_authority_markers_are_well_formed
 test_twice_deleted_content_is_marked
+test_anchors_reject_padded_protected_lines
 test_marker_convention_is_documented_for_authors
