@@ -30,3 +30,50 @@ commands:
 test:
   evidence:
     store_in_repo: false
+
+# Teach the document step to see AUTHORITY, which it structurally cannot infer
+# from a diff. The step polices duplication correctly, but content justified
+# outside the diff - a captain decision, or a host observation the gate agent
+# cannot reproduce from inside its sandbox - reads to it as unsupported
+# duplication, so it deleted exactly the material that most needed protecting
+# (twice, on consecutive PRs, both times going green afterwards). Trusted-only,
+# like disable_project_settings above: no-mistakes reads document.instructions
+# only from the default-branch copy of this file, so these rules take effect for
+# runs started after they land on main, and a pushed branch cannot weaken them.
+# no-mistakes appends this under its built-in placement policy, which it states
+# these rules may narrow or clarify but never weaken - so this ADDS a
+# do-not-delete class; it never relaxes ordinary duplicate removal.
+# The authoring side of the convention (when to mark, and the exact marker) is
+# owned by the firstmate-coding-guidelines skill; see also docs/architecture.md
+# "No-mistakes gate authority boundary."
+document:
+  instructions: |
+    This repository marks a small amount of content whose justification lives
+    OUTSIDE the diff you can see. Such content carries an HTML-comment marker:
+
+      <!-- fm-authority: captain-decision <date> - <reason> -->
+      <!-- fm-authority: firstmate-observation <date> - <reason> -->
+
+    Scope is explicit. A marker on its own protects exactly the one line that
+    follows it. A marker closed by a later `<!-- /fm-authority -->` protects
+    every line between the two.
+
+    Rules for protected content:
+    - Do not delete, weaken, or rewrite protected content, and do not delete its
+      markers. `captain-decision` records a human decision that has already been
+      made; `firstmate-observation` records a live observation made outside this
+      checkout that you cannot reproduce from inside it. For both, the diff
+      contains no supporting evidence BY CONSTRUCTION - that absence is expected
+      and is never grounds for removal.
+    - Protected content is a deliberate, already-approved exception to one-owner
+      consolidation. Do not treat it as an overlooked duplicate, an unsupported
+      claim, or an oversight to tidy up.
+    - If protected content looks stale, wrong, or genuinely contradicted by this
+      change, report one finding describing the conflict and leave the text in
+      place. Reporting it is the correct outcome; resolving it yourself is not.
+    - Markers protect only what their scope covers, never a whole file. Adjacent
+      unmarked content in the same file is ordinary documentation.
+
+    Everything else is unchanged: keep removing genuine unmarked duplication and
+    reducing stale copies to pointers exactly as the placement policy above
+    requires. An unmarked duplicate is still a duplicate.

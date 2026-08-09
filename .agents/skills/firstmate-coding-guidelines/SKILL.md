@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the fm-authority marker for content the no-mistakes document step cannot justify from the diff, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -38,6 +38,30 @@ Every other mention of it is a one-line cross-reference, never a restatement.
 A single deliberate one-line reinforcement at a genuine risk point is allowed, for example a "don't forget X" placed exactly where forgetting X is costly.
 Restating the contract's substance a second time is not allowed: the two copies will drift the moment only one is edited.
 When you touch a contract, grep the repo for its other mentions and update the cross-references, not duplicate the change into a second full copy.
+
+## Marking content the gate cannot justify from the diff
+
+The no-mistakes document step polices duplication correctly but cannot see authority.
+Content whose justification is external to the diff reads to it as unsupported duplication, so it removes exactly the material that most needs keeping: on PR 69 it deleted a live host observation firstmate had instructed the worker to record and replaced it with the opposite claim, and on PR 70 it deleted a one-line reinforcement the captain had approved minutes earlier together with the note recording that the captain chose it deliberately.
+Both runs went green afterwards, so passing checks are not a defense here.
+
+Mark such content so the step can recognize it:
+
+```markdown
+<!-- fm-authority: captain-decision <date> - <reason> -->
+The single line the captain approved.
+
+<!-- fm-authority: firstmate-observation <date> - <reason> -->
+A passage recording something observed outside this checkout.
+<!-- /fm-authority -->
+```
+
+A bare marker protects the one line that follows it; a marker closed by `<!-- /fm-authority -->` protects everything between the two.
+Use `captain-decision` for a decision the captain already made, and `firstmate-observation` for a live reading the gate agent cannot reproduce from inside its own checkout.
+
+Mark only content that genuinely has no support in the diff.
+The marker is not a way to exempt ordinary prose from review: unmarked duplication is still removed, and a marked passage can still come back as a finding for the captain to judge.
+`.no-mistakes.yaml`'s `document.instructions` is the operative copy the gate reads, and it takes effect only from the default branch, so a new marker protects nothing until the change carrying it lands on main.
 
 ## Inline-stub pattern
 

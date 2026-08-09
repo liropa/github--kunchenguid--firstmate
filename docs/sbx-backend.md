@@ -182,6 +182,7 @@ What the measurement does **not** establish, and the scope is deliberate:
 
 ### Shared captain delivery (2026-08-09)
 
+<!-- fm-authority: captain-decision 2026-08-09 - records the skill-one-owner decision that keeps the reinforcement line; deleting this note removes the guard on that line -->
 By the captain's 2026-08-09 decision, the secondmate-provisioning skill deliberately carries the permitted one-line timing reinforcement at its risk point rather than a bare cross-reference; this is not overlooked duplication.
 `data/captain-shared.md` is the one inherited item whose link does **not** point at the RO source mount.
 It points at a delivery copy on the signal bridge, and `fm_backend_sbx_provision_guest_home` publishes the host home's validated copy there immediately before the guest reads it.
@@ -317,6 +318,7 @@ The worker that wrote the fix created, started, and exec'd no sandbox, and repro
 Its suites cover the guest-home provisioning path and the keep-alive path for an older meta record with no `home=`.
 That is a statement about the worker's own scope, not about this change as a whole; firstmate's host observations are the other half, and neither substitutes for the other.
 
+<!-- fm-authority: firstmate-observation 2026-08-08 - live host reading against the captain's real sandbox; not reproducible from a gate checkout, so the diff carries no evidence for it -->
 **What firstmate observed on the host**, with the captain's authorisation, is the AFTER half of the BEFORE reading above - same live home, same live sandbox, running this branch's code at `6ea5b11`:
 
 ```
@@ -335,6 +337,7 @@ The same command, against the same sandbox, refused every resurrection before th
 Two limits on that live proof.
 The AFTER run deliberately used this branch's code, not merged code, against a live machine, because that machine was already unreachable so a failed attempt cost nothing - it was not a clean post-merge verification and not a routine check.
 It covers the guest-home provisioning path only: the keep-alive instance of the same defect was never exercised live, and its coverage is the hermetic suites alone.
+<!-- /fm-authority -->
 
 ## Guest shell-profile env (`CLAUDE_CODE_OAUTH_TOKEN`)
 
