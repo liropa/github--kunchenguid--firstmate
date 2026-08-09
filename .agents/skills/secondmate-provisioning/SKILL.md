@@ -118,6 +118,7 @@ These config values remain defaults and rules only; they must not harden `fm-spa
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
 It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
 Sbx guests reach this material through their existing links rather than a second copy, and a newly added `FM_INHERITABLE_CONFIG` item reaches an already-created guest only when sbx provisioning reasserts the link set at resurrection or respawn; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#guest-home-provisioning-read-through-inheritance) owns what that read path does and does not deliver, and do not tell a captain a pushed change has reached an sbx guest without it.
+A mid-session `data/captain-shared.md` push takes effect at that guest's next agent launch, not at push time; report it that way.
 An sbx guest's TRACKED files (`AGENTS.md`, `bin/`, `.agents/skills/`) are a separate in-VM clone that no host-home fast-forward reaches; the tracked-file sync (`docs/sbx-backend.md` "Tracked-file sync") advances them at resurrection and through the `/updatefirstmate` and bootstrap sweeps, each of which reports the guest outcome separately from the host clone's.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 

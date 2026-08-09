@@ -182,6 +182,7 @@ What the measurement does **not** establish, and the scope is deliberate:
 
 ### Shared captain delivery (2026-08-09)
 
+By the captain's 2026-08-09 decision, the secondmate-provisioning skill deliberately carries the permitted one-line timing reinforcement at its risk point rather than a bare cross-reference; this is not overlooked duplication.
 `data/captain-shared.md` is the one inherited item whose link does **not** point at the RO source mount.
 It points at a delivery copy on the signal bridge, and `fm_backend_sbx_provision_guest_home` publishes the host home's validated copy there immediately before the guest reads it.
 
