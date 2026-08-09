@@ -204,7 +204,7 @@ Properties that carry over unchanged from the read-through design:
 | --- | --- | --- | --- |
 | never published | nothing written (`unchanged`) | `ABSENT` through the dangling link | correct by design |
 | published | copy written at mode 444, then published to the bridge | the delivered bytes | correct |
-| published, then cleared | local copy quarantined and removed, delivery copy removed | `ABSENT` | correct |
+| published, then cleared, **once a propagation point runs** | local copy quarantined and removed, delivery copy removed | `ABSENT` | correct |
 
 `propagate_shared_captain_preferences` still owns the host-home half at every convergence point, unchanged; `publish_shared_captain_to_bridge` mirrors that **validated destination copy**, never the primary, so the delivery copy cannot disagree with the host home the guest's own check compares against.
 The delivery copy is never quarantined the way the home copy is: it has exactly one author and holds nobody's work, so divergent bytes there are a failed delivery, not content worth preserving.
@@ -232,10 +232,49 @@ ok - sbx guest: provisioning with no shared captain file sends no empty guest ar
 
 The delivery case was confirmed failing against the publish disabled (`not ok - a published file must reach the guest through its link`) before being accepted as passing, and the three reporting cases are driven by an unwritable bridge directory so the publish genuinely cannot land.
 
-**Not proven, and what would prove it**: no live sandbox was created or exec'd for this work, so nothing here measures a real guest reading a shared captain file the primary published.
-The bridge's guest-to-host direction is measured (Gate 0: plain bind mount at the same absolute path, sub-millisecond visibility for appends and mtime-only touches), and the status and turn-end signals ride it in production continuously; the host-to-guest direction for a newly written file is fixture-verified only, exactly as "Backlog handoff" below records for its own batches.
-Proving it needs a disposable sbx secondmate (never the captain's live one): publish `data/captain-shared.md` in the primary, run the bootstrap sweep so the host home has it, then read `sbx exec fm-<id> -- cat <home>/data/captain-shared.md` before a stop, after `sbx stop` plus a steer-driven resurrection, and after clearing the primary file and re-provisioning.
-The two questions the previous version of this document listed as open are now partly answered: the mount does take post-creation host writes, and stop-plus-restart is a sufficient lifecycle event; whether it ever refreshes **without** a restart is still untested, and no longer blocks this file's delivery.
+**Proven live on a disposable guest** by firstmate, with the captain's authorisation, 2026-08-09.
+The captain's live `fm-agent-dotfiles` was never touched.
+Setup: a disposable sbx secondmate `sharedcaptain-proof`, seeded `--no-projects` with a plain-clone home, agent flavor `codex`, template `docker.io/library/adf-codex:v6`, seeded and spawned and exercised and torn down entirely with this change's code.
+A temporary `data/captain-shared.md` carrying a valid main-authoritative header and the marker `DELIVERY-PROOF-MARKER: fm-shared-captain-proof-20260809-a7f3c1` was published in the primary home and removed afterwards.
+
+Fresh guest, before any stop - delivered:
+
+```
+$ sbx exec fm-sharedcaptain-proof -- bash -lc 'ls -la <home>/data/captain-shared.md'
+... captain-shared.md -> /Users/lp1/dev/fm-signals/sharedcaptain-proof/inherit/captain-shared.md
+
+$ sbx exec fm-sharedcaptain-proof -- bash -lc 'grep -c <marker> <home>/data/captain-shared.md'
+1
+```
+
+The link resolves to the signal-bridge delivery copy rather than the RO source mount, and the guest reads the published bytes.
+After `sbx stop` plus a steer-driven resurrection the machine went `stopped` to `running` and the marker count was still `1`, so delivery survives the lifecycle event that a mount-based read path depends on.
+
+After propagation mirrored the primary's removal, the guest read the file as absent:
+
+```
+$ bin/fm-config-push.sh
+SECONDMATE_SYNC: ... quarantined data/captain-shared.md drift at .../data/.captain-shared.md.quarantine.20260809T025104Z.703e13f...
+  data/captain-shared.md: pushed - mirrored primary absence after quarantining local copy
+
+$ sbx exec fm-sharedcaptain-proof -- bash -lc '[ -f <home>/data/captain-shared.md ] && echo PRESENT || echo ABSENT'
+ABSENT
+... captain-shared.md -> /Users/lp1/dev/fm-signals/sharedcaptain-proof/inherit/captain-shared.md
+```
+
+The link is retained and only its target goes, which is the same designed absence PR 68 established.
+Isolation was verified rather than assumed: the same propagation run reported `data/captain-shared.md: unchanged` for the live `agent-dotfiles` home, proving the temporary primary file never reached it.
+
+**A restart alone does not converge a withdrawal; a propagation point must run.**
+Measured in the same session: with the file removed from the primary but no propagation run, the guest still read it as `PRESENT`, and the secondmate host home still held its `-r--r--r--` copy.
+This follows from the propagation contract rather than contradicting it.
+Provisioning publishes the **secondmate host home's** validated copy; it never re-runs primary-to-host propagation, which is owned by its three convergence points (spawn, the bootstrap secondmate sweep, `fm-config-push.sh`).
+The guest mirrors its host home faithfully at every point, so an sbx secondmate is converging on exactly the same schedule as every non-sbx secondmate home - the bootstrap sweep at each session start being the routine one.
+It is stated here because a reader could reasonably assume a restart is enough, and it is not.
+No code change is proposed for it: making provisioning converge from the primary would put a second owner on the propagation contract, and the resurrection path is reached from send contexts that have no guaranteed primary-home scope.
+
+**Still not covered**: this exercised one guest, on the `codex` flavor and the `adf-codex:v6` template.
+It covered publish, persistence across a stop and resurrection, and withdrawal; it did **not** test changing the file's bytes while a guest already holds a copy, so the update path rests on the hermetic cases above rather than on a live reading.
 
 ### The empty-cmd-element outage (2026-08-08)
 
