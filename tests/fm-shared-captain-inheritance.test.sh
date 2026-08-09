@@ -349,32 +349,35 @@ EOF
   pass "session-start digest renders data/captain-shared.md with the shared read-only label"
 }
 
-# --- sbx guest read-through -------------------------------------------------
+# --- sbx guest delivery -----------------------------------------------------
 #
-# An sbx secondmate's guest home does NOT receive a second copy: the host home
-# gets the copy above, and the guest reaches it through a symlink onto clone
-# mode's RO source mount (docs/sbx-backend.md "Guest-home provisioning"). The
-# host home and the guest clone sit at the SAME absolute path on different
-# disks, which is what FM_FAKE_SBX_GUEST_HOME models, and FM_SBX_SOURCE_MOUNT
-# points the fixture at a directory standing in for the mount - so a mount that
-# does not carry what the host home has is expressible, which is the whole
-# point: that shape was measured live on 2026-07-23 and is why the read path is
-# an inheritance channel rather than a delivery one.
+# An sbx secondmate's guest home still receives no second copy of its own: the
+# host home gets the copy above, and the guest reaches it through a symlink.
+# What the link points AT is the signal bridge, not clone mode's RO source
+# mount, because the mount only refreshes on a VM lifecycle event while the
+# bridge is a plain bind mount at the same absolute path on both sides
+# (docs/sbx-backend.md "Guest-home provisioning"). Provisioning publishes the
+# host home's copy there immediately before the guest reads it, which is what
+# makes arrival independent of whether the VM restarted this cycle.
+#
+# The host home and the guest clone sit at the SAME absolute path on different
+# disks, which is what FM_FAKE_SBX_GUEST_HOME models. The signal bridge is
+# deliberately NOT remapped: it is one directory both sides see, exactly as in
+# a real guest, which is the property the design rests on.
 
 # shellcheck source=tests/sbx-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
-# new_sbx_readthrough_world <name> <mount-has-file> <host-has-file> [mount-bytes]:
-# a fixture host home, guest clone, and stand-in source mount. Echoes
-# "host|guest|mount".
-new_sbx_readthrough_world() {  # <name> <mount-has-file> <host-has-file> [mount-bytes]
-  local name=$1 mount_has=$2 host_has=$3 mount_bytes=${4:-shared from primary} w host guest mount
+# new_sbx_delivery_world <name> <host-has-file>: a fixture host home, guest
+# clone, stand-in source mount, and signal-bridge dir. Echoes
+# "host|guest|mount|signals".
+new_sbx_delivery_world() {  # <name> <host-has-file>
+  local name=$1 host_has=$2 w host guest mount signals
   w="$TMP_ROOT/$name"
-  host="$w/sm"; guest="$w/guest-clone"; mount="$w/source-mount"
-  mkdir -p "$host/data" "$host/config" "$guest" "$mount/data" "$mount/config"
+  host="$w/sm"; guest="$w/guest-clone"; mount="$w/source-mount"; signals="$w/signals/x"
+  mkdir -p "$host/data" "$host/config" "$guest" "$mount/data" "$mount/config" "$signals"
   [ "$host_has" = yes ] && write_shared "$host/data/captain-shared.md" "shared from primary"
-  [ "$mount_has" = yes ] && write_shared "$mount/data/captain-shared.md" "$mount_bytes"
-  printf '%s|%s|%s\n' "$host" "$guest" "$mount"
+  printf '%s|%s|%s|%s\n' "$host" "$guest" "$mount" "$signals"
 }
 
 # run_provision <world-dir> <host> <guest> <mount>: run the real provisioning
@@ -392,10 +395,16 @@ run_provision() {  # <world-dir> <host> <guest> <mount>
     "$ROOT" "$host" "$w/signals/x" >/dev/null; } 2>&1
 }
 
+# bridge_path <signals>: the one delivery path, resolved the same way the lib
+# and the adapter resolve it rather than re-spelled here.
+bridge_path() {  # <signals>
+  fm_shared_captain_bridge_path "$1"
+}
+
 test_sbx_guest_link_is_the_absence_convergence_when_primary_never_published() {
-  local rec host guest mount err rc
-  rec=$(new_sbx_readthrough_world sbx-absent no no)
-  IFS='|' read -r host guest mount <<EOF
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-absent no)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
 
@@ -404,61 +413,110 @@ EOF
   [ "$rc" = 0 ] || fail "provisioning should succeed with no shared file anywhere, got rc $rc"
   [ -L "$guest/data/captain-shared.md" ] \
     || fail "the guest read path must be a symlink even with nothing to read"
-  [ "$(readlink "$guest/data/captain-shared.md")" = "$mount/data/captain-shared.md" ] \
-    || fail "the guest link must point at the source mount"
+  [ "$(readlink "$guest/data/captain-shared.md")" = "$(bridge_path "$signals")" ] \
+    || fail "the guest link must point at the delivery copy on the signal bridge"
   [ ! -f "$guest/data/captain-shared.md" ] \
     || fail "a dangling link must read as absent, the way the session digest's [ -f ] test does"
   [ -z "$err" ] || fail "a designed absence must stay silent, got: $err"
   pass "sbx guest: an unpublished shared file leaves a dangling link that reads ABSENT, silently"
 }
 
-test_sbx_guest_reads_a_published_shared_file_through_the_mount() {
-  local rec host guest mount err rc
-  rec=$(new_sbx_readthrough_world sbx-published yes yes)
-  IFS='|' read -r host guest mount <<EOF
+test_sbx_guest_reads_a_published_shared_file_through_the_bridge() {
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-published yes)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
 
   err=$(run_provision "$TMP_ROOT/sbx-published" "$host" "$guest" "$mount"); rc=$?
 
-  [ "$rc" = 0 ] || fail "provisioning should succeed when the read path resolves, got rc $rc"
+  [ "$rc" = 0 ] || fail "provisioning should succeed when delivery lands, got rc $rc: $err"
   [ -f "$guest/data/captain-shared.md" ] \
-    || fail "a mount carrying the file must make the guest link resolve"
-  cmp -s "$mount/data/captain-shared.md" "$guest/data/captain-shared.md" \
-    || fail "the guest must read the mount's bytes, not a copy of its own"
-  [ -z "$err" ] || fail "a working read path must stay silent, got: $err"
-  pass "sbx guest: a published shared file is read through the link, with no second copy"
+    || fail "a published file must reach the guest through its link"
+  cmp -s "$host/data/captain-shared.md" "$guest/data/captain-shared.md" \
+    || fail "the guest must read the primary's exact bytes"
+  # A read path, not a copy: the guest home holds a link, and the only new file
+  # is the delivery copy on the bridge.
+  [ -L "$guest/data/captain-shared.md" ] \
+    || fail "the guest must reach the file by link, never by a second copy in its own home"
+  assert_shared_readonly "$(bridge_path "$signals")"
+  assert_secondmate_write_fails "$(bridge_path "$signals")"
+  [ -z "$err" ] || fail "a working delivery must stay silent, got: $err"
+  pass "sbx guest: a published shared file is delivered and read through the link, read-only, with no second copy"
 }
 
-test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry() {
-  local rec host guest mount err rc
-  # The measured 2026-07-23 shape: the host home has the file, the mount does
-  # not carry it. Re-asserting the link cannot fix this, so the pass says so.
-  rec=$(new_sbx_readthrough_world sbx-stale no yes)
-  IFS='|' read -r host guest mount <<EOF
+test_sbx_guest_withdrawal_converges_to_absent() {
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-withdraw yes)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
+  err=$(run_provision "$TMP_ROOT/sbx-withdraw" "$host" "$guest" "$mount"); rc=$?
+  [ "$rc" = 0 ] && [ -f "$guest/data/captain-shared.md" ] \
+    || fail "the file must be delivered before withdrawal can be observed"
 
-  err=$(run_provision "$TMP_ROOT/sbx-stale" "$host" "$guest" "$mount"); rc=$?
+  # The primary cleared it, so propagation removed the host home copy; the next
+  # provisioning pass must carry that absence all the way to the guest.
+  rm -f "$host/data/captain-shared.md"
+  err=$(run_provision "$TMP_ROOT/sbx-withdraw" "$host" "$guest" "$mount"); rc=$?
 
-  [ "$rc" = 0 ] || fail "an unreadable shared file must warn, never fail the spawn or the steer"
+  [ "$rc" = 0 ] || fail "withdrawal should succeed, got rc $rc: $err"
+  [ ! -e "$(bridge_path "$signals")" ] \
+    || fail "withdrawal must remove the delivery copy, not leave retracted bytes readable"
+  [ ! -f "$guest/data/captain-shared.md" ] \
+    || fail "the guest must read a withdrawn file as ABSENT"
+  [ -L "$guest/data/captain-shared.md" ] \
+    || fail "withdrawal converges by dangling the link, not by deleting the read path"
+  [ -z "$err" ] || fail "a converged withdrawal must stay silent, got: $err"
+  pass "sbx guest: clearing the primary withdraws the delivery copy and the guest reads ABSENT"
+}
+
+# The three disagreement reports PR 68 added are the backstop for delivery
+# failing, so they must still fire. They now describe a delivery that could not
+# converge rather than a stale mount, which is reproduced by making the bridge
+# directory unwritable so the publish cannot land.
+freeze_bridge() {  # <signals>
+  local dir
+  dir=$(dirname "$(bridge_path "$1")")
+  mkdir -p "$dir"
+  chmod 500 "$dir"
+}
+
+thaw_bridge() {  # <signals>
+  chmod 700 "$(dirname "$(bridge_path "$1")")" 2>/dev/null || true
+}
+
+test_sbx_guest_reports_a_published_shared_file_the_guest_cannot_read() {
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-undelivered yes)
+  IFS='|' read -r host guest mount signals <<EOF
+$rec
+EOF
+  freeze_bridge "$signals"
+
+  err=$(run_provision "$TMP_ROOT/sbx-undelivered" "$host" "$guest" "$mount"); rc=$?
+  thaw_bridge "$signals"
+
+  [ "$rc" = 0 ] || fail "an undelivered shared file must warn, never fail the spawn or the steer"
   [ -L "$guest/data/captain-shared.md" ] || fail "the link must still be asserted"
   assert_contains "$err" "cannot read data/captain-shared.md through its guest link" \
     "the warning must name the file the guest cannot read"
-  assert_contains "$err" "$mount" "the warning must name the mount that is not carrying it"
-  pass "sbx guest: a published shared file the mount does not carry is reported, not silently absent"
+  pass "sbx guest: a published shared file that delivery could not land is reported, not silently absent"
 }
 
 test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared() {
-  local rec host guest mount err rc
-  # The opposite direction, same cause: the primary cleared the file and the
-  # host home mirrored that absence, but the mount still carries the old bytes.
-  rec=$(new_sbx_readthrough_world sbx-retracted yes no)
-  IFS='|' read -r host guest mount <<EOF
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-retracted no)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
+  # A retracted file whose delivery copy cannot be withdrawn.
+  mkdir -p "$(dirname "$(bridge_path "$signals")")"
+  write_shared "$(bridge_path "$signals")" "retracted shared preferences"
+  freeze_bridge "$signals"
 
   err=$(run_provision "$TMP_ROOT/sbx-retracted" "$host" "$guest" "$mount"); rc=$?
+  thaw_bridge "$signals"
 
   [ "$rc" = 0 ] || fail "a retracted-but-readable shared file must warn, never fail"
   assert_contains "$err" "still reads data/captain-shared.md through its guest link" \
@@ -466,51 +524,52 @@ EOF
   pass "sbx guest: still reading a shared file the primary cleared is reported"
 }
 
-test_sbx_guest_reports_outdated_shared_bytes_in_the_mount() {
-  local rec host guest mount err rc
-  rec=$(new_sbx_readthrough_world sbx-outdated yes yes "superseded shared preferences")
-  IFS='|' read -r host guest mount <<EOF
+test_sbx_guest_reports_outdated_shared_bytes() {
+  local rec host guest mount signals err rc
+  rec=$(new_sbx_delivery_world sbx-outdated yes)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
+  mkdir -p "$(dirname "$(bridge_path "$signals")")"
+  write_shared "$(bridge_path "$signals")" "superseded shared preferences"
+  freeze_bridge "$signals"
 
   err=$(run_provision "$TMP_ROOT/sbx-outdated" "$host" "$guest" "$mount"); rc=$?
+  thaw_bridge "$signals"
 
   [ "$rc" = 0 ] || fail "outdated shared bytes must warn, never fail"
   assert_contains "$err" "outdated data/captain-shared.md through its guest link" \
     "the warning must name the outdated file the guest reads"
-  pass "sbx guest: outdated shared bytes in the mount are reported"
+  pass "sbx guest: outdated shared bytes are reported"
 }
 
 test_sbx_provisioning_sends_no_empty_guest_argument() {
-  local rec host guest mount err rc
+  local rec host guest mount signals err rc
   # The 2026-08-08 outage: with no shared captain file published, the host had
   # no hash to send, sent "" for it, and sbx refused the whole exec with
   # `400 Bad Request: cmd element 10 is empty` - so EVERY resurrection of a
   # secondmate without the file failed, and absent is the default state.
-  # Absent-everywhere is deliberately the fixture, because that is the shape
-  # that broke. tests/sbx-helpers.sh refuses an empty element on every exec,
-  # so a regression fails the run; this case additionally pins the vector so
-  # the failure names the cause instead of only the symptom.
-  rec=$(new_sbx_readthrough_world sbx-no-empty-arg no no)
-  IFS='|' read -r host guest mount <<EOF
+  # tests/sbx-helpers.sh refuses an empty element on every exec, so a
+  # regression fails the run; this case additionally pins the vector so the
+  # failure names the cause instead of only the symptom.
+  rec=$(new_sbx_delivery_world sbx-no-empty-arg no)
+  IFS='|' read -r host guest mount signals <<EOF
 $rec
 EOF
 
   err=$(run_provision "$TMP_ROOT/sbx-no-empty-arg" "$host" "$guest" "$mount"); rc=$?
 
-  # rc 0 IS the empty-element assertion: tests/sbx-helpers.sh refuses any exec
-  # whose vector carries one, so this fails the moment the regression returns.
-  # It cannot be asserted from the log, because the log joins the vector with
-  # spaces and an empty element leaves no trace there - which is exactly how
-  # the old `$sig 0  crew-dispatch.json` assertion passed over the defect.
+  # rc 0 IS the empty-element assertion: the fake refuses any exec whose vector
+  # carries one. It cannot be asserted from the log, because the log joins the
+  # vector with spaces and an empty element leaves no trace there - which is
+  # exactly how the old `$sig 0  crew-dispatch.json` assertion passed over it.
   [ "$rc" = 0 ] \
     || fail "provisioning with no shared captain file must succeed, got rc $rc: $err"
-  assert_grep "data/captain-shared.md $TMP_ROOT/sbx-no-empty-arg/signals/x 0 -" \
+  assert_grep "data/captain-shared.md $signals 0 -" \
     "$TMP_ROOT/sbx-no-empty-arg/sbx.log" \
     "no published file should send want=0 plus the no-value token, never an empty element"
   pass "sbx guest: provisioning with no shared captain file sends no empty guest argument"
 }
-
 test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
@@ -520,9 +579,10 @@ test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
 test_session_start_digest_labels_shared_file_and_read_once_rule
 test_sbx_guest_link_is_the_absence_convergence_when_primary_never_published
-test_sbx_guest_reads_a_published_shared_file_through_the_mount
-test_sbx_guest_reports_a_published_shared_file_the_mount_does_not_carry
-test_sbx_guest_reports_outdated_shared_bytes_in_the_mount
+test_sbx_guest_reads_a_published_shared_file_through_the_bridge
+test_sbx_guest_withdrawal_converges_to_absent
+test_sbx_guest_reports_a_published_shared_file_the_guest_cannot_read
+test_sbx_guest_reports_outdated_shared_bytes
 test_sbx_guest_reports_still_reading_a_shared_file_the_primary_cleared
 test_sbx_provisioning_sends_no_empty_guest_argument
 

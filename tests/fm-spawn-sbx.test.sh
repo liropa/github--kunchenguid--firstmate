@@ -394,18 +394,24 @@ test_spawn_provisions_guest_home() {
   # assertion locked that in, because `$*` joins the vector and an empty
   # element is invisible in the joined form. tests/sbx-helpers.sh now refuses
   # an empty element outright; this line only documents the intended shape.
+  # The slot after it is the shared captain file's delivery path on the signal
+  # bridge, which is what the guest's link points at.
   assert_contains "$(cat "$w/sbx.log")" \
-    "_ $home /run/sandbox/source smx data/captain-shared.md $sig 0 - crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
-    "the provisioning exec should carry home, mount root, id, captain file, signals dir, captain state, and the declared inheritable list"
+    "_ $home /run/sandbox/source smx data/captain-shared.md $sig 0 - $sig/inherit/captain-shared.md crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces" \
+    "the provisioning exec should carry home, mount root, id, captain file, signals dir, captain state, delivery path, and the declared inheritable list"
 
   for item in crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces; do
     [ -L "$home/config/$item" ] || fail "config/$item should be a symlink after provisioning"
     [ "$(readlink "$home/config/$item")" = "/run/sandbox/source/config/$item" ] \
       || fail "config/$item should read through the RO source mount, got $(readlink "$home/config/$item")"
   done
+  # The shared captain file is the one item that does NOT read through the RO
+  # source mount: that mount refreshes only on a VM lifecycle event, so its link
+  # points at the signal bridge, which provisioning publishes to immediately
+  # before the guest reads it (docs/sbx-backend.md "Guest-home provisioning").
   [ -L "$home/data/captain-shared.md" ] || fail "data/captain-shared.md should be a symlink after provisioning"
-  [ "$(readlink "$home/data/captain-shared.md")" = "/run/sandbox/source/data/captain-shared.md" ] \
-    || fail "data/captain-shared.md should read through the RO source mount"
+  [ "$(readlink "$home/data/captain-shared.md")" = "$sig/inherit/captain-shared.md" ] \
+    || fail "data/captain-shared.md should read its delivery copy on the signal bridge, got $(readlink "$home/data/captain-shared.md")"
 
   # The identity marker is the one residue that must be a REGULAR file
   # (fm_root_is_secondmate_home hard-refuses [ -L ]), content = the id.
@@ -473,18 +479,20 @@ test_spawn_read_through_and_absence_semantics() {
   # semantics testable): a set item reads through the link, an unset or
   # cleared item leaves a dangling link whose [ -f ] fails - byte-for-byte
   # the absence-mirroring semantics of the inherit lib.
+  # Scoped to FM_INHERITABLE_CONFIG items, which are the only things that read
+  # through this mount. The shared captain file's delivery rides the signal
+  # bridge instead and is owned by tests/fm-shared-captain-inheritance.test.sh,
+  # whose fixture can split the host home from the guest clone - a split this
+  # one deliberately does not model.
   mount="$w/source-mount"
   mkdir -p "$mount/config" "$mount/data"
   printf 'codex\n' > "$mount/config/crew-harness"
-  printf '# prefs\n' > "$mount/data/captain-shared.md"
 
   out=$(FM_SBX_SOURCE_MOUNT="$mount" run_spawn "$w" "$fb" smx "$home" claude --secondmate) \
     || fail "spawn with an overridden source mount failed: $out"
 
   [ "$(cat "$home/config/crew-harness")" = codex ] \
     || fail "a primary-set item should read the host value through the symlink"
-  [ "$(cat "$home/data/captain-shared.md")" = '# prefs' ] \
-    || fail "the captain file should read through the symlink"
   [ -L "$home/config/crew-dispatch.json" ] \
     || fail "an item the primary never set should still get its read-path link"
   [ ! -f "$home/config/crew-dispatch.json" ] \
