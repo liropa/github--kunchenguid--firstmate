@@ -1248,15 +1248,27 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # (agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md §4). Clone
 # mode carries committed files only, so the home's private (gitignored)
 # surface is rebuilt in-guest as a READ PATH, not a copy pipeline: each
-# declared FM_INHERITABLE_CONFIG item and the shared captain file become
-# symlinks onto the clone-mode RO source mount - the live host home the
-# convergence points (spawn, bootstrap sweep, fm-config-push) already write -
-# so every host-side convergence point keeps the guest's inheritance target in
-# one place. The RO source mount is not a runtime delivery channel; it can lag
-# host writes after VM lifecycle changes, so proven-live handoff data rides the
-# signal bridge instead (docs/sbx-backend.md). A primary-cleared item reads
-# ABSENT through its dangling link ([ -f ] fails), byte-for-byte the inherit
-# lib's absence mirroring. The .fm-secondmate-home identity marker is the one
+# declared FM_INHERITABLE_CONFIG item becomes a symlink onto the clone-mode RO
+# source mount - the live host home the convergence points (spawn, bootstrap
+# sweep, fm-config-push) already write - so every host-side convergence point
+# keeps the guest's inheritance target in one place. A primary-cleared item
+# reads ABSENT through its dangling link ([ -f ] fails), byte-for-byte the
+# inherit lib's absence mirroring.
+#
+# The shared captain file is the ONE exception, and it is a read path too, just
+# onto a different surface: its link points at the signal bridge, and this pass
+# publishes the host home's validated copy there immediately before the guest
+# reads it. The RO source mount does carry post-creation host writes, but only
+# refreshes on a VM lifecycle event, so a relaunch that does not restart the VM
+# would hand a freshly launched agent stale preferences. Publishing here removes
+# that dependency entirely: this pass runs immediately before EVERY agent launch
+# (spawn and resurrection), and the file is read by the guest's session-start
+# digest, so beating the launch is the whole requirement. Withdrawal converges
+# the same way as before - the publish removes the delivery copy, the link
+# dangles, and [ -f ] fails.
+# docs/sbx-backend.md owns the contract and evidence.
+#
+# The .fm-secondmate-home identity marker is the one
 # residue seeded as a REGULAR file (fm_root_is_secondmate_home hard-refuses
 # [ -L ]), content = the task id. .fm-sbx-signals-dir is a second regular-file
 # marker, content = the signal-bridge dir's absolute path: the guest user is
@@ -1306,6 +1318,7 @@ fm_backend_sbx_guest_write() {  # <name> <guest-path>
 # is a non-interactive agent child, and an appended export would never run.
 fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
   local name=$1 home_abs=$2 id=$3 signals_dir=$4 want_captain=0 captain_hash='' rc=0
+  local captain_bridge
   local -a guest_args
   # Host-side, because only the host can see whether the primary has published
   # anything to read. Cleared primary -> want 0 -> a dangling link is the
@@ -1314,6 +1327,18 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     want_captain=1
     captain_hash=$(fm_inherit_sha256 "$home_abs/$FM_SHARED_CAPTAIN_REL") || captain_hash=
   fi
+  captain_bridge=$(fm_shared_captain_bridge_path "$signals_dir") || {
+    echo "error: refusing to provision $name: cannot resolve the shared captain delivery path under $signals_dir" >&2
+    return 1
+  }
+  # Converge the delivery copy before the guest reads it, so a re-assert heals
+  # the link AND what the link points at. Spawn and resurrection both land
+  # here, which is what makes the read path self-healing rather than only
+  # re-pointed. Warn without refusing: a secondmate stranded at launch is worse
+  # than one launching without shared captain preferences, and the guest-side
+  # comparison below reports the consequence either way.
+  publish_shared_captain_to_bridge "$home_abs/data" "$signals_dir" \
+    || echo "firstmate sbx: sandbox $name: could not converge $FM_SHARED_CAPTAIN_REL on the signal bridge at $signals_dir; the guest keeps whatever that mount already carried" >&2
   # Built as a vector so it can be CHECKED before it is sent. sbx's exec API
   # refuses an empty cmd element, so the one positional that can legitimately
   # have no value travels as FM_SBX_NO_VALUE (see that constant for the outage
@@ -1321,13 +1346,13 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
   # for that one argument: any future positional that can go empty now produces
   # a named local refusal instead of an opaque upstream 400 mid-resurrection.
   guest_args=(_ "$home_abs" "$FM_SBX_SOURCE_MOUNT" "$id" "$FM_SHARED_CAPTAIN_REL" \
-    "$signals_dir" "$want_captain" "${captain_hash:-$FM_SBX_NO_VALUE}")
+    "$signals_dir" "$want_captain" "${captain_hash:-$FM_SBX_NO_VALUE}" "$captain_bridge")
   # shellcheck disable=SC2206  # deliberate word split: FM_INHERITABLE_CONFIG is a declared space-separated list (items never contain whitespace)
   guest_args+=($FM_INHERITABLE_CONFIG)
   fm_backend_sbx_guest_args_ok "$name" "guest-home provisioning" "${guest_args[@]}" || return 1
   # shellcheck disable=SC2016  # single quotes deliberate: $1..$7, $HOME, $CLAUDE_CODE_OAUTH_TOKEN and the loops expand in the guest sh, not here
   sbx exec "$name" -- sh -c '
-    home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6 captain_hash=$7; shift 7
+    home=$1 src=$2 id=$3 captain=$4 signals=$5 want_captain=$6 captain_hash=$7 captain_src=$8; shift 8
     # Anything that is not a hex digest means "no hash to compare against".
     # That is how FM_SBX_NO_VALUE arrives, and equally how a malformed digest
     # would; testing the SHAPE instead of one literal token keeps the two sides
@@ -1339,7 +1364,7 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     for item; do
       ln -sfn "$src/config/$item" "config/$item" || exit 1
     done
-    ln -sfn "$src/$captain" "$captain" || exit 1
+    ln -sfn "$captain_src" "$captain" || exit 1
     rm -f .fm-secondmate-home || exit 1
     printf "%s\n" "$id" > .fm-secondmate-home || exit 1
     rm -f .fm-sbx-signals-dir || exit 1
@@ -1396,15 +1421,15 @@ fm_backend_sbx_provision_guest_home() {  # <name> <home-abs> <id> <signals-dir>
     0) return 0 ;;
     7)
       printf 'firstmate sbx: sandbox %s reads an outdated %s through its guest link: %s still carries older bytes than the host home, so the guest is acting on superseded shared captain preferences (docs/sbx-backend.md "Guest-home provisioning")\n' \
-        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$captain_bridge" >&2
       ;;
     8)
       printf 'firstmate sbx: sandbox %s still reads %s through its guest link after the primary cleared it: %s has not dropped the file, so the guest keeps acting on retracted shared captain preferences (docs/sbx-backend.md "Guest-home provisioning")\n' \
-        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$captain_bridge" >&2
       ;;
     9)
       printf 'firstmate sbx: sandbox %s cannot read %s through its guest link: the host home has the file but %s does not carry it, so the guest reads shared captain preferences as ABSENT (docs/sbx-backend.md "Guest-home provisioning")\n' \
-        "$name" "$FM_SHARED_CAPTAIN_REL" "$FM_SBX_SOURCE_MOUNT" >&2
+        "$name" "$FM_SHARED_CAPTAIN_REL" "$captain_bridge" >&2
       ;;
     *) return "$rc" ;;
   esac

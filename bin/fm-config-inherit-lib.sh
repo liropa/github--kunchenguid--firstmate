@@ -40,6 +40,34 @@ FM_SHARED_CAPTAIN_FILE="captain-shared.md"
 FM_SHARED_CAPTAIN_REL="data/$FM_SHARED_CAPTAIN_FILE"
 FM_SHARED_CAPTAIN_MODE="444"
 
+# Delivery mirror of the shared captain file, for a backend whose destination
+# home is a snapshot its agent never re-reads. The host-home copy above stays
+# the authoritative destination and is unchanged; this is ONE extra host-written
+# mirror of that copy, placed on a directory the guest reads live, so a caller
+# that can name such a directory gets delivery instead of only inheritance.
+#
+# Only sbx supplies one today - its signal bridge, the one surface the backend
+# doc records as live in both directions regardless of VM lifecycle. Every other
+# backend passes nothing and this whole path is a no-op, which is why the lib
+# stays backend-agnostic: it mirrors to a directory a caller hands it, and knows
+# nothing about sandboxes.
+#
+# Deliberately scoped to this ONE file. The FM_INHERITABLE_CONFIG items keep
+# their read-through-only path: inheritance that converges at the next launch is
+# enough for them, and delivery that must be proven live is not the same
+# requirement (docs/sbx-backend.md "Guest-home provisioning").
+FM_SHARED_CAPTAIN_BRIDGE_SUBDIR="inherit"
+FM_SHARED_CAPTAIN_BRIDGE_REL="$FM_SHARED_CAPTAIN_REL (guest delivery)"
+
+# fm_shared_captain_bridge_path <mirror-dir>
+# Single owner of the mirror's path. The publisher below writes exactly this
+# path and bin/backends/sbx.sh points the guest's read link at exactly this
+# path, so the writer and the reader cannot drift apart.
+fm_shared_captain_bridge_path() {  # <mirror-dir>
+  [ -n "$1" ] || return 1
+  printf '%s/%s/%s\n' "$1" "$FM_SHARED_CAPTAIN_BRIDGE_SUBDIR" "$FM_SHARED_CAPTAIN_FILE"
+}
+
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
@@ -379,6 +407,96 @@ propagate_shared_captain_preferences() {
   return "$rc"
 }
 
+# publish_shared_captain_to_bridge <dest-data> <mirror-dir>
+# Converge the delivery mirror to the secondmate home copy that
+# propagate_shared_captain_preferences just validated, or to that copy's
+# absence. Reads the DESTINATION copy, never the primary, so the mirror can
+# never disagree with the host home the guest's own check compares against
+# (bin/backends/sbx.sh) - the same reason fm_config_write_reread_instruction
+# streams destination bytes.
+#
+# No quarantine here, unlike the home copy. The mirror has exactly one author,
+# the host, and is never a place anyone's work lives: divergent bytes are a
+# failed delivery or a guest that wrote where it must not, and neither is
+# content worth preserving. The guest-side comparison is what reports it.
+# Silent on stdout like its sibling; concise stderr on a real failure.
+publish_shared_captain_to_bridge() {  # <dest-data> <mirror-dir>
+  local dest_data=$1 mirror_dir=$2 src bridge bridge_parent src_hash bridge_hash reason
+  [ -n "$dest_data" ] || return 1
+  [ -n "$mirror_dir" ] || return 1
+  bridge=$(fm_shared_captain_bridge_path "$mirror_dir") || return 1
+  bridge_parent=${bridge%/*}
+  src="$dest_data/$FM_SHARED_CAPTAIN_FILE"
+
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    if ! shared_captain_file_safe_existing "$src"; then
+      reason="unsafe secondmate home copy"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$src" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+      return 1
+    fi
+    if ! shared_captain_dir_safe "$bridge_parent"; then
+      reason="unsafe or unwritable delivery directory"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$bridge_parent" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+      return 1
+    fi
+    if [ -f "$bridge" ] && [ ! -L "$bridge" ]; then
+      src_hash=$(fm_inherit_sha256 "$src") || src_hash=
+      bridge_hash=$(fm_inherit_sha256 "$bridge") || bridge_hash=
+      if [ -n "$src_hash" ] && [ "$src_hash" = "$bridge_hash" ]; then
+        if restore_shared_captain_readonly "$bridge"; then
+          record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" unchanged ""
+          return 0
+        fi
+        reason="failed to restore read-only mode"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$bridge" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+        return 1
+      fi
+    fi
+    # Anything already there is replaced outright, including a non-ordinary
+    # artifact: this path publishes, it does not preserve.
+    if { [ -e "$bridge" ] || [ -L "$bridge" ]; } && ! rm -f -- "$bridge" 2>/dev/null; then
+      reason="failed to clear stale delivery copy"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$bridge" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+      return 1
+    fi
+    if copy_shared_captain_file "$src" "$bridge"; then
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" pushed ""
+      return 0
+    fi
+    reason="failed to publish"
+    warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$bridge" "$reason"
+    record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+    return 1
+  fi
+
+  # Primary cleared it, so the home copy is gone and the mirror follows. The
+  # guest link is then dangling and [ -f ] fails, which is byte-for-byte the
+  # absence the session digest already renders as ABSENT.
+  if [ -e "$bridge" ] || [ -L "$bridge" ]; then
+    if ! rm -f -- "$bridge" 2>/dev/null; then
+      reason="failed to withdraw"
+      warn_inheritable_config_error "$FM_SHARED_CAPTAIN_BRIDGE_REL" "$bridge" "$reason"
+      record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" error "$reason"
+      return 1
+    fi
+    record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" pushed "mirrored primary absence"
+    return 0
+  fi
+  record_inheritable_config_result "$FM_SHARED_CAPTAIN_BRIDGE_REL" unchanged ""
+  return 0
+}
+
+# The host-home convergence points deliberately do NOT publish the mirror.
+# The shared captain file is read by a secondmate's session-start digest and is
+# never allowlisted for the config-reread nudge, so a running agent cannot be
+# made to re-read it: new bytes are inert until that home's next agent launch.
+# Delivery therefore only has to beat the launch, and the backend's own
+# pre-launch provisioning pass is exactly that moment - so it owns the publish,
+# and this function stays host-home propagation as it always was.
 propagate_secondmate_inheritance() {
   local src_home=$1 dest_home=$2 src_config=${3:-} src_data=${4:-} rc
   [ -n "$src_home" ] || return 1
