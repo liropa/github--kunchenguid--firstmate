@@ -140,21 +140,17 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# The terminal-event rule this needs is shared with the sbx keep-alive's
+# parked-decision arm, so fm-classify-lib.sh owns it beside the fold itself.
+# An absent meta means the task's shape is unknown, which travels as the empty
+# kind that skips the rule - the same answer this returned before.
 origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
-  open=$(status_open_decisions "$status_file")
-  [ -n "$open" ] || return 0
-  [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
-    last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
+  local meta="$STATE/$1.meta" kind=''
+  if [ -f "$meta" ]; then
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
   fi
-  printf '%s' "$open"
+  status_open_decisions_live "$STATE/$1.status" "$kind"
 }
 
 verify_hold_active() {  # <hold-id>

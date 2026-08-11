@@ -544,27 +544,57 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     idle daemon never advances (measured: a live-but-idle daemon left its
 #     logs untouched for 5.5 h; docs/sbx-backend.md "Gate-activity arm"). It is
 #     a pure in-guest stat and adds no `sbx exec` to the poll path.
-#   - Arm precedence is arm1, arm2, arm3, arm4 - arm4 is evaluated last, so a
-#     poll the existing three already called work reports exactly the flag it
-#     reported before.
+#   - The FIFTH arm is not an activity reading at all: WHILE A CREWMATE TASK IS
+#     REGISTERED, it asks the guest home's own bin/fm-parked-decision.sh whether
+#     any live in-guest task is sitting on a decision nobody has answered yet.
+#     It exists because on 2026-08-10 this keeper's verdict log recorded three
+#     released-idle verdicts with arm1..arm4 all 0 and crew=1, each while the
+#     in-guest worker was parked on a decision firstmate had escalated to the
+#     captain (state/.sbx-keepalive-agent-dotfiles.log; pins 1736s/1286s/373s).
+#     No screen or mtime read can separate that worker from a finished one -
+#     both are a static pane and a stale status file - so the signal has to come
+#     from the DURABLE RECORD of the wait. That record already exists and is
+#     already inside the guest: bin/fm-classify-lib.sh's keyed open/resolved
+#     fold over the worker's own status stream, which the predicate composes
+#     rather than reimplementing. Nothing new is published, so nothing has to be
+#     cleared by hand - the worker's own resolution line closes the pin, and a
+#     firstmate that dies mid-escalation leaves no marker behind to strand the
+#     guest awake. A pure in-guest read; no `sbx exec` is added to the poll path.
+#   - Arm precedence is arm1..arm5 - arm5 is evaluated last, so a poll the
+#     existing four already called work reports exactly the flag it reported
+#     before. Only arms 1-4 touch the guest-active breadcrumb (see below).
 #   - Release ("released-idle") once the turn ended AND no work is visible: a
 #     genuinely idle guest still auto-stops (stopped-is-healthy stays true).
 #     An idle-parked worker TUI - no busy tail, no recent signals, a static
 #     pane - is NOT work and never pins, exactly like the secondmate's own idle
 #     TUI, so a finished worker awaiting teardown still lets the VM stop.
+#     The fifth arm does not weaken that: it fires only on an OPEN decision, and
+#     the predicate reports none for a task whose newest event is done or
+#     failed, so a finished worker's unresolved decision line cannot pin either.
 #   - The cap bounds everything ("capped-active"/"capped-idle"): a wedged or
-#     forever-busy-looking guest can never pin the VM past the cap.
+#     forever-busy-looking guest can never pin the VM past the cap, and that
+#     includes a decision nobody ever answers. Nothing re-arms a keeper except a
+#     launch or a turn-submitting steer, so an unanswered decision holds the VM
+#     for at most FM_SBX_KEEPALIVE_MAX from the last steer and then caps out.
 #   - While work is visible, touch the mount's <id>.guest-active breadcrumb so
 #     the HOST gets a pure-stat view of in-guest activity (the wrapper's
 #     mid-task-stop check below, and fm-watch.sh's stranding suppression).
+#     ONLY arms 1-4 do that. The breadcrumb means in-guest work is ACTIVE, and
+#     fm-watch.sh's stranding arm accepts a fresh breadcrumb as acknowledgement
+#     of a delivery - so letting a park refresh it would silence the stranded
+#     alarm for a guest that never processed the answer it was just sent. An
+#     arm5-only pin therefore leaves the breadcrumb untouched, which also keeps
+#     the wrapper quiet if the VM dies during a wait rather than during work.
 #   - On the way out, print ONE "fm-keepalive detail" line before the verdict,
-#     reporting how each arm read on the deciding poll (a1/a2/a3/a4), whether
+#     reporting how each arm read on the deciding poll (a1..a5), whether
 #     the crewmate gate was open (crew), how many tmux panes were visible
 #     (panes), the newest in-guest *.status mtime on released-idle with a
 #     crewmate registered (status), and the newest gate-log mtime whenever one
-#     was read (nmlog). The wrapper logs it. This is INSTRUMENTATION ONLY: the
-#     arm flags are assigned beside the existing work=1 assignments and are
-#     never read by any condition. It exists because a released pin left no
+#     was read (nmlog). The wrapper logs it. Arms 1-4 are INSTRUMENTATION ONLY:
+#     assigned beside the existing work=1 assignments and read by no condition.
+#     a5 is the one exception - the breadcrumb rule above reads it, because
+#     "the pin came from the park" is not derivable from work= alone. The line
+#     exists because a released pin left no
 #     durable trace at all, which cost a multi-hour forensic dig to reconstruct
 #     (2026-08-03 scout; docs/sbx-backend.md "Keep-alive verdict log"), and
 #     panes/nmlog were added because the 2026-08-07 scout could prove all three
@@ -596,7 +626,7 @@ fm_backend_sbx_keepalive_script() {
         [ "$last" -gt 0 ] && extra=" status=$last"
       fi
       [ "$nm" -gt 0 ] && extra="$extra nmlog=$nm"
-      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 arm4=$a4 crew=$crew panes=$panes$extra"
+      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 arm4=$a4 arm5=$a5 crew=$crew panes=$panes$extra"
       echo "fm-keepalive $1"
     }
     start=$(date +%s)
@@ -610,6 +640,7 @@ fm_backend_sbx_keepalive_script() {
       a2=0
       a3=0
       a4=0
+      a5=0
       panes=0
       nm=0
       snap=
@@ -655,7 +686,16 @@ fm_backend_sbx_keepalive_script() {
           fi
         fi
       fi
-      if [ "$work" = 1 ]; then touch "$act" 2>/dev/null; fi
+      if [ "$work" = 0 ] && [ "$crew" = 1 ] && [ -n "$home" ] \
+        && [ -x "$home/bin/fm-parked-decision.sh" ] \
+        && "$home/bin/fm-parked-decision.sh" "$home" >/dev/null 2>&1; then
+        work=1
+        a5=1
+      fi
+      # Arms 1-4 observe work and stamp the breadcrumb; arm5 observes a WAIT and
+      # deliberately does not (see the contract above). a5=1 only when the other
+      # four read 0, so this test is exactly "the pin came from the park".
+      if [ "$work" = 1 ] && [ "$a5" = 0 ]; then touch "$act" 2>/dev/null; fi
       if [ $((now - start)) -ge "$max" ]; then
         if [ "$work" = 1 ]; then emit capped-active; else emit capped-idle; fi
         exit 0
@@ -782,7 +822,7 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
     verdict=$(printf '%s\n' "$out" \
       | grep -E '^fm-keepalive (released-idle|capped-idle|capped-active)$' | tail -1)
     detail=$(printf '%s\n' "$out" \
-      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] arm4=[01] crew=[01] panes=[0-9]{1,6}( status=[0-9]{1,19})?( nmlog=[0-9]{1,19})?$' \
+      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] arm4=[01] arm5=[01] crew=[01] panes=[0-9]{1,6}( status=[0-9]{1,19})?( nmlog=[0-9]{1,19})?$' \
       | tail -1)
     case "$verdict" in
       'fm-keepalive released-idle') outcome=released-idle ;;

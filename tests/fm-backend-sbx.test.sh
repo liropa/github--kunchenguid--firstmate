@@ -1685,6 +1685,196 @@ test_keepalive_script_gate_arm_releases_a_quiet_gate() {
   pass "keep-alive loop: an idle or absent gate still releases (auto-stop preserved)"
 }
 
+# --- keep-alive fifth arm: a worker parked on an unanswered decision ---------
+#
+# make_guest_firstmate_bin <home>: give a fixture guest home the bin/ every real
+# secondmate home has (bin/fm-home-seed.sh refuses one without it), which is
+# where the loop finds the parked-decision predicate it runs in-guest.
+make_guest_firstmate_bin() {  # <home>
+  ln -s "$ROOT/bin" "$1/bin"
+}
+
+# park_worker <home> <id>: a REGISTERED in-guest worker that appended a decision
+# nobody has answered yet, and whose signals are long stale - the exact shape
+# every other arm reads as idle.
+park_worker() {  # <home> <id>
+  printf 'kind=ship\n' > "$1/state/$2.meta"
+  {
+    printf 'working: implementing the rename\n'
+    printf 'needs-decision: ship the rename now or behind a flag\n'
+  } > "$1/state/$2.status"
+  touch -t 202001010000 "$1/state/$2.meta" "$1/state/$2.status"
+}
+
+test_keepalive_script_pins_a_worker_parked_on_a_decision() {
+  # THE 2026-08-10 regression, from the keeper's own verdict log: three
+  # released-idle verdicts with arm1..arm4 all 0 and crew=1, each while the
+  # in-guest worker sat parked on a decision firstmate had escalated to the
+  # captain. Every existing arm reads a screen or an mtime, and a parked worker
+  # moves neither - so the pin has to come from the durable record of the wait
+  # itself.
+  local w fb te out
+  w=$(new_sbx_world keeper-parked); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state" "$w/guest"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+  make_gate_logs "$w/guest" stale
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  # capped-active is BOTH assertions at once: the pin held (the decision was
+  # never answered, so nothing ever released it) and the cap still ended it.
+  # An unanswered decision therefore cannot pin a machine indefinitely.
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a worker parked on an unanswered decision must pin the VM, not read as idle"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=0 arm4=0 arm5=1" \
+    "the parked decision should be reported as arm 5"
+  pass "keep-alive loop: a parked worker pins the VM, and the cap still bounds it (2026-08-10 stops)"
+}
+
+test_keepalive_script_parked_worker_survives_the_secondmate_turn_end() {
+  # The logged shape, exactly: the three stops were released-idle verdicts, not
+  # cap expiries. The secondmate relays the escalation, its own turn ends, and
+  # the v4 loop released on that turn-end - so the pin has to survive the
+  # turn-end advancing, which is the one condition every release requires.
+  local w fb script te pid i
+  w=$(new_sbx_world keeper-parked-turnend); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  park_worker "$w/home" w1
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
+    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt' > "$w/verdict.txt" &
+  pid=$!
+  sleep 0.3
+  touch "$te"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_not_contains "$(cat "$w/verdict.txt")" "fm-keepalive released-idle" \
+    "the keeper released on the turn-end while a worker sat on an unanswered decision"
+  pass "keep-alive loop: a parked worker's pin survives the secondmate's own turn-end"
+}
+
+test_keepalive_script_parked_pin_releases_when_the_answer_lands() {
+  # Clearing is the worker's own resolution line, not a separate marker anyone
+  # has to remember to delete: the moment the answer is delivered and recorded,
+  # the next poll reads no open decision and the guest is free to stop again.
+  local w fb te out
+  w=$(new_sbx_world keeper-parked-answered); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state" "$w/guest"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+  printf 'resolved: behind a flag\n' >> "$w/home/state/w1.status"
+  touch -t 202001010000 "$w/home/state/w1.status"
+
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "an answered decision must release the pin"
+  assert_contains "$(keepalive_detail_of "$out")" "arm5=0" \
+    "an answered decision should read as arm 5 reading nothing"
+  pass "keep-alive loop: delivering the answer releases the parked pin"
+}
+
+test_keepalive_script_releases_a_finished_worker_with_an_open_decision() {
+  # The invariant the keep-alive contract will not give up: a finished worker
+  # awaiting cleanup still lets the VM stop. A decision line it never explicitly
+  # resolved must not convert that into a permanent pin.
+  local w fb te out
+  w=$(new_sbx_world keeper-parked-finished); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+  printf 'done: PR https://example.invalid/pr/1 checks green\n' >> "$w/home/state/w1.status"
+  touch -t 202001010000 "$w/home/state/w1.status"
+
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "a finished worker awaiting cleanup must still let the VM stop"
+  pass "keep-alive loop: a finished worker's stale decision line never pins"
+}
+
+test_keepalive_script_parked_arm_needs_a_registered_crewmate() {
+  # Gated exactly like the pane-change arm: with no crewmate registered there is
+  # no in-guest session a stop would destroy, so the ordinary idle secondmate's
+  # auto-stop behaviour is untouched.
+  local w fb te out
+  w=$(new_sbx_world keeper-parked-nocrew); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+  rm -f "$w/home/state/w1.meta"
+
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "an open decision with no registered crewmate must not pin"
+  pass "keep-alive loop: the parked-decision arm needs a registered crewmate"
+}
+
+test_keepalive_script_parked_pin_leaves_the_breadcrumb_alone() {
+  # A parked worker is a WAIT, not work, and the guest-active breadcrumb means
+  # work. The watcher's stranding arm treats a fresh breadcrumb as
+  # acknowledgement of a delivery, so letting a park refresh it would silence
+  # the alarm for a guest that never processed the answer it was sent.
+  local w fb te
+  w=$(new_sbx_world keeper-parked-breadcrumb); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+
+  run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt' >/dev/null
+  [ ! -e "$w/signals/x/x.guest-active" ] \
+    || fail "a parked worker must not touch the guest-active breadcrumb"
+
+  # A busy pane on the same fixture still does, so this is the park being
+  # excluded rather than the breadcrumb being broken.
+  printf 'esc to interrupt\n' > "$w/pane.txt"
+  run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt' >/dev/null
+  [ -e "$w/signals/x/x.guest-active" ] \
+    || fail "visible work must still touch the guest-active breadcrumb"
+  pass "keep-alive loop: a parked pin never fakes in-guest activity"
+}
+
+test_keepalive_script_parked_arm_fails_closed_without_the_predicate() {
+  # A guest home cloned before this shipped has no predicate to run. The arm
+  # must then read nothing and leave the previous behaviour exactly as it was,
+  # rather than pinning on the strength of a missing file.
+  local w fb te out
+  w=$(new_sbx_world keeper-parked-nopredicate); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "a guest home with no parked-decision predicate must behave exactly as before"
+  assert_contains "$(keepalive_detail_of "$out")" "arm5=0" \
+    "an unavailable predicate should read as arm 5 reading nothing"
+  pass "keep-alive loop: the parked-decision arm fails closed on an older guest home"
+}
+
 test_keepalive_script_detail_reports_panes_and_gate_freshness() {
   # The 2026-08-07 scout could prove all three arms read 0 but NOT why, and
   # declined to guess among four candidates - two of them (no tmux panes at
@@ -1748,8 +1938,8 @@ test_keepalive_script_detail_names_the_deciding_arm() {
 
   # Idle, nothing registered: every arm reads 0 and the crewmate gate is shut.
   out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "" 'esc (to )?interrupt')
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=0 panes=1" ] \
-    || fail "an idle guest should report all four arms 0 with the gate shut, got '$(keepalive_detail_of "$out")'"
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1" ] \
+    || fail "an idle guest should report all five arms 0 with the gate shut, got '$(keepalive_detail_of "$out")'"
 
   # Arm 1: a busy pane tail.
   printf 'esc to interrupt\n' > "$w/pane.txt"
@@ -1792,7 +1982,7 @@ test_keepalive_script_detail_reports_the_pane_change_arm() {
   wait "$wid" 2>/dev/null || true
   assert_contains "$out" "fm-keepalive capped-active" \
     "a redrawing crewmate pane should still pin to the cap"
-  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=1 arm4=0 crew=1" \
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=1 arm4=0 arm5=0 crew=1" \
     "a redrawing crewmate pane should be reported as arm 3 with the gate open"
   pass "keep-alive detail: a redrawing crewmate pane is reported as the pane-change arm"
 }
@@ -1824,7 +2014,7 @@ test_keepalive_script_detail_stamps_release_against_task_state() {
   wait "$pid" 2>/dev/null || true
   assert_contains "$out" "fm-keepalive released-idle" \
     "a quiescent guest should release on the turn-end"
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=1 status=$mtime" ] \
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=1 status=$mtime" ] \
     || fail "a release with a registered task must carry the gate and the newest in-guest status mtime, got '$(keepalive_detail_of "$out")'"
 
   # The healthy shape: no task registered, so no stamp and an unmistakably
@@ -1836,7 +2026,7 @@ test_keepalive_script_detail_stamps_release_against_task_state() {
   out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
     sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt')
   wait "$pid" 2>/dev/null || true
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=0 panes=1" ] \
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1" ] \
     || fail "a release with no registered task must report the gate shut and carry no stamp, got '$(keepalive_detail_of "$out")'"
   i=$(printf '%s\n' "$out" | grep -c 'status=' || true)
   [ "$i" -eq 0 ] || fail "a release with no registered task must not stamp an in-guest status mtime"
@@ -1880,17 +2070,17 @@ test_keepalive_wrapper_logs_every_verdict() {
 test_keepalive_wrapper_log_carries_validated_guest_detail() {
   # Guest stdout is untrusted: the arm report is admitted only in its exact
   # shape, so nothing but 0/1 flags and a digit timestamp can reach the log.
-  local w fb log
+  local w fb log stale_detail
   w=$(new_sbx_world keeper-log-detail); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
   log="$w/state/.sbx-keepalive-x.log"
 
   run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
-    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635 nmlog=1786127662\nfm-keepalive released-idle' \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 status=1785512635 nmlog=1786127662\nfm-keepalive released-idle' \
     || fail "the keep-alive call itself should succeed"
   assert_log_matches "$log" \
-    'released-idle pin=[0-9]+s arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635 nmlog=1786127662$' \
+    'released-idle pin=[0-9]+s arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 status=1785512635 nmlog=1786127662$' \
     "the log line should carry the guest's arm report, pane count and both mtime stamps"
   assert_no_grep 'fm-keepalive detail' "$log" \
     "the log should carry the report's fields, not the raw guest marker line"
@@ -1899,23 +2089,28 @@ test_keepalive_wrapper_log_carries_validated_guest_detail() {
   : > "$log"
   run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
-    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2; rm -rf /\nfm-keepalive released-idle' \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2; rm -rf /\nfm-keepalive released-idle' \
     || fail "the keep-alive call itself should succeed"
   assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
     "an unparseable report should be dropped, leaving the verdict line intact"
   assert_no_grep 'rm -rf' "$log" "a guest line outside the accepted shape must never reach the log"
 
-  # The pre-arm4 shape is no longer the current one, so it is dropped rather
-  # than logged as if the fourth arm had reported: a guest running an older
-  # loop must not read as "the gate arm saw nothing".
-  : > "$log"
-  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
-    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
-    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1 status=1785512635\nfm-keepalive released-idle' \
-    || fail "the keep-alive call itself should succeed"
-  assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
-    "a report in the superseded three-arm shape should be dropped, leaving the verdict intact"
-  assert_no_grep 'arm1=' "$log" "a superseded report shape must not reach the log"
+  # A superseded arm shape is dropped rather than logged as if the newest arm
+  # had reported: a guest running an older loop must not read as "the arm that
+  # loop never had saw nothing". Both retired shapes are checked, because each
+  # new arm turns the previous current shape into another one to refuse.
+  for stale_detail in \
+    'fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1 status=1785512635' \
+    'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635'; do
+    : > "$log"
+    run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+      FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+      FM_FAKE_SBX_KEEPALIVE_OUT="$stale_detail"$'\nfm-keepalive released-idle' \
+      || fail "the keep-alive call itself should succeed"
+    assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
+      "a report in a superseded arm shape should be dropped, leaving the verdict intact"
+    assert_no_grep 'arm1=' "$log" "a superseded report shape must not reach the log"
+  done
   pass "keep-alive log: the guest's arm report is admitted only in its exact shape"
 }
 
@@ -2587,6 +2782,13 @@ test_keepalive_script_change_arm_needs_a_registered_crewmate
 test_keepalive_script_pins_an_offscreen_gate_run
 test_keepalive_script_gate_arm_reads_a_runs_step_log
 test_keepalive_script_gate_arm_releases_a_quiet_gate
+test_keepalive_script_pins_a_worker_parked_on_a_decision
+test_keepalive_script_parked_worker_survives_the_secondmate_turn_end
+test_keepalive_script_parked_pin_releases_when_the_answer_lands
+test_keepalive_script_releases_a_finished_worker_with_an_open_decision
+test_keepalive_script_parked_arm_needs_a_registered_crewmate
+test_keepalive_script_parked_pin_leaves_the_breadcrumb_alone
+test_keepalive_script_parked_arm_fails_closed_without_the_predicate
 test_keepalive_script_detail_names_the_deciding_arm
 test_keepalive_script_detail_reports_panes_and_gate_freshness
 test_keepalive_script_detail_reports_the_pane_change_arm
