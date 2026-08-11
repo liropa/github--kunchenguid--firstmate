@@ -614,10 +614,15 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     guest home's own bin/fm-tasks-finished.sh, which composes
 #     bin/fm-classify-lib.sh's terminal-event rule rather than restating it in
 #     sh; it runs once at exit, after the release decision, so it can influence
-#     nothing. Anything else is `unknown` and stays that way - a confident wrong
-#     label reads as "the stop was correct" for a worker that was in fact stuck.
-#     `none` means there was no static screen to explain: work was visible, or no
-#     crewmate task was registered. Only a CLASSIFICATION crosses the boundary,
+#     nothing. A registered worker with any other shape is `unknown` and stays
+#     that way - a confident wrong label reads as "the stop was correct" for a
+#     worker that was in fact stuck. `none` means there was no registered worker
+#     to explain, or work was visible. With no registration, nothing says a
+#     worker was killed, so `none` is the honest reading. Mapping that case to
+#     `unknown` would dilute the value reserved for an unexplained registered
+#     worker. A fifth value would require a coordinated enum, whitelist, docs,
+#     and fixture change for a distinction on which no action is expected. Only
+#     a CLASSIFICATION crosses the boundary,
 #     never pane text: the verdict log lives on the signal-bridge mount, which
 #     outlives both the stop and a full guest rebuild, and a worker pane can hold
 #     credential material.

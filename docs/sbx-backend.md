@@ -694,18 +694,22 @@ The keeper now classifies which it was and reports it as one more fixed field on
 | value | meaning | what a reader should do |
 |---|---|---|
 | `auth` | a visible pane tail carried a harness sign-in signature while no arm saw work | restore the sign-in, then steer the worker; `data/learnings.md` 2026-08-02 records that a 401'd pane often revives on one steer |
-| `finished` | no sign-in signature, a crewmate task was registered, and **every** registered task's newest recorded event is `done` or `failed` | nothing - the stop was correct |
-| `unknown` | no sign-in signature and a registered task is neither finished nor showing work | inspect; this is the honest gap, deliberately not guessed at |
-| `none` | there was no static screen to explain: an arm saw work, or no crewmate task was registered | nothing |
+| `finished` | no sign-in signature, a crewmate task with a known shape was registered, and **every** registered task's newest recorded event is `done` or `failed` | nothing - the stop was correct |
+| `unknown` | no sign-in signature and a registered task has an unknown shape or is neither finished nor showing work | inspect; this is the honest gap, deliberately not guessed at |
+| `none` | there was no registered worker to explain, or an arm saw work | nothing |
 
 The order in that table is the precedence, and the two ties it settles are deliberate.
 Work seen by any arm outranks everything, because a guest that is working has no static screen to explain - that is also what keeps a worker whose own output quotes a sign-in message from being labelled as stopped on one.
 A sign-in signature then outranks a finished record, because restoring a sign-in is cheap and self-correcting while missing one leaves the next steer failing into a logged-out TUI; the reverse mistake is the blindness this field exists to remove.
 `auth` is read whether or not a crewmate task is registered, because the guest's own agent can be the process stopped on the prompt - `data/learnings.md` 2026-07-31 records a stop whose cause was exactly that, wholly outside the keep-alive story.
+After that auth check, no registered task reads as `none`: if no worker was registered, no worker is known to have been killed and there is nothing to explain.
+Mapping that case to `unknown` would dilute the one value reserved for a worker that **was** registered but whose static screen cannot be explained; keeping that value narrow makes it useful.
+A fifth value would require another coordinated change to the enum, host whitelist, documentation, and fixtures for a distinction on which no action is expected.
 
 **Both readings come from what the loop already does.**
 The sign-in reading greps the same 6-line visible tail per pane that arm 1 already computes for the busy idiom, against `FM_SBX_AUTH_REGEX` - so no new capture, no new `sbx exec`, no new file, and a sign-in message already scrolled out of arm 1's reach is equally out of reach here.
 The finished reading runs the guest home's own `bin/fm-tasks-finished.sh`, which composes `bin/fm-classify-lib.sh`'s `status_task_finished` - the same terminal-event rule `status_open_decisions_live` reads, now stated once beside the fold rather than inline in each caller.
+A registered task must also state a known kind; a missing or unreadable `kind=` leaves its shape unknown, so `finished` cannot be asserted and the classification remains `unknown`.
 That predicate runs **once, inside `emit`, after the release decision has already been made**, so it cannot influence it; it is a pure read that creates, moves and touches nothing.
 
 **It changes no machine's power state.**
@@ -722,7 +726,7 @@ Every alternative is an observed shape rather than an invented one: `Not logged 
 <!-- fm-authority: firstmate-observation 2026-08-11 - the two remaining shapes were read from live crewmate panes and recorded in a gitignored private home; they cannot be reproduced from this checkout -->
 `Please run /login` and `OAuth access token has expired` come from `data/learnings.md` 2026-08-02, where two live crewmate panes both showed `Please run /login - API Error: 401 OAuth access token has expired` at once.
 <!-- /fm-authority -->
-An unrecognised static pane classifies as `unknown` and stays that way.
+An unrecognised static pane for a registered task classifies as `unknown` and stays that way.
 That is the point: a confident wrong label reads as "the stop was correct" for a worker that was in fact stuck, and this document already records what a confident guess about a stop costs - "Remaining gaps" refuses a whole class of alarm on exactly those grounds, and the 2026-08-03 dig described below spent hours reaching only moderate confidence about which of two stops had happened.
 The reading is gated on no arm having seen work, which is also what keeps a worker whose own output *quotes* a sign-in message from being labelled as stopped on one.
 
