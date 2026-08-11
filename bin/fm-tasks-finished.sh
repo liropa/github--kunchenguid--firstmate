@@ -31,7 +31,12 @@
 # always the one version-matched to the status files it is reading. It answers a
 # different question from the parked-decision predicate - "is this worker still
 # waiting" versus "is this worker done" - and a home can be neither, which is the
-# gap the classification reports honestly rather than guessing at.
+# gap the classification reports honestly rather than guessing at. The
+# parked-decision predicate may safely default a missing kind to ship because
+# that errs toward not pinning. Here the same default would assert that an
+# unknown task finished. That false durable record becomes cited history and can
+# drive later action, so its cost outweighs the small risk of withholding a
+# finished reading from a legacy record.
 #
 # Pure read: no file is created, moved, or touched, which is what lets the
 # keep-alive call it without becoming the guest activity it is trying to observe.
@@ -60,7 +65,6 @@ for meta in "$STATE"/*.meta; do
   id=${meta##*/}
   id=${id%.meta}
   kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-) || kind=''
-  [ -n "$kind" ] || kind=ship
   status_file="$STATE/$id.status"
   # One unfinished task is enough: the home is not accounted for.
   status_task_finished "$status_file" "$kind" || exit 1

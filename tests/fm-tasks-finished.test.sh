@@ -144,6 +144,17 @@ test_a_task_with_no_status_is_not_finished() {
   pass "tasks-finished: a task that never reported is not finished"
 }
 
+test_a_done_task_with_no_kind_is_not_finished() {
+  local home
+  home=$(make_home unknown-kind)
+  printf 'owner=firstmate\n' > "$home/state/w1.meta"
+  say "$home" w1 'done: implementation complete'
+
+  ! "$FINISHED" "$home" >/dev/null \
+    || fail "a done task with no kind must not read as finished"
+  pass "tasks-finished: a done task with no kind is not finished"
+}
+
 test_a_quiet_home_is_not_finished() {
   # No registered task is "nothing to say", not "everything finished".
   local home
@@ -168,6 +179,7 @@ test_awaiting_validation_is_not_finished
 test_every_task_must_be_finished
 test_a_secondmate_is_never_finished
 test_a_task_with_no_status_is_not_finished
+test_a_done_task_with_no_kind_is_not_finished
 test_a_quiet_home_is_not_finished
 test_an_unreadable_home_is_not_finished
 
