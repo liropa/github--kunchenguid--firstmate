@@ -766,9 +766,9 @@ The file deliberately survives teardown: it is post-mortem evidence about a VM t
 
 The reporting itself adds no `sbx exec` anywhere in the poll path.
 In the guest loop arms 1-4 are instrumentation flags assigned beside the existing `work=1` assignments and are never read by a condition; `arm5` is also read to keep a parked-decision pin from touching the `guest-active` breadcrumb, as the parked-decision contract above requires.
-Guest stdout stays untrusted: the wrapper admits the report only in its exact shape, so nothing but `0`/`1` flags, a small pane count and digit timestamps can reach the log, and a garbled or forged line is dropped while the verdict line still lands.
-The whitelist is matched **exactly**, so both superseded shapes (three arms and four arms) are dropped rather than logged as though a newer arm had reported nothing - fixtures pin both cases.
-Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (every verdict logged with its timestamp and pin duration, the two release shapes distinguished, a forged report and both superseded-shape reports rejected, an unwritable log harmless, and growth bounded) - not against a real sandbox VM.
+Guest stdout stays untrusted: the wrapper admits the report only in its exact shape, so nothing but `0`/`1` arm flags, a small pane count, one token from the closed `park` enum (`auth|finished|unknown|none`), and digit timestamps can reach the log, and a garbled or forged line is dropped while the verdict line still lands. The enum is whitelisted rather than accepted as free text because the guest reads panes to produce it and this log lands on the signal-bridge mount, which survives the stop and a full guest rebuild.
+The whitelist is matched **exactly**, so all three superseded shapes (three arms, four arms, and five arms without `park`) are dropped rather than logged as though a newer field had reported nothing - fixtures pin all three cases, because each new field turns the previous current shape into another one to refuse.
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (every verdict logged with its timestamp and pin duration, the two release shapes distinguished, a forged report and all three superseded-shape reports rejected, an unwritable log harmless, and growth bounded) - not against a real sandbox VM.
 
 #### Why a clean release still raises no alarm
 
