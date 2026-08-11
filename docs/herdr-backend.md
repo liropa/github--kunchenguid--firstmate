@@ -337,6 +337,23 @@ ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destruc
 ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
 ```
 
+### Presentation-lock hermeticity evidence (2026-08-11)
+
+`tests/fm-teardown.test.sh`'s confirmed-close case used the machine-global lock namespace, so it depended on host state instead of testing only its own subject.
+It was systematically red for every sandboxed worker and green otherwise, and was dismissed as a flake twice before the cause was measured.
+The per-case namespace override closes both routes; each was negative-tested at the parent commit and again with the fix, on macOS aarch64.
+
+<!-- fm-authority: firstmate-observation 2026-08-11 - measured on a sandboxed worker host and against a deliberately held machine-global lock; neither condition is reproducible from inside a checkout -->
+
+| Condition | Namespace write denied by the OS sandbox | Machine-global lock held by a live outside process |
+|---|---|---|
+| Parent commit | red: `not ok - confirmed exact-pane close did not retire the presentation journal` | red, sandbox off, same assertion |
+| With the override | 42 ok, 0 not ok, exit 0 | 42 ok, 0 not ok, exit 0, sandbox on and off |
+
+The held lock was `/tmp/firstmate-herdr-presentation/order-44d3319341fd6ebac0b7c6b211357793.lock`, the key the case's constant session `fmtest` and socket `/private/tmp/fmtest.sock` compute, and the namespace was left as found (empty, mode 700).
+Reverting only `bin/fm-teardown.sh` while keeping the override reproduces the misleading wording the second fix removes: `focus lock unavailable; refusing a concurrent focus-unsafe pane close` where no second process exists.
+<!-- /fm-authority -->
+
 Reserved-keyword guard: never name a `jq --arg`/`--argjson` after a `jq` keyword (`label`, `and`, `or`, `not`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `import`, `def`, `as`, `__loc__`).
 jq <= 1.6 rejects a keyword-named `$`-variable as a compile error, and this adapter pipes `jq`'s stderr to `/dev/null`, so on jq <= 1.6 the error silently becomes an empty result rather than a visible failure.
 Use a distinct name such as `$want` instead; `tests/fm-backend-herdr.test.sh` greps `bin/` for this pattern so a new violation fails loudly rather than silently.
