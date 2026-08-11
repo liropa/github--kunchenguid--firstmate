@@ -254,28 +254,40 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# 0 when this task has FINISHED: its newest recorded event is done or failed.
+# Finished is narrower than status_is_terminal_verb's "ended its turn":
+# needs-decision, blocked and awaiting-validation are all terminal-and-unfinished.
+#
+# Two callers need this same rule and it is stated here once. An EMPTY kind is
+# "not finished", because finished cannot be asserted about a task whose shape is
+# unknown; a secondmate is likewise never finished, because it never reaches a
+# terminal event of its own.
+status_task_finished() {  # <status-file> <kind>
+  local f=$1 kind=$2 verb
+  [ -n "$kind" ] || return 1
+  [ "$kind" != secondmate ] || return 1
+  [ -e "$f" ] || return 1
+  verb=$(status_line_verb "$(last_status_line "$f")")
+  case "$verb" in
+    done|failed) return 0 ;;
+  esac
+  return 1
+}
+
 # status_open_decisions restricted to decisions a LIVE task is still parked on.
-# Same fold, same output shape, plus one rule: an ordinary task whose newest
-# event is done or failed has finished, so it is no longer sitting on anything
-# and prints nothing. A secondmate is exempt because it never reaches a terminal
-# event of its own - its decisions stay open until they are answered.
+# Same fold, same output shape, plus one rule: a task that has finished
+# (status_task_finished above) is no longer sitting on anything and prints
+# nothing.
 #
 # The two folds answer different questions and both are needed. The plain fold
 # answers "what does this origin still owe the captain", which a finished task
 # still owes; this one answers "is this worker still waiting", which a finished
-# task is not. Pass an EMPTY kind when the caller cannot determine one: the
-# terminal-event rule is then skipped and the plain fold's answer stands, since
-# "finished" cannot be asserted about a task whose shape is unknown.
+# task is not.
 status_open_decisions_live() {  # <status-file> <kind>
-  local f=$1 kind=$2 open verb
+  local f=$1 kind=$2 open
   open=$(status_open_decisions "$f")
   [ -n "$open" ] || return 0
-  if [ -n "$kind" ] && [ "$kind" != secondmate ]; then
-    verb=$(status_line_verb "$(last_status_line "$f")")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
-  fi
+  status_task_finished "$f" "$kind" && return 0
   printf '%s' "$open"
 }
 

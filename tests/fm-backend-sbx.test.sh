@@ -1341,15 +1341,31 @@ keepalive_home() {
   printf '%s' "${KEEPALIVE_HOME:-$TMP_ROOT/no-such-guest-home}"
 }
 
+# keepalive_auth_regex: the SHIPPED sign-in signature, read from the adapter so
+# every fixture below exercises the real default rather than a copy of it that
+# can drift. Resolved once - it costs a bash subshell per call.
+KEEPALIVE_AUTH_RE=
+keepalive_auth_regex() {
+  local w fb
+  if [ -z "$KEEPALIVE_AUTH_RE" ]; then
+    w=$(new_sbx_world keeper-authre); fb=$(make_fake_sbx "$w")
+    # shellcheck disable=SC2016  # single quotes deliberate: the variable expands in the inner bash run_adapter starts, not here
+    KEEPALIVE_AUTH_RE=$(run_adapter "$fb" "$w" 'printf "%s" "$FM_SBX_AUTH_REGEX"')
+  fi
+  printf '%s' "$KEEPALIVE_AUTH_RE"
+}
+
 # run_keepalive_raw <fakebin> <pane-file> <args...>: execute the guest loop
 # synchronously with the fake tmux first in PATH; echoes its whole stdout - the
-# arm-detail line followed by the verdict line.
+# arm-detail line followed by the verdict line. The sign-in signature is appended
+# as the loop's last positional, exactly as the wrapper passes it, so no fixture
+# has to restate it.
 run_keepalive_raw() {
   local fakebin=$1 pane=$2 script
   shift 2
   script=$(run_adapter "$fakebin" "$TMP_ROOT" 'fm_backend_sbx_keepalive_script')
   PATH="$fakebin:$BASE_PATH" FAKE_TMUX_PANE="$pane" HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$@"
+    sh -c "$script" _ "$@" "$(keepalive_auth_regex)"
 }
 
 # run_keepalive_script <fakebin> <pane-file> <args...>: as above, echoing the
@@ -1414,7 +1430,7 @@ test_keepalive_script_pins_busy_worker_across_turn_end() {
   touch -t 202001010000 "$te"
   printf 'esc to interrupt\n' > "$w/pane.txt"
   PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' > "$w/verdict.txt" &
+    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' "$(keepalive_auth_regex)" > "$w/verdict.txt" &
   pid=$!
   sleep 0.3
   touch "$te"
@@ -1450,7 +1466,7 @@ test_keepalive_script_releases_idle_guest_on_turn_end() {
   : > "$te"
   touch -t 202001010000 "$te"
   PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' > "$w/verdict.txt" &
+    sh -c "$script" _ "$te" 60 1 120 "" 'esc (to )?interrupt' "$(keepalive_auth_regex)" > "$w/verdict.txt" &
   pid=$!
   sleep 0.3
   touch "$te"
@@ -1501,7 +1517,7 @@ test_keepalive_script_pins_redrawing_crewmate_with_quiet_tail() {
     done ) &
   wid=$!
   PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" FAKE_TMUX_PANE2="$w/worker.txt" HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 60 1 120 "$w/home" 'esc (to )?interrupt' > "$w/verdict.txt" &
+    sh -c "$script" _ "$te" 60 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)" > "$w/verdict.txt" &
   pid=$!
   sleep 0.5
   touch "$te"
@@ -1751,7 +1767,7 @@ test_keepalive_script_parked_worker_survives_the_secondmate_turn_end() {
   touch -t 202001010000 "$te"
   park_worker "$w/home" w1
   PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt' > "$w/verdict.txt" &
+    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)" > "$w/verdict.txt" &
   pid=$!
   sleep 0.3
   touch "$te"
@@ -1896,7 +1912,7 @@ test_keepalive_script_detail_reports_panes_and_gate_freshness() {
   out=$(KEEPALIVE_HOME="$w/guest" \
     run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "" 'esc (to )?interrupt')
   unset FAKE_TMUX_PANE2
-  assert_contains "$(keepalive_detail_of "$out")" "panes=2 nmlog=$mtime" \
+  assert_contains "$(keepalive_detail_of "$out")" "panes=2 park=none nmlog=$mtime" \
     "the detail line should carry the pane count and the newest gate-log mtime"
 
   # No tmux server at all - the candidate the scout could not rule out - reads
@@ -1938,7 +1954,7 @@ test_keepalive_script_detail_names_the_deciding_arm() {
 
   # Idle, nothing registered: every arm reads 0 and the crewmate gate is shut.
   out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "" 'esc (to )?interrupt')
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1" ] \
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1 park=none" ] \
     || fail "an idle guest should report all five arms 0 with the gate shut, got '$(keepalive_detail_of "$out")'"
 
   # Arm 1: a busy pane tail.
@@ -1977,7 +1993,7 @@ test_keepalive_script_detail_reports_the_pane_change_arm() {
     done ) &
   wid=$!
   out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null FAKE_TMUX_PANE2="$w/worker.txt" HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt')
+    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)")
   kill "$wid" 2>/dev/null || true
   wait "$wid" 2>/dev/null || true
   assert_contains "$out" "fm-keepalive capped-active" \
@@ -2010,11 +2026,11 @@ test_keepalive_script_detail_stamps_release_against_task_state() {
   ( sleep 0.4; touch "$te" ) &
   pid=$!
   out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt')
+    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)")
   wait "$pid" 2>/dev/null || true
   assert_contains "$out" "fm-keepalive released-idle" \
     "a quiescent guest should release on the turn-end"
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=1 status=$mtime" ] \
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=1 park=unknown status=$mtime" ] \
     || fail "a release with a registered task must carry the gate and the newest in-guest status mtime, got '$(keepalive_detail_of "$out")'"
 
   # The healthy shape: no task registered, so no stamp and an unmistakably
@@ -2024,13 +2040,221 @@ test_keepalive_script_detail_stamps_release_against_task_state() {
   ( sleep 0.4; touch "$te" ) &
   pid=$!
   out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt')
+    sh -c "$script" _ "$te" 30 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)")
   wait "$pid" 2>/dev/null || true
-  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1" ] \
+  [ "$(keepalive_detail_of "$out")" = "fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=0 panes=1 park=none" ] \
     || fail "a release with no registered task must report the gate shut and carry no stamp, got '$(keepalive_detail_of "$out")'"
   i=$(printf '%s\n' "$out" | grep -c 'status=' || true)
   [ "$i" -eq 0 ] || fail "a release with no registered task must not stamp an in-guest status mtime"
   pass "keep-alive detail: a release separates a registered-but-static task from no task at all"
+}
+
+# --- keep-alive instrumentation: why the screen was static -------------------
+#
+# All five arms read zero for two guests whose remedies are OPPOSITE: a worker
+# stopped on a harness sign-in prompt, which posts no status at all so no open
+# decision exists for the fifth arm to find, and a worker that finished and is
+# waiting for cleanup, which is correctly allowed to let the machine stop. One
+# needs a human to restore the login; the other needs nothing. `park=`
+# classifies which, from readings the loop already makes.
+#
+# It records a CLASSIFICATION and never the pane text: the verdict log lives on
+# the signal-bridge mount, which survives both the stop and a full guest rebuild,
+# and a worker pane can hold credential material.
+
+# static_worker <home> <id>: a REGISTERED worker whose signals are long stale and
+# whose newest event is nonterminal - every arm reads idle and nothing in the
+# record explains it.
+static_worker() {  # <home> <id>
+  printf 'kind=ship\n' > "$1/state/$2.meta"
+  printf 'working: implementing the rename\n' > "$1/state/$2.status"
+  touch -t 202001010000 "$1/state/$2.meta" "$1/state/$2.status"
+}
+
+# finished_worker <home> <id>: the same static shape, but the record says the
+# work ended - the guest that is right to stop.
+finished_worker() {  # <home> <id>
+  printf 'kind=ship\n' > "$1/state/$2.meta"
+  {
+    printf 'working: implementing the rename\n'
+    printf 'done: PR https://example.invalid/pr/1 checks green\n'
+  } > "$1/state/$2.status"
+  touch -t 202001010000 "$1/state/$2.meta" "$1/state/$2.status"
+}
+
+# park_world <name> <pane-text>: a guest whose only pane shows <pane-text>, with
+# a registered worker and a stale gate root, so every arm reads 0. Echoes
+# "<world> <fakebin> <turnend>".
+park_world() {  # <name> <pane-text>
+  local w fb te
+  w=$(new_sbx_world "$1"); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state" "$w/guest"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  printf '%s\n' "$2" > "$w/pane.txt"
+  make_gate_logs "$w/guest" stale
+  printf '%s %s %s\n' "$w" "$fb" "$te"
+}
+
+test_keepalive_detail_classifies_a_signin_park() {
+  # The recorded shape, verbatim from data/learnings.md 2026-08-02: two live
+  # crewmates showing `Please run /login - API Error: 401 OAuth access token has
+  # expired`. That worker posts nothing, so no arm and no durable record can see
+  # it - only its screen can.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-auth \
+    'Please run /login - API Error: 401 OAuth access token has expired')"
+  static_worker "$w/home" w1
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=auth" \
+    "a pane holding the sign-in signature must be recorded as a sign-in park"
+  # The classification is evidence, never a pin: the machine still stops.
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "classifying a sign-in park must not change whether the machine may stop"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=0 arm4=0 arm5=0" \
+    "the classification must feed no arm"
+  pass "keep-alive detail: a worker stopped on a sign-in prompt is recorded as such"
+}
+
+test_keepalive_detail_never_records_the_pane_text() {
+  # THE security property. The verdict log lives on the signal-bridge mount,
+  # which outlives the stop and a full guest rebuild, so a pane excerpt written
+  # there is a durable secret-exposure surface on the host. Only the enum leaves
+  # the guest, even when the matching line carries a credential beside it.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-secret \
+    'Please run /login - API Error: 401 (token sk-ant-oat01-NOTAREALSECRET)')"
+  static_worker "$w/home" w1
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=auth" \
+    "the pane should still classify as a sign-in park"
+  assert_not_contains "$out" "sk-ant-oat01" \
+    "the guest must emit a classification, never any part of the pane text"
+  assert_not_contains "$out" "API Error" \
+    "the guest must emit a classification, never any part of the pane text"
+  pass "keep-alive detail: the classification carries no pane text"
+}
+
+test_keepalive_detail_classifies_a_finished_worker() {
+  # The opposite remedy: nothing is wrong, cleanup is owed. Same static pane,
+  # same zero arms - only the durable record separates it from the case above.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-finished 'ready for review')"
+  finished_worker "$w/home" w1
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=finished" \
+    "a worker whose record says it finished must be recorded as finished"
+  assert_contains "$out" "fm-keepalive capped-idle" \
+    "a finished worker must still let the machine stop"
+  pass "keep-alive detail: a finished worker awaiting cleanup is recorded as finished"
+}
+
+test_keepalive_detail_admits_an_unrecognised_static_pane() {
+  # A confident wrong label is worse than an honest gap: an unrecognised static
+  # pane must not be forced into either bucket.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-unknown 'some screen nobody has classified')"
+  static_worker "$w/home" w1
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=unknown" \
+    "an unrecognised static pane must be recorded as unknown, not guessed at"
+  pass "keep-alive detail: an unrecognised static pane stays honestly unknown"
+}
+
+test_keepalive_detail_reports_no_park_when_work_is_visible() {
+  # There is no static screen to explain while the guest is working, and gating
+  # on that is what stops a worker whose own output happens to quote a sign-in
+  # message from being labelled as stopped on one.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-busy \
+    'grep -n "Please run /login" docs/sbx-backend.md
+esc to interrupt')"
+  static_worker "$w/home" w1
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=1" \
+    "the busy tail should still read as work"
+  assert_contains "$(keepalive_detail_of "$out")" "park=none" \
+    "a working guest has no static screen to classify"
+  pass "keep-alive detail: a working guest reports no park, whatever its output quotes"
+}
+
+test_keepalive_detail_reports_no_park_without_a_registered_task() {
+  # An ordinary idle secondmate is the healthy resting case: no in-guest worker
+  # is registered, so there is no static-worker question to answer.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-nocrew 'idle')"
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "crew=0 panes=1 park=none" \
+    "a guest with no registered task has nothing to classify"
+  pass "keep-alive detail: an idle secondmate with no task reports no park"
+}
+
+test_keepalive_detail_classifies_a_signin_park_without_a_task() {
+  # The secondmate's OWN pane can be the one stopped on a sign-in prompt
+  # (data/learnings.md 2026-07-31: a stop whose cause was claude requiring a
+  # login, wholly outside the keep-alive story). That is worth recording even
+  # with no in-guest worker registered, so the sign-in reading is not gated on
+  # the crewmate flag.
+  local w fb te out
+  read -r w fb te <<<"$(park_world keeper-park-auth-nocrew 'Not logged in')"
+
+  out=$(KEEPALIVE_HOME="$w/guest" \
+    run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "crew=0 panes=1 park=auth" \
+    "a sign-in prompt on the guest's own pane must be recorded without a registered task"
+  pass "keep-alive detail: the guest's own sign-in park is recorded too"
+}
+
+test_keepalive_detail_park_fails_closed_without_the_predicate() {
+  # A guest home cloned before this shipped has no predicate to run. "Finished"
+  # then cannot be asserted, and the honest answer is unknown - never finished on
+  # the strength of a missing file, which would read as "the stop was correct".
+  local w fb te out
+  w=$(new_sbx_world keeper-park-nopredicate); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  finished_worker "$w/home" w1
+
+  out=$(run_keepalive_raw "$fb" /dev/null "$te" 1 0 120 "$w/home" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=unknown" \
+    "a guest home with no predicate must report unknown rather than claim finished"
+  pass "keep-alive detail: the finished reading fails closed on an older guest home"
+}
+
+test_keepalive_detail_park_needs_a_signature_to_claim_auth() {
+  # The wrapper always supplies the signature, and an empty pattern would match
+  # every line. A loop invoked without one must classify nothing as a sign-in
+  # park rather than everything.
+  local w fb script te out
+  w=$(new_sbx_world keeper-park-nopattern); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  printf 'Please run /login\n' > "$w/pane.txt"
+
+  out=$(PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" HOME="$(keepalive_home)" \
+    sh -c "$script" _ "$te" 1 0 120 "" 'esc (to )?interrupt')
+  assert_contains "$(keepalive_detail_of "$out")" "park=none" \
+    "a loop with no sign-in signature must claim nothing"
+  pass "keep-alive detail: an absent sign-in signature claims nothing rather than everything"
 }
 
 # --- keep-alive wrapper: verdict log -----------------------------------------
@@ -2077,11 +2301,11 @@ test_keepalive_wrapper_log_carries_validated_guest_detail() {
 
   run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
-    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 status=1785512635 nmlog=1786127662\nfm-keepalive released-idle' \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 park=finished status=1785512635 nmlog=1786127662\nfm-keepalive released-idle' \
     || fail "the keep-alive call itself should succeed"
   assert_log_matches "$log" \
-    'released-idle pin=[0-9]+s arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 status=1785512635 nmlog=1786127662$' \
-    "the log line should carry the guest's arm report, pane count and both mtime stamps"
+    'released-idle pin=[0-9]+s arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 park=finished status=1785512635 nmlog=1786127662$' \
+    "the log line should carry the guest's arm report, pane count, static-screen verdict and both mtime stamps"
   assert_no_grep 'fm-keepalive detail' "$log" \
     "the log should carry the report's fields, not the raw guest marker line"
 
@@ -2089,7 +2313,7 @@ test_keepalive_wrapper_log_carries_validated_guest_detail() {
   : > "$log"
   run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
     FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
-    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2; rm -rf /\nfm-keepalive released-idle' \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 park=auth; rm -rf /\nfm-keepalive released-idle' \
     || fail "the keep-alive call itself should succeed"
   assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
     "an unparseable report should be dropped, leaving the verdict line intact"
@@ -2101,7 +2325,8 @@ test_keepalive_wrapper_log_carries_validated_guest_detail() {
   # new arm turns the previous current shape into another one to refuse.
   for stale_detail in \
     'fm-keepalive detail arm1=0 arm2=0 arm3=0 crew=1 status=1785512635' \
-    'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635'; do
+    'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 crew=1 panes=2 status=1785512635' \
+    'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 status=1785512635'; do
     : > "$log"
     run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
       FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
@@ -2111,6 +2336,18 @@ test_keepalive_wrapper_log_carries_validated_guest_detail() {
       "a report in a superseded arm shape should be dropped, leaving the verdict intact"
     assert_no_grep 'arm1=' "$log" "a superseded report shape must not reach the log"
   done
+
+  # The static-screen verdict is a CLOSED enum. A value outside it - the shape a
+  # guest smuggling pane text would produce - is refused entirely rather than
+  # logged, exactly like every other field outside its accepted shape.
+  : > "$log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1 panes=2 park=Please run /login\nfm-keepalive released-idle' \
+    || fail "the keep-alive call itself should succeed"
+  assert_log_matches "$log" 'released-idle pin=[0-9]+s$' \
+    "a verdict outside the closed enum should be dropped, leaving the verdict line intact"
+  assert_no_grep '/login' "$log" "free text in the verdict field must never reach the log"
   pass "keep-alive log: the guest's arm report is admitted only in its exact shape"
 }
 
@@ -2793,6 +3030,15 @@ test_keepalive_script_detail_names_the_deciding_arm
 test_keepalive_script_detail_reports_panes_and_gate_freshness
 test_keepalive_script_detail_reports_the_pane_change_arm
 test_keepalive_script_detail_stamps_release_against_task_state
+test_keepalive_detail_classifies_a_signin_park
+test_keepalive_detail_never_records_the_pane_text
+test_keepalive_detail_classifies_a_finished_worker
+test_keepalive_detail_admits_an_unrecognised_static_pane
+test_keepalive_detail_reports_no_park_when_work_is_visible
+test_keepalive_detail_reports_no_park_without_a_registered_task
+test_keepalive_detail_classifies_a_signin_park_without_a_task
+test_keepalive_detail_park_fails_closed_without_the_predicate
+test_keepalive_detail_park_needs_a_signature_to_claim_auth
 test_keepalive_wrapper_logs_every_verdict
 test_keepalive_wrapper_log_carries_validated_guest_detail
 test_keepalive_wrapper_log_failure_cannot_affect_the_keeper

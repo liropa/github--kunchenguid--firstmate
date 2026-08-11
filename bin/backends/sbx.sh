@@ -79,6 +79,21 @@ FM_SBX_MIDTASK_STOP_SETTLE=${FM_SBX_MIDTASK_STOP_SETTLE:-120}
 # (fm_backend_sbx_keepalive_log). 0 disables trimming entirely.
 FM_SBX_KEEPALIVE_LOG_LINES=${FM_SBX_KEEPALIVE_LOG_LINES:-200}
 
+# Harness sign-in signatures, matched case-insensitively against a guest pane's
+# visible tail so the keep-alive can record WHY a static screen was static
+# (docs/sbx-backend.md "Static-screen classification"). Every alternative here
+# is an observed shape, not an invented one: `Please run /login` and `OAuth
+# access token has expired` from the two 401'd crewmate panes of 2026-08-02,
+# `Not logged in` from the 2026-07-23 in-guest daemon failure, `401
+# Unauthorized` from the 2026-07-27 agent-flavor matrix, and `signing in again`
+# from the codex wrong-flavor body recorded beside it. Keep the set small and
+# evidence-backed: an unrecognised static pane must stay honestly `unknown`
+# rather than be forced into a bucket. It reads a screen but decides nothing -
+# no pin, no release, no breadcrumb - so a false match costs a wrong label in an
+# evidence log, never a machine's power state. An empty value falls back to this
+# default; a home wanting the reading off sets a pattern that cannot match.
+FM_SBX_AUTH_REGEX=${FM_SBX_AUTH_REGEX:-'Please run /login|Not logged in|OAuth access token has expired|401 Unauthorized|sign(ing)? in again'}
+
 # In-guest tmux session name. One secondmate per sandbox, so a fixed session
 # name with the task's fm-<id> window is unambiguous within each VM.
 FM_SBX_GUEST_SESSION=${FM_SBX_GUEST_SESSION:-fm}
@@ -507,7 +522,9 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # (a fake tmux plus real files) without a sandbox. Args after the _ argv0:
 #   $1 turn-ended mount file    $2 max pin seconds   $3 poll seconds
 #   $4 activity window seconds  $5 guest home path ('' skips the state probes)
-#   $6 busy-pane regex
+#   $6 busy-pane regex          $7 sign-in-pane regex ('' never claims a sign-in
+#                                  park, so an older caller classifies nothing
+#                                  rather than everything)
 # Pin/release contract (docs/sbx-backend.md "Steering and resurrection"):
 #   - Pin at least until the turn-ended mount file advances past its delivery
 #     baseline (the original v1 condition: the delivered turn must not die).
@@ -585,13 +602,34 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     alarm for a guest that never processed the answer it was just sent. An
 #     arm5-only pin therefore leaves the breadcrumb untouched, which also keeps
 #     the wrapper quiet if the VM dies during a wait rather than during work.
+#   - The static screen is CLASSIFIED on the way out (park), because two guests
+#     with opposite remedies present identically to all five arms: a worker
+#     stopped on a harness sign-in prompt posts no status at all, so no open
+#     decision exists for arm5 to find, while a worker that finished and is
+#     awaiting cleanup is correctly allowed to let the machine stop. One needs a
+#     human to restore the login; the other needs nothing. `auth` is read from
+#     the pane tails the loop already captured, only when no arm saw work, so a
+#     worker whose own output quotes a sign-in message cannot be mislabelled as
+#     stopped on one. `finished` is read from the DURABLE RECORD through the
+#     guest home's own bin/fm-tasks-finished.sh, which composes
+#     bin/fm-classify-lib.sh's terminal-event rule rather than restating it in
+#     sh; it runs once at exit, after the release decision, so it can influence
+#     nothing. Anything else is `unknown` and stays that way - a confident wrong
+#     label reads as "the stop was correct" for a worker that was in fact stuck.
+#     `none` means there was no static screen to explain: work was visible, or no
+#     crewmate task was registered. Only a CLASSIFICATION crosses the boundary,
+#     never pane text: the verdict log lives on the signal-bridge mount, which
+#     outlives both the stop and a full guest rebuild, and a worker pane can hold
+#     credential material.
 #   - On the way out, print ONE "fm-keepalive detail" line before the verdict,
 #     reporting how each arm read on the deciding poll (a1..a5), whether
 #     the crewmate gate was open (crew), how many tmux panes were visible
-#     (panes), the newest in-guest *.status mtime on released-idle with a
-#     crewmate registered (status), and the newest gate-log mtime whenever one
-#     was read (nmlog). The wrapper logs it. Arms 1-4 are INSTRUMENTATION ONLY:
-#     assigned beside the existing work=1 assignments and read by no condition.
+#     (panes), why the screen was static (park), the newest in-guest *.status
+#     mtime on released-idle with a crewmate registered (status), and the newest
+#     gate-log mtime whenever one was read (nmlog). The wrapper logs it. Arms
+#     1-4 and park are INSTRUMENTATION ONLY: the arms are assigned beside the
+#     existing work=1 assignments, park is computed inside emit immediately
+#     before exit, and no condition reads any of them.
 #     a5 is the one exception - the breadcrumb rule above reads it, because
 #     "the pin came from the park" is not derivable from work= alone. The line
 #     exists because a released pin left no
@@ -604,17 +642,39 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # Plain POSIX sh, GNU-first portable stat (the guest is Linux; the BSD arm
 # exists so the host-side unit tests can run the same script on macOS).
 fm_backend_sbx_keepalive_script() {
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$6 expand in the guest sh loop, not here
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$7 expand in the guest sh loop, not here
   printf '%s' '
-    t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6
+    t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6 authre=$7
     # Only an absolute path is a home; anything else means "no home", which is
     # how FM_SBX_NO_VALUE arrives. Testing the SHAPE rather than one literal
     # token keeps host and guest from drifting apart.
     case $home in /*) ;; *) home= ;; esac
     act=${t%.turn-ended}.guest-active
     gate=$HOME/.no-mistakes/logs
+    nl="
+"
     mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+    # Why the screen was static, as a closed enum. Never pane text - see the
+    # contract above. Ordered so the two actionable readings cannot be crowded
+    # out: work visible means there is nothing static to explain; a sign-in
+    # prompt is read from the screen because that worker publishes nothing else;
+    # finished is read from the record; anything left is honestly unknown.
+    classify() {
+      park=none
+      [ "$work" = 0 ] || return 0
+      if [ -n "$authre" ] && printf "%s\n" "$tails" | grep -qiE "$authre"; then
+        park=auth
+        return 0
+      fi
+      [ "$crew" = 1 ] || return 0
+      park=unknown
+      if [ -n "$home" ] && [ -x "$home/bin/fm-tasks-finished.sh" ] \
+        && "$home/bin/fm-tasks-finished.sh" "$home" >/dev/null 2>&1; then
+        park=finished
+      fi
+    }
     emit() {
+      classify
       extra=
       if [ "$1" = released-idle ] && [ "$crew" = 1 ]; then
         last=0
@@ -626,7 +686,7 @@ fm_backend_sbx_keepalive_script() {
         [ "$last" -gt 0 ] && extra=" status=$last"
       fi
       [ "$nm" -gt 0 ] && extra="$extra nmlog=$nm"
-      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 arm4=$a4 arm5=$a5 crew=$crew panes=$panes$extra"
+      echo "fm-keepalive detail arm1=$a1 arm2=$a2 arm3=$a3 arm4=$a4 arm5=$a5 crew=$crew panes=$panes park=$park$extra"
       echo "fm-keepalive $1"
     }
     start=$(date +%s)
@@ -644,6 +704,7 @@ fm_backend_sbx_keepalive_script() {
       panes=0
       nm=0
       snap=
+      tails=
       if [ -n "$home" ]; then
         for f in "$home"/state/*.meta; do
           [ -e "$f" ] || continue
@@ -655,8 +716,13 @@ fm_backend_sbx_keepalive_script() {
         panes=$((panes + 1))
         pane=$(tmux capture-pane -p -t "$p" 2>/dev/null)
         snap="$snap|$p|$pane"
-        if [ "$work" = 0 ] \
-          && printf "%s\n" "$pane" | grep -v "^[[:space:]]*$" | tail -6 | grep -qiE "$regex"; then
+        # The visible tail, computed once: arm1 tests it for the busy idiom and
+        # the static-screen classification tests the same lines for a sign-in
+        # prompt. Same 6-line window for both, so a sign-in message that has
+        # already scrolled out of reach of arm1 is equally out of reach here.
+        vis=$(printf "%s\n" "$pane" | grep -v "^[[:space:]]*$" | tail -6)
+        tails="$tails$nl$vis"
+        if [ "$work" = 0 ] && printf "%s\n" "$vis" | grep -qiE "$regex"; then
           work=1
           a1=1
         fi
@@ -778,8 +844,13 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 # silent ones included, also appends one evidence line to the per-task verdict
 # log (fm_backend_sbx_keepalive_log above). Guest stdout is untrusted data:
 # only the fixed fm-keepalive verdict and detail shapes are matched - the
-# detail whitelist admits nothing but 0/1 flags, a small pane count, and digit
-# timestamps - and the breadcrumb is stat'ed, never read.
+# detail whitelist admits nothing but 0/1 flags, a small pane count, one token
+# from the closed static-screen enum, and digit timestamps - and the breadcrumb
+# is stat'ed, never read. The enum is whitelisted rather than accepted as free
+# text precisely because the guest reads panes to produce it: this log lands on
+# the signal-bridge mount, which survives the stop and a full guest rebuild, so
+# admitting free text there would make a credential-bearing pane a durable
+# host-side exposure.
 #
 # A CLEAN released-idle STAYS SILENT, deliberately, even though a clean
 # release is what killed four validation runs on 2026-08-05/07: the keeper
@@ -811,7 +882,8 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
   # state to inspect". So it travels as FM_SBX_NO_VALUE, exactly like the
   # provisioning pass's hash, and the guest maps it back by SHAPE below.
   guest_args=(_ "$turnend" "$FM_SBX_KEEPALIVE_MAX" "$FM_SBX_KEEPALIVE_POLL" \
-    "$FM_SBX_GUEST_ACTIVE_WINDOW" "${home:-$FM_SBX_NO_VALUE}" "$busy")
+    "$FM_SBX_GUEST_ACTIVE_WINDOW" "${home:-$FM_SBX_NO_VALUE}" "$busy" \
+    "$FM_SBX_AUTH_REGEX")
   # Checked before the keeper is armed, not inside it: a warning printed from
   # the background subshell would land in an unpredictable place.
   fm_backend_sbx_guest_args_ok "$name" "the keep-alive" "${guest_args[@]}" || return 0
@@ -822,7 +894,7 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
     verdict=$(printf '%s\n' "$out" \
       | grep -E '^fm-keepalive (released-idle|capped-idle|capped-active)$' | tail -1)
     detail=$(printf '%s\n' "$out" \
-      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] arm4=[01] arm5=[01] crew=[01] panes=[0-9]{1,6}( status=[0-9]{1,19})?( nmlog=[0-9]{1,19})?$' \
+      | grep -E '^fm-keepalive detail arm1=[01] arm2=[01] arm3=[01] arm4=[01] arm5=[01] crew=[01] panes=[0-9]{1,6} park=(auth|finished|unknown|none)( status=[0-9]{1,19})?( nmlog=[0-9]{1,19})?$' \
       | tail -1)
     case "$verdict" in
       'fm-keepalive released-idle') outcome=released-idle ;;
