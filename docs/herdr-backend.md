@@ -231,6 +231,7 @@ An ambiguous pre-operation snapshot refuses the focus-sensitive mutation rather 
 For every eligible projected create from a primary or secondmate home, Firstmate makes one presentation-only ordering attempt after that exact workspace has converged.
 One bounded lock per live named Herdr session/socket serializes projected creates, ordering, abort cleanup, and projected normal cleanup across every Firstmate home that shares the session.
 The lock key is derived from the verified session name and canonical socket path and lives in a machine-private shared runtime namespace, never inside any one home's `state/`.
+That namespace is one machine-global path in production; `fm_backend_herdr_presentation_lock_namespace` in `bin/backends/herdr.sh` owns it and the caller-private override a test uses to stay hermetic.
 An unverified or ambiguous socket or an insecure shared-lock namespace fails closed for presentation mutation, warns, and leaves the task on the ordinary flat path.
 The new response-derived workspace id is inserted immediately after its owning parent (`firstmate` or `2ndmate-<id>`) contiguous child block and before the next parent.
 New-format `└ ... · p:<token>` children define that block; already-adjacent old-format `firstmate/... · p:<token>` or `2ndmate-<id>/... · p:<token>` projections may extend it read-only for compatibility and are never renamed or migrated.

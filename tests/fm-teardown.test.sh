@@ -1764,15 +1764,48 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_HERDR_PRESENTATION_LOCK_DIR="$case_dir/presentation-lock" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
+  # The close above only happens under the presentation focus lock, so the
+  # per-case namespace existing afterwards proves the lock came from there and
+  # not from the machine-global path this case used to reach into.
+  [ -d "$case_dir/presentation-lock" ] \
+    || fail "projected teardown did not take its focus lock in the per-case namespace"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "projected teardown must never call workspace close"
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
     "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
+}
+
+# The focus lock has three distinct ways to be unobtainable and only one of them
+# is contention. An unusable namespace reported as "concurrent" cost two
+# investigations before the 2026-08-11 diagnosis, so the wording is pinned here.
+test_herdr_projection_teardown_names_an_unusable_lock_namespace() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-unusable-lock-namespace)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  # A namespace whose parent does not exist can never be created: mkdir is not
+  # -p, so the namespace fails validation and no lock path resolves at all.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_HERDR_PRESENTATION_LOCK_DIR="$case_dir/absent-parent/presentation-lock" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-unusable-lock-namespace: teardown should preserve best-effort endpoint semantics"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "an unobtainable focus lock must not retire the presentation journal"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "an unobtainable focus lock must not close the task pane"
+  assert_grep "focus lock could not be resolved" "$case_dir/stderr" \
+    "an unusable lock namespace did not report why the lock was unobtainable"
+  assert_not_contains "$(cat "$case_dir/stderr")" "concurrent" \
+    "an unusable lock namespace was misreported as concurrency"
+  pass "herdr projection teardown names an unusable lock namespace instead of blaming concurrency"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
@@ -1783,6 +1816,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+  FM_HERDR_PRESENTATION_LOCK_DIR="$case_dir/presentation-lock" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
@@ -1809,6 +1843,7 @@ test_teardown_keeps_ambiguous_watcher_markers
 test_teardown_ambiguity_survives_a_targetless_meta
 test_teardown_keeps_other_tasks_seen_markers
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
+test_herdr_projection_teardown_names_an_unusable_lock_namespace
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
