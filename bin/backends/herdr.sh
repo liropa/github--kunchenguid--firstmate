@@ -391,7 +391,24 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # The path is never under any one home's state/ and secondmates never write the
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
+
+# The default namespace is one machine-global path, so any caller that reaches
+# it - including a test - contends with every other process on the host and
+# depends on that one path staying writable. FM_HERDR_PRESENTATION_LOCK_DIR
+# redirects the namespace to a caller-private directory so a test can be
+# hermetic; production leaves it unset and keeps the shared path. The override
+# only chooses the directory: an absolute path is required, and the same
+# ownership and mode-700 validation below still gates every namespace, so it
+# cannot weaken the lock's security posture.
 fm_backend_herdr_presentation_lock_namespace() {
+  local override=${FM_HERDR_PRESENTATION_LOCK_DIR:-}
+  if [ -n "$override" ]; then
+    case "$override" in
+      /*) printf '%s' "$override" ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
   printf '%s' '/tmp/firstmate-herdr-presentation'
 }
 

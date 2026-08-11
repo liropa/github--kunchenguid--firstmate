@@ -1240,6 +1240,34 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
+test_presentation_lock_namespace_override_is_private_and_absolute() {
+  local dir log resp fb sockets path status
+  dir="$TMP_ROOT/presentation-lock-override"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  sockets="{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}"
+  printf '%s\n' "$sockets" > "$resp/1.out"
+  printf '%s\n' "$sockets" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PRESENTATION_LOCK_DIR="$dir/private-ns" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
+    || fail "an absolute namespace override must resolve a lock path"
+  case "$path" in
+    "$dir/private-ns"/order-*.lock) ;;
+    *) fail "namespace override was ignored: $path" ;;
+  esac
+  [ -d "$dir/private-ns" ] || fail "namespace override did not create its own namespace"
+  # A relative override would resolve against whatever directory the caller
+  # happens to be in, so it is refused rather than silently reinterpreted.
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PRESENTATION_LOCK_DIR="relative-ns" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relative namespace override must refuse, got '$path'"
+  pass "herdr presentation lock: an absolute namespace override is honored and a relative one refuses"
+}
+
 test_presentation_session_lock_path_rejects_malformed_socket() {
   local dir log resp fb path status
   dir="$TMP_ROOT/presentation-malformed-socket"; mkdir -p "$dir/responses"
@@ -3009,6 +3037,7 @@ test_projection_order_ambiguous_existing_block_is_read_only
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_lock_namespace_override_is_private_and_absolute
 test_presentation_session_lock_path_rejects_malformed_socket
 test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket

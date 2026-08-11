@@ -1322,10 +1322,29 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   HERDR_PRESENTATION_FOCUS_LOCK=
   HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
   HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
+  HERDR_PRESENTATION_FOCUS_LOCK_RC=0
+  # Why the lock was not obtained, in the operator's terms. Only the retry
+  # budget running out is contention; naming the other two causes as
+  # concurrency sends the reader hunting for a second process that does not
+  # exist (the 2026-08-11 diagnosis, twice misread as a flaky test).
+  HERDR_PRESENTATION_FOCUS_LOCK_REASON='could not be resolved for this session'
   if HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
+    HERDR_PRESENTATION_FOCUS_LOCK_REASON='is held by a concurrent presentation operation'
     while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
-      if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
+      # `|| rc=$?` keeps this a condition context: a bare call would abort the
+      # whole teardown under `set -e` the moment the lock is merely contended.
+      HERDR_PRESENTATION_FOCUS_LOCK_RC=0
+      fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK" \
+        || HERDR_PRESENTATION_FOCUS_LOCK_RC=$?
+      if [ "$HERDR_PRESENTATION_FOCUS_LOCK_RC" -eq 0 ]; then
         HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
+        break
+      fi
+      # rc 2 is fm_lock_try_acquire's permanent "no lock artifact can be
+      # created here at all" answer, so there is no holder to outwait: every
+      # remaining attempt fails identically and only burns the budget.
+      if [ "$HERDR_PRESENTATION_FOCUS_LOCK_RC" -eq 2 ]; then
+        HERDR_PRESENTATION_FOCUS_LOCK_REASON='directory cannot hold lock artifacts'
         break
       fi
       sleep 0.1
@@ -1338,7 +1357,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
   else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+    echo "warning: herdr presentation focus lock $HERDR_PRESENTATION_FOCUS_LOCK_REASON; refusing a focus-unsafe pane close" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
