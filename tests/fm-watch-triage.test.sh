@@ -165,8 +165,10 @@ test_classifier_primitives() {
     || fail "a key token in resolved note prose closed the keyed decision"
   printf '%s' "$open" | grep -F $'prose\t' >/dev/null \
     && fail "a key token in note prose changed the decision key"
-  printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
-    && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'invalid-key!bad key\t' >/dev/null \
+    || fail "an unreadable key slug was dropped instead of keeping a visible bucket"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "an unreadable key slug folded into the shared default bucket"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
@@ -190,6 +192,116 @@ EOF
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
+}
+
+# Decision-key placement. A key token is read BEFORE the colon (canonical) and
+# also when it LEADS the note, optionally behind the machine-written corr=<16hex>
+# reply token a secondmate echoes back; both placements fold to one key. Writing
+# the key after the colon used to discard it, so unrelated threads shared the
+# "default" bucket and each resolution closed whichever thread last opened it.
+#
+# The post-colon form is bounded to the leading position deliberately. Measured
+# across the fleet's live status logs on 2026-08-14: of 131 lines carrying a key
+# after the colon, 120 lead the note and 7 lead behind a correlation token, so
+# the placement rule reads 127 of them; of the remaining 4, three are prose
+# QUOTING another event's key ("I will require the matching resolved:
+# [key=nm-review-gate] event"). Reading a quote as a key would let a sentence
+# about a decision close that decision, which loses more than the shared-bucket
+# folding this rule repairs, so those stay unkeyed and are pinned below.
+test_decision_key_placements() {
+  local dir state open activity
+  dir=$(make_case decision-key-placement); state="$dir/state"
+
+  # Both placements name one key, keep the verb parsable, and yield one note.
+  [ "$(_fm_decision_key 'blocked [key=api-shape]: pick one')" = api-shape ] \
+    || fail "a key before the colon stopped parsing"
+  [ "$(_fm_decision_key 'blocked: [key=api-shape] pick one')" = api-shape ] \
+    || fail "a key leading the note was discarded"
+  [ "$(_fm_decision_key 'blocked: corr=a24032e6ab3ec309 [key=api-shape] pick one')" = api-shape ] \
+    || fail "a key behind a correlation token was discarded"
+  [ "$(status_line_verb 'blocked: [key=api-shape] pick one')" = blocked ] \
+    || fail "the leading verb stopped parsing once the key moved after the colon"
+  [ "$(status_line_note 'blocked: [key=api-shape] pick one')" \
+    = "$(status_line_note 'blocked [key=api-shape]: pick one')" ] \
+    || fail "the two key placements did not yield the same note text"
+  [ "$(status_line_note 'blocked: [key=api-shape] pick one')" = "pick one" ] \
+    || fail "a recognized key token leaked into the note text"
+
+  # Two keyed decisions stay open at once, in either placement.
+  printf 'blocked [key=alpha]: alpha needs a call\nblocked: [key=beta] beta needs a different call\n' \
+    > "$state/two.status"
+  [ "$(status_open_decisions "$state/two.status" | grep -c . || true)" = 2 ] \
+    || fail "two concurrently keyed decisions did not stay in separate buckets"
+
+  # A resolution closes only the thread carrying its own key.
+  cat > "$state/threads.status" <<'EOF'
+blocked [key=alpha]: alpha needs a call
+blocked: [key=beta] beta needs a different call
+resolved: [key=alpha] alpha was answered
+EOF
+  open=$(status_open_decisions "$state/threads.status")
+  printf '%s' "$open" | grep -F $'beta\tblocked\tbeta needs a different call' >/dev/null \
+    || fail "a resolution for one key closed an unrelated keyed decision"
+  printf '%s' "$open" | grep -F $'alpha\t' >/dev/null \
+    && fail "a post-colon resolution did not close the decision carrying its key"
+
+  # Prose quoting another event's key is prose, not this line's key.
+  [ "$(_fm_decision_key 'working: I will require the matching resolved: [key=nm-review-gate] event')" \
+    = default ] \
+    || fail "a key quoted inside note prose was read as this line's key"
+  cat > "$state/quote.status" <<'EOF'
+blocked [key=nm-review-gate]: the review gate parked on three findings
+working: RELAY LANDED. I will require the matching resolved: [key=nm-review-gate] event
+resolved: docs still mention [key=nm-review-gate]
+EOF
+  printf '%s' "$(status_open_decisions "$state/quote.status")" \
+    | grep -F $'nm-review-gate\tblocked\t' >/dev/null \
+    || fail "prose quoting a key closed the real decision that key names"
+
+  # An unreadable key is observable: marked, distinct per token, never renamed to
+  # the shared default bucket and never dropped. The marker holds a character no
+  # valid slug may carry, so it cannot collide with a real key.
+  case "$FM_CLASSIFY_INVALID_KEY_PREFIX" in
+    *[!A-Za-z0-9._-]*) : ;;
+    *) fail "the unreadable-key marker uses only slug characters, so it can collide with a real key" ;;
+  esac
+  cat > "$state/malformed.status" <<'EOF'
+blocked [key=bad key]: one malformed thread
+blocked: [key=other bad] a different malformed thread
+blocked [key=]: an empty key token
+resolved: a bare resolution closing the default bucket
+EOF
+  open=$(status_open_decisions "$state/malformed.status")
+  printf '%s' "$open" | grep -F $'invalid-key!bad key\tblocked\tone malformed thread' >/dev/null \
+    || fail "an unreadable key was dropped instead of surfacing under the marker"
+  printf '%s' "$open" | grep -F $'invalid-key!other bad\tblocked\ta different malformed thread' >/dev/null \
+    || fail "two different unreadable keys were folded into one shared bucket"
+  printf '%s' "$open" | grep -F $'invalid-key!\tblocked\tan empty key token' >/dev/null \
+    || fail "an empty key token was dropped instead of surfacing under the marker"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "an unreadable key was silently renamed to the shared default bucket"
+  [ "$(printf '%s' "$open" | grep -c . || true)" = 3 ] \
+    || fail "the three unreadable-key threads did not each keep their own bucket"
+
+  # Deterministic, so the same unreadable token still closes its own thread.
+  printf 'blocked [key=bad key]: opened\nresolved [key=bad key]: closed\n' \
+    > "$state/malformed-close.status"
+  [ -z "$(status_open_decisions "$state/malformed-close.status")" ] \
+    || fail "a resolution carrying the same unreadable key did not close its thread"
+
+  # The activity fold reads placement the same way.
+  cat > "$state/phases.status" <<'EOF'
+working [key=phase-a]: a started
+working: [key=phase-b] b started
+resolved: [key=phase-a] a ended
+EOF
+  activity=$(status_open_activities "$state/phases.status")
+  printf '%s' "$activity" | grep -F $'phase-b\tworking\tb started' >/dev/null \
+    || fail "a post-colon keyed working phase did not stay open in its own bucket"
+  printf '%s' "$activity" | grep -F $'phase-a\t' >/dev/null \
+    && fail "a post-colon keyed resolution did not close its own working phase"
+
+  pass "decision keys parse in either placement, keep unrelated threads apart, and mark an unreadable key instead of losing it"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -1428,6 +1540,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_decision_key_placements
 test_awaiting_validation_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
