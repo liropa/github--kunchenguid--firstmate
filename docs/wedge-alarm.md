@@ -1,7 +1,7 @@
 # Away-mode injection wedge alarm - active alert channels
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into firstmate's own pane.
-When injection cannot confirm a submit past `FM_MAX_DEFER_SECS` (the pane is genuinely busy or wedged, or its Enter is swallowed), `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+When injection cannot confirm a submit past `FM_MAX_DEFER_SECS` (the pane is stopped at a prompt awaiting the captain, genuinely busy or wedged, or its Enter is swallowed), `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 
 ## Why an active channel beyond the status-line flash
 
@@ -66,7 +66,8 @@ $ echo $?
 ```
 
 Exit 0; a Notification Center banner titled "FIRSTMATE TEST - IGNORE" was posted with the label as its body.
-In production the title is "firstmate: away-mode escalations WEDGED" and the body is the `<age>s undelivered - see <marker>` summary.
+In production the title is "firstmate: away-mode escalations WEDGED".
+The body is the `<age>s undelivered - see <marker>` summary, with the stopped-prompt cause added when herdr's native agent state reports `blocked`.
 
 ### herdr channel
 
