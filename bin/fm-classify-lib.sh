@@ -288,9 +288,9 @@ _fm_decision_key_slug() {  # <raw-token> -> slug or marked invalid key
   local k=$1
   case "$k" in
     ''|*[!A-Za-z0-9._-]*)
-      # A TAB would corrupt the fold's "<key>\t<verb>\t<note>" record shape.
-      k=${k//$'\t'/ }
-      k=${k//$'\r'/ }
+      k=${k//\\/\\\\}
+      k=${k//$'\t'/\\t}
+      k=${k//$'\r'/\\r}
       printf '%s%s' "$FM_CLASSIFY_INVALID_KEY_PREFIX" "$k"
       ;;
     *) printf '%s' "$k" ;;
