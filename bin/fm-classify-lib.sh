@@ -173,13 +173,43 @@ status_is_paused_or_captain_held() {  # <status-line>
 # terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
-#   needs-decision [key=api-shape]: <summary>
-#   resolved       [key=api-shape]: <how it was decided>
+# format). An OPTIONAL "[key=<slug>]" token names the thread a line belongs to,
+# and it is read in EITHER placement, both folding to the same key:
+#   needs-decision [key=api-shape]: <summary>      canonical, before the colon
+#   needs-decision: [key=api-shape] <summary>      accepted, leading the note
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+#
+# After the colon, POSITION is part of the grammar: only a token that LEADS the
+# note counts, optionally after the machine-written "corr=<16hex>" reply token a
+# secondmate echoes back. A "[key=...]" further inside the prose stays prose,
+# because notes legitimately QUOTE another event's key ("I will require the
+# matching resolved: [key=nm-review-gate] event"). Reading those as keys would
+# let a sentence ABOUT a decision close that decision, which loses more than the
+# shared-bucket mis-folding this placement rule exists to fix.
+#
+# A token that is present but unreadable is neither renamed to "default" nor
+# dropped; see FM_CLASSIFY_INVALID_KEY_PREFIX for the treatment and why it is
+# visible.
+#
+# The parsers are pure reads of a single line. The verb parser strips any key
+# token before the colon so the leading word is recovered cleanly, and the note
+# parser strips a recognized leading token so both placements yield one note.
+
+# Marker for a key token that is PRESENT but unreadable (empty, or holding a
+# character outside the A-Za-z0-9._- slug set). Such a token is never silently
+# renamed to "default", because folding unrelated threads into one shared bucket
+# is the defect keys exist to prevent, and never silently dropped, because a
+# dropped needs-decision or blocked line reaches nobody at all. It keeps a bucket
+# of its own under this prefix, which is observable three ways: the raw token is
+# preserved, so two different malformed tokens stay apart; "!" cannot occur in a
+# valid slug, so a marked key is unmistakable wherever the fold is rendered (the
+# fleet snapshot, bin/fm-parked-decision.sh, bin/fm-afk-return.sh's catch-up
+# gate); and no well-formed key can close it, so the decision keeps surfacing
+# until the producer is repaired. The mapping is deterministic, so a resolution
+# carrying the same malformed token still closes its own thread.
+FM_CLASSIFY_INVALID_KEY_PREFIX='invalid-key!'
+
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
@@ -187,25 +217,106 @@ status_line_verb() {  # <status-line> -> leading verb word
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
+
+# Split a note into its optional leading correlation token, its optional leading
+# "[key=<token>]", and the text after both, assigning each to the named variable.
+# Returns 0 when a key token led the note (even if its slug is unreadable) and 1
+# when none did, so callers can tell "no token" from "empty token".
+#
+# The "corr=<16hex>" grammar is owned by bin/fm-pending-reply-lib.sh
+# (FM_PENDING_REPLY_CORR_RE), which strips the same prefix when it rewrites a
+# marked message. It is matched here as a literal glob rather than by sourcing
+# that library, because this classifier is a pure read that the away-mode daemon
+# and bin/fm-afk-return.sh source without the backend and tmux libraries
+# fm-pending-reply-lib.sh pulls in.
+#
+# Locals carry a _fmns_ prefix because bash scoping is dynamic: a local named
+# after one of the caller's output variables would shadow it, and printf -v would
+# then write to this frame instead of the caller's.
+_fm_note_split() {  # <note> <corr-var> <token-var> <rest-var>
+  local _fmns_n=$1 _fmns_corr='' _fmns_token='' _fmns_rest
+  _fmns_n=${_fmns_n#"${_fmns_n%%[![:space:]]*}"}
+  case "${_fmns_n:0:21}" in
+    corr=[A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9])
+      _fmns_corr=${_fmns_n:0:21}
+      _fmns_n=${_fmns_n:21}
+      _fmns_n=${_fmns_n#"${_fmns_n%%[![:space:]]*}"}
+      ;;
+  esac
+  _fmns_rest=$_fmns_n
+  case "$_fmns_n" in
+    \[key=*\]*)
+      _fmns_token=${_fmns_n#\[key=}
+      _fmns_token=${_fmns_token%%\]*}
+      _fmns_rest=${_fmns_n#*\]}
+      _fmns_rest=${_fmns_rest#"${_fmns_rest%%[![:space:]]*}"}
+      printf -v "$2" '%s' "$_fmns_corr"
+      printf -v "$3" '%s' "$_fmns_token"
+      printf -v "$4" '%s' "$_fmns_rest"
+      return 0
+      ;;
+  esac
+  printf -v "$2" '%s' "$_fmns_corr"
+  printf -v "$3" '%s' "$_fmns_token"
+  printf -v "$4" '%s' "$_fmns_rest"
+  return 1
+}
+
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  # shellcheck disable=SC2034 # corr/token/rest are set by name through _fm_note_split.
+  local n corr token rest
   case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+    *:*) n=${1#*:} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  if _fm_note_split "$n" corr token rest; then
+    if [ -n "$corr" ] && [ -n "$rest" ]; then
+      printf '%s %s' "$corr" "$rest"
+    elif [ -n "$corr" ]; then
+      printf '%s' "$corr"
+    else
+      printf '%s' "$rest"
+    fi
+    return 0
+  fi
+  printf '%s' "${n#"${n%%[![:space:]]*}"}"
+}
+
+# Validate one raw key token: a well-formed slug passes through unchanged, and an
+# unreadable one is marked rather than lost. See FM_CLASSIFY_INVALID_KEY_PREFIX.
+_fm_decision_key_slug() {  # <raw-token> -> slug or marked invalid key
+  local k=$1
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*)
+      # A TAB would corrupt the fold's "<key>\t<verb>\t<note>" record shape.
+      k=${k//$'\t'/ }
+      k=${k//$'\r'/ }
+      printf '%s%s' "$FM_CLASSIFY_INVALID_KEY_PREFIX" "$k"
+      ;;
+    *) printf '%s' "$k" ;;
   esac
 }
+
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  # shellcheck disable=SC2034 # corr/rest are set by name through _fm_note_split.
+  local line=$1 prefix note corr token rest
+  prefix=${line%%:*}
   case "$prefix" in
     *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
+      token=${prefix#*\[key=}
+      _fm_decision_key_slug "${token%%\]*}"
+      return 0
       ;;
-    *) printf 'default' ;;
   esac
+  case "$line" in
+    *:*) note=${line#*:} ;;
+    *) printf 'default'; return 0 ;;
+  esac
+  if _fm_note_split "$note" corr token rest; then
+    _fm_decision_key_slug "$token"
+  else
+    printf 'default'
+  fi
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -237,7 +348,7 @@ status_open_decisions() {  # <status-file>
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    key=$(_fm_decision_key "$line")
     case "$verb" in
       needs-decision|blocked)
         note=$(status_line_note "$line")
@@ -309,7 +420,7 @@ _fm_status_open_activities_stream() {
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    key=$(_fm_decision_key "$line")
     case "$verb" in
       working|"$pause")
         note=$(status_line_note "$line")
