@@ -875,7 +875,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1 cause reason
+  local state=$1 age=$2 marker target backend max_defer now notify=1 cause reason summary
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -920,7 +920,12 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    if [ "$cause" = 'inject could not confirm a submit (supervisor pane busy or wedged)' ]; then
+      summary="away-mode escalations WEDGED ${age}s undelivered - see $marker"
+    else
+      summary="away-mode escalations WEDGED ${age}s undelivered - ${cause} - see $marker"
+    fi
+    wedge_alarm_notify "$summary" "$marker"
   fi
 }
 

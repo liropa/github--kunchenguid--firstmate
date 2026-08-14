@@ -1456,6 +1456,24 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
+test_inject_wedge_alarm_names_blocked_cause_in_active_alert() (
+  local dir state summary_file summary
+  dir=$(make_wedge_case wedge-blocked-alert-cause)
+  state="$dir/state"
+  summary_file="$dir/summary"
+  escalate_add "$state" "needs-decision: pick A"
+  fm_backend_blocked_state() { printf 'blocked'; }
+  wedge_alarm_notify() { printf '%s' "$1" > "$summary_file"; }
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_SUPERVISOR_BACKEND=herdr inject_wedge_alarm "$state" 30600
+  summary=$(cat "$summary_file")
+  case "$summary" in
+    *"supervisor pane stopped at a prompt awaiting you - no escalation can reach it until that prompt is answered"*"see $state/.subsuper-inject-wedged"*) : ;;
+    *) fail "blocked active-alert summary did not carry the blocked cause and marker pointer: $summary" ;;
+  esac
+  pass "inject_wedge_alarm carries the blocked cause into the active-alert summary"
+)
+
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   local dir state log daemon_log alerts errors
   dir=$(make_wedge_case wedge-unwritable-marker)
@@ -1849,6 +1867,7 @@ test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_inject_wedge_alarm_names_blocked_cause_in_active_alert
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
