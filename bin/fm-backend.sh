@@ -692,6 +692,27 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_blocked_state: is <target>'s agent STOPPED AT A PROMPT awaiting a
+# human (a permission dialog, a choice list, a trust prompt)? This is a THIRD
+# state, distinct from idle, from busy, and from real pending composer input,
+# and it is read from the backend's NATIVE agent-state rather than from screen
+# text. Backends with no native agent-state report unknown, exactly as
+# fm_backend_busy_state already does.
+#
+# It is deliberately separate from fm_backend_busy_state, whose herdr arm maps
+# blocked -> idle on purpose for the watcher. That mapping is untouched. This
+# exists only so the away-mode injector (bin/fm-supervise-daemon.sh) can report
+# WHY it is deferring; it changes no deferral decision.
+fm_backend_blocked_state() {  # <backend> <target> -> blocked|no|unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_blocked_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input row of <target> as
 # empty|pending|unknown for callers that need a pre-submit pending-input guard
 # or an adapter's conservative submit fallback. It is exposed generically so a

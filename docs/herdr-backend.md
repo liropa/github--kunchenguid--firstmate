@@ -1015,6 +1015,72 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
+<!-- fm-authority: firstmate-observation 2026-08-14 - every measurement below was taken from the live supervisor pane and this home's own daemon log and session files; none of it can be reproduced from inside a checkout -->
+## Incident (2026-08-12): a permission prompt read as pending composer input for nine hours
+
+Away-mode raised a `needs-decision` escalation at 22:37:14 and it stayed undelivered until the captain returned.
+The daemon log repeated `inject deferred: supervisor composer not confirmed-empty (state=pending: pending input, dead-shell prompt, or unreadable pane)`.
+That message was false, and the false message is what made this incident expensive to diagnose.
+
+**Environment.** herdr client and server 0.7.5, protocol 17, macOS aarch64; claude 2.1.231; supervisor target `default:w2:p2`.
+
+**What was on the pane.** Captured read-only from the live supervisor pane, with the text redacted to shape (alphanumerics to `x`) so nothing of the captain's session is recorded here:
+
+```text
+codes: [0m [38;2;177;185;249m [0m [38;2;153;153;153m [0m [38;2;177;185;249m [0m
+shape:  ❯ x. xxx                      (the literal row is claude's own "❯ 1. Yes")
+verdict=pending  busy=idle            (20 samples at 8s, every one identical)
+```
+
+That `❯` is claude's **selection cursor on a permission prompt**, not its composer prompt.
+`FM_BACKEND_HERDR_BARE_PROMPT_RE` (`^[❯›]`) matches it verbatim, so the dialog's highlighted option was adopted as the composer row and `1. Yes` classified as real unsubmitted text.
+Herdr reports that pane as `blocked` natively, but `fm_backend_herdr_classify_agent_status` maps `blocked` to `idle` on purpose for the watcher, so the busy guard passed it through as well.
+
+**That the pane really was idle for the whole window**, from this home's own claude session file:
+
+```text
+largest gap: 32625s (9.06h)  22:10:18 -> 08-13 07:14:03 EDT
+daemon log:  [2026-08-13T07:14:06-0400] inject deferred: supervisor pane busy (agent mid-turn)
+```
+
+A tool call at 22:10 needed approval, nobody was awake to answer it, and the pane resumed three seconds before the daemon first saw it busy.
+
+**Two things the original brief asserted that the measurements contradict.**
+Both are recorded because they are the load-bearing part of this verdict.
+
+- **The escape path did keep its promise.**
+  `grep 'ERROR: away-mode escalation undelivered'` gives a first alarm at `[2026-08-12T22:42:26-0400] ... undelivered 312s`, 124 alarms across the night, and a last at `[2026-08-13T08:57:01-0400] ... undelivered 37186s`.
+  `grep -c 'wedge alarm:'` returns 0, so no notifier channel reported a failure, and `uname` is `Darwin` with `osascript` present, so the active alert channel was available every window.
+  Detection was bounded at 312 seconds and loud, and nothing was lost.
+- **The 8h32m was the captain asleep, not a detection lapse.**
+  Delivery was impossible for a reason no retry can change: the pane was waiting for a human.
+
+**Two hypotheses tested and falsified**, kept here so nobody re-runs them.
+
+- `grep -E '^[❯›]'` byte-matching under a C locale: macOS grep matched only the two intended glyphs across `│ ─ ⏵ ⎿ • →` and a bare `$`, in both `LC_ALL=C` and `en_US.UTF-8`.
+- claude 2.1.231 rendering its prompt suggestion above the ghost-luminance cutoff: the live pane showed the suggestion as `[0m [2m [0m`, plain SGR-2 dim, which `fm_composer_strip_ghost` already strips to `empty`.
+  The 2026-07-10 fix above is intact.
+
+**Fix (task afk-inject-composer-wedge): report the true cause, change no outcome.**
+A bare-glyph row whose content is a numbered option (`FM_BACKEND_HERDR_MENU_ROW_RE`) is a dialog, so `fm_backend_herdr_composer_state` short-circuits to `unknown` instead of `pending`.
+It short-circuits rather than skipping the row, so an empty bordered box further up the same window can never be promoted into an injection target.
+A new `fm_backend_blocked_state` reads herdr's native agent-state as a third state, deliberately separate from `fm_backend_busy_state`, whose `blocked`-to-`idle` mapping is unchanged.
+`inject_msg` and `inject_wedge_alarm` use it to say **"stopped at a prompt awaiting you"** instead of "pending input" and "pane busy or wedged".
+The pattern covers only the numbered option shape actually observed; a wider guess would have no evidence behind it.
+
+**This does not remove the symptom, and it is not meant to.**
+While the supervisor pane is modally blocked awaiting a human, no escalation can reach it, and this change does not alter that by one second.
+Every deferral that happened before still happens: `pending` became `unknown` and both defer.
+The guard's refusal is correct behaviour and stays, because injecting there would have typed the escalation into the captain's permission dialog and pressed Enter, answering it.
+A pane-independent delivery channel is the only thing that would close the hole; it is a redesign, it is deliberately not authorized here, and it would get its own task.
+
+**Regression coverage.**
+`tests/fm-backend-herdr.test.sh`'s `test_composer_state_claude_permission_menu_row_is_unknown` feeds the measured styling with synthetic text through the real classifier; it reads `pending` before the change and `unknown` after.
+`test_composer_state_menu_row_never_promotes_an_earlier_empty_box` pins the short-circuit, `test_composer_state_numbered_looking_real_input_never_reads_empty` pins that real input is never widened into `empty`, and `test_blocked_state_reports_blocked_idle_and_unknown` pins the new read.
+`tests/fm-daemon.test.sh`'s `test_inject_msg_names_a_blocked_pane_instead_of_guessing_pending_input` pins the honest cause, while `test_inject_msg_still_defers_on_real_pending_input` and the pre-existing `test_inject_msg_defers_on_dead_shell_unknown` prove real unsubmitted input and a bare dead shell both still defer.
+Observed: `fm-backend-herdr` 144 ok / 0 not ok, `fm-daemon` 99 ok / 0 not ok, `fm-composer-lib` 9 ok, `fm-composer-ghost` 12 ok, and `bin/fm-lint.sh -x` clean on the five changed files.
+<!-- /fm-authority -->
+
 ## Native `pane.agent_status_changed` push escalation (sub-second blocked detection)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) is detected sub-second instead of after the ~240s stale-pane wedge timer.
