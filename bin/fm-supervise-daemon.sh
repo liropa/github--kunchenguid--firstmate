@@ -875,27 +875,38 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 cause reason
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
     return 0
   fi
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
+  # Name the cause from the backend's NATIVE agent-state. This does not change
+  # whether the alarm fires, how fast, or how often - only what it says. The
+  # blocked case is the one an operator can act on immediately: no escalation
+  # can reach a pane that is waiting for a human to answer a prompt.
+  if [ "$(fm_backend_blocked_state "$backend" "$target" 2>/dev/null)" = blocked ]; then
+    cause='supervisor pane stopped at a prompt awaiting you - no escalation can reach it until that prompt is answered'
+    reason='The supervisor pane is stopped at a prompt awaiting you, so it cannot accept an escalation until that prompt is answered. Buffered items:'
+  else
+    cause='inject could not confirm a submit (supervisor pane busy or wedged)'
+    reason='The supervisor pane could not accept an escalation. Buffered items:'
+  fi
   now=$(_now)
   if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; ${cause}. Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf '%s\n' "$reason"
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
@@ -1131,7 +1142,15 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    if [ "$(fm_backend_blocked_state "$backend" "$target" 2>/dev/null)" = blocked ]; then
+      # The pane is stopped at a prompt awaiting the captain. Same deferral as
+      # any other non-empty verdict - but naming it is the difference between a
+      # log the captain can act on and one that sends the next reader hunting
+      # for a half-typed line that was never there.
+      log "inject deferred: supervisor pane stopped at a prompt awaiting you; no escalation can reach it until that prompt is answered (composer=${composer:-unknown})"
+    else
+      log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    fi
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never

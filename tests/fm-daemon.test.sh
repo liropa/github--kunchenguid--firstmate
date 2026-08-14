@@ -1710,6 +1710,63 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
 }
 
+# --- away-mode deferral names the state it is actually deferring on ----------
+# (task afk-inject-composer-wedge). A supervisor pane stopped at a prompt
+# awaiting the captain deferred for nine hours logging "pending input", which
+# is not what was on screen. The deferral itself is unchanged - these tests pin
+# that it still defers, and that the reported cause is now true.
+test_inject_msg_names_a_blocked_pane_instead_of_guessing_pending_input() {
+  local dir state out
+  dir=$(make_supercase inject-blocked-cause)
+  state="$dir/state"
+  afk_enter "$state"
+  out=$(
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'Do you want to proceed?\n'; }
+    fm_backend_composer_state() { printf 'unknown'; }
+    fm_backend_blocked_state() { printf 'blocked'; }
+    fm_backend_send_text_submit() { fail "send_text_submit must NOT run while the pane is stopped at a prompt"; }
+    log() { printf '%s\n' "$*"; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"
+  ) || true
+  case "$out" in
+    *"stopped at a prompt awaiting you"*) : ;;
+    *) fail "a blocked supervisor pane must be reported as stopped at a prompt awaiting you, got: $out" ;;
+  esac
+  case "$out" in
+    *"pending input"*) fail "must not claim pending input for a pane that is stopped at a prompt: $out" ;;
+  esac
+  pass "inject_msg: a blocked supervisor pane defers with the true cause, not 'pending input'"
+}
+
+# The guard itself is unchanged: REAL unsubmitted input still defers, and is
+# still reported as pending input (it genuinely is). Widening `empty` here would
+# type the escalation over the captain's half-written line.
+test_inject_msg_still_defers_on_real_pending_input() {
+  local dir state out
+  dir=$(make_supercase inject-real-pending)
+  state="$dir/state"
+  afk_enter "$state"
+  out=$(
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'half typed line\n'; }
+    fm_backend_composer_state() { printf 'pending'; }
+    fm_backend_blocked_state() { printf 'no'; }
+    fm_backend_send_text_submit() { fail "send_text_submit must NOT run over a captain's real unsubmitted input"; }
+    log() { printf '%s\n' "$*"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg must defer on real pending composer input"
+    fi
+  ) || fail "real-pending inject_msg subshell failed"
+  case "$out" in
+    *"not confirmed-empty"*pending*) : ;;
+    *) fail "real pending input must still defer as a non-empty composer, got: $out" ;;
+  esac
+  pass "inject_msg: real unsubmitted input still defers (guard not widened)"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1807,3 +1864,5 @@ test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
+test_inject_msg_names_a_blocked_pane_instead_of_guessing_pending_input
+test_inject_msg_still_defers_on_real_pending_input

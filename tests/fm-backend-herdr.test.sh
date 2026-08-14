@@ -1927,6 +1927,78 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
 
+# --- selection-menu rows are dialogs, not composers (task afk-inject-composer-wedge)
+#
+# The 2026-08-12 overnight wedge: the supervisor pane was stopped at a claude
+# permission prompt, whose HIGHLIGHTED option is drawn with the very same "❯"
+# the composer uses. The bare shape matched it and the option text read as a
+# captain's half-typed line, so every escalation deferred with "pending input"
+# for nine hours. The fixtures below reproduce the STYLING measured live on that
+# pane (selected option 38;2;177;185;249, its number 38;2;153;153;153); the text
+# is claude's own generic UI wording, never anything from the captain's session.
+#
+# The verdict changes pending -> unknown. BOTH defer, so no deferral outcome
+# changes; only the reported cause becomes true.
+test_composer_state_claude_permission_menu_row_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-menu"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'Bash command\n\nDo you want to proceed?\n \x1b[0m\x1b[38;2;177;185;249m\xe2\x9d\xaf \x1b[0m\x1b[38;2;153;153;153m1.\x1b[0m\x1b[38;2;177;185;249m Yes\x1b[0m\n   2. No\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" = unknown ] || fail "a permission-prompt selection row ('❯ 1. Yes') is a DIALOG, not a composer holding unsubmitted text; expected unknown, got '$out' (regression: this false 'pending input' hid the 2026-08-12 nine-hour away-mode wedge)"
+  pass "fm_backend_herdr_composer_state: a claude permission-menu selection row reads unknown, not pending"
+}
+
+# The narrowing must not hand injection an EARLIER row instead. A menu row stays
+# the bottom-most match and short-circuits, so an empty bordered box further up
+# the same window can never be promoted into an injectable composer.
+test_composer_state_menu_row_never_promotes_an_earlier_empty_box() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-menu-no-promote"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x82                    \xe2\x94\x82\nDo you want to proceed?\n\xe2\x9d\xaf 1. Yes\n   2. No\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" != empty ] || fail "a dialog on screen must NEVER classify empty - injecting would type the escalation into the captain's permission prompt and press Enter"
+  [ "$out" = unknown ] || fail "expected unknown for a menu row above an empty bordered box, got '$out'"
+  pass "fm_backend_herdr_composer_state: a menu row short-circuits, never promoting an earlier empty box into an injection target"
+}
+
+# Guard intact, the other direction: text a human genuinely typed must never
+# read empty just because it happens to start like a numbered option.
+test_composer_state_numbered_looking_real_input_never_reads_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-numbered-real"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf 1. fix the login bug\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+  [ "$out" != empty ] || fail "real unsubmitted input must never read empty, whatever it starts with - injecting would type over the captain's line"
+  pass "fm_backend_herdr_composer_state: numbered-looking real input still defers (never empty)"
+}
+
+# fm_backend_herdr_blocked_state: the THIRD state, read from herdr's NATIVE
+# agent-state, kept separate from fm_backend_herdr_classify_agent_status so the
+# watcher's deliberate blocked->idle mapping stays exactly as it is.
+test_blocked_state_reports_blocked_idle_and_unknown() {
+  local dir fb state out
+  dir="$TMP_ROOT/blocked-state"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_statefake "$dir"); state="$dir/state.json"
+  fake_herdr_set_agent_status "$state" "w1:p3" blocked
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_blocked_state default:w1:p3' "$ROOT" )
+  [ "$out" = blocked ] || fail "a blocked agent must report blocked, got '$out'"
+  fake_herdr_set_agent_status "$state" "w1:p3" idle
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_blocked_state default:w1:p3' "$ROOT" )
+  [ "$out" = no ] || fail "an idle agent must report no, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_blocked_state default:w9:p9' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unregistered/unreadable agent must report unknown, got '$out'"
+  pass "fm_backend_herdr_blocked_state: blocked/idle/unreadable map to blocked/no/unknown"
+}
+
 # grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
@@ -3074,6 +3146,10 @@ test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
+test_composer_state_claude_permission_menu_row_is_unknown
+test_composer_state_menu_row_never_promotes_an_earlier_empty_box
+test_composer_state_numbered_looking_real_input_never_reads_empty
+test_blocked_state_reports_blocked_idle_and_unknown
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty

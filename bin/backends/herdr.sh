@@ -1609,6 +1609,18 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# A SELECTION-MENU row, not a composer. claude draws the highlighted option of a
+# modal dialog (a permission prompt, a numbered choice list) with the SAME ❯
+# glyph it uses for its composer, so the bare shape above matches it verbatim:
+# a live capture of a blocked supervisor pane read "❯ 1. Yes" (task
+# afk-inject-composer-wedge, docs/herdr-backend.md "Incident (2026-08-12)").
+# Such a row is not an agent composer at all - the composer is not even on
+# screen - so it classifies `unknown` rather than being reported as a composer
+# holding unsubmitted text. This NARROWS the bare shape; it never widens
+# `empty`, and the deferral it produces is the same deferral as before.
+# Deliberately limited to the NUMBERED option shape actually observed; a wider
+# guess would be speculation this incident has no evidence for.
+FM_BACKEND_HERDR_MENU_ROW_RE=${FM_BACKEND_HERDR_MENU_ROW_RE:-'^[❯›][[:space:]]*[0-9]+\.[[:space:]]'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -1702,7 +1714,14 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
-          shape=bare
+          # A selection-menu row wears the same glyph as the composer; keep it as
+          # the bottom-most match (so no earlier row can be promoted over it) but
+          # remember that it is a DIALOG, not a composer.
+          if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_MENU_ROW_RE"; then
+            shape=menu
+          else
+            shape=bare
+          fi
           raw_match=$line
           generic_line=$row
           found=1
@@ -1746,6 +1765,12 @@ EOF
     found=0
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  # A modal dialog is on screen, so there is no composer to judge. Report it as
+  # unreadable-for-injection rather than as a composer holding pending input:
+  # the caller defers either way, but only this verdict is TRUE, and the false
+  # one ("pending input") is what made the 2026-08-12 overnight wedge read as a
+  # captain's half-typed line for nine hours.
+  [ "$shape" != menu ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -1885,6 +1910,24 @@ fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
     working) printf 'busy' ;;
     idle|done) printf 'idle' ;;
     blocked) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_herdr_blocked_state: is this pane's agent STOPPED AT A PROMPT
+# awaiting a human? Deliberately a SEPARATE read from
+# fm_backend_herdr_classify_agent_status, which maps blocked -> idle for the
+# watcher on purpose (a blocked crew must surface as a stale pane needing
+# attention, not be suppressed as busy). That mapping is unchanged and must
+# stay unchanged; this function exists so the away-mode injector can name the
+# state it is actually deferring on instead of guessing at composer text.
+# blocked -> blocked; working/idle/done -> no; anything unreadable -> unknown.
+fm_backend_herdr_blocked_state() {  # <target> -> blocked|no|unknown
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_agent_status_raw \
+            "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    blocked) printf 'blocked' ;;
+    working|idle|done) printf 'no' ;;
     *) printf 'unknown' ;;
   esac
 }
