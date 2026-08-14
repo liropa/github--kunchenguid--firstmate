@@ -194,20 +194,8 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
-# Decision-key placement. A key token is read BEFORE the colon (canonical) and
-# also when it LEADS the note, optionally behind the machine-written corr=<16hex>
-# reply token a secondmate echoes back; both placements fold to one key. Writing
-# the key after the colon used to discard it, so unrelated threads shared the
-# "default" bucket and each resolution closed whichever thread last opened it.
-#
-# The post-colon form is bounded to the leading position deliberately. Measured
-# across the fleet's live status logs on 2026-08-14: of 131 lines carrying a key
-# after the colon, 120 lead the note and 7 lead behind a correlation token, so
-# the placement rule reads 127 of them; of the remaining 4, three are prose
-# QUOTING another event's key ("I will require the matching resolved:
-# [key=nm-review-gate] event"). Reading a quote as a key would let a sentence
-# about a decision close that decision, which loses more than the shared-bucket
-# folding this rule repairs, so those stay unkeyed and are pinned below.
+# Decision-key placement and malformed-key regression coverage. The parser
+# contract is owned by bin/fm-classify-lib.sh.
 test_decision_key_placements() {
   local dir state open activity
   dir=$(make_case decision-key-placement); state="$dir/state"
@@ -282,6 +270,19 @@ EOF
     && fail "an unreadable key was silently renamed to the shared default bucket"
   [ "$(printf '%s' "$open" | grep -c . || true)" = 3 ] \
     || fail "the three unreadable-key threads did not each keep their own bucket"
+
+  # Delimiter characters and the escape character use a reversible encoding.
+  printf 'blocked [key=bad\tkey]: tab thread\nblocked [key=bad key]: space thread\nresolved [key=bad key]: close space only\n' \
+    > "$state/malformed-delimiters.status"
+  open=$(status_open_decisions "$state/malformed-delimiters.status")
+  printf '%s' "$open" | grep -F $'invalid-key!bad\\tkey\tblocked\ttab thread' >/dev/null \
+    || fail "a TAB-bearing key collided with a space-bearing key"
+  printf '%s' "$open" | grep -F $'invalid-key!bad key\t' >/dev/null \
+    && fail "resolving a space-bearing key did not close only its own thread"
+  [ "$(printf '%s' "$open" | grep -c . || true)" = 1 ] \
+    || fail "resolving one encoded malformed key changed another bucket"
+  [ "$(_fm_decision_key $'blocked [key=bad\\\\key]: backslash')" = 'invalid-key!bad\\\\key' ] \
+    || fail "the unreadable-key encoding did not escape its escape character"
 
   # Deterministic, so the same unreadable token still closes its own thread.
   printf 'blocked [key=bad key]: opened\nresolved [key=bad key]: closed\n' \
