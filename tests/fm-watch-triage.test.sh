@@ -588,6 +588,78 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- the progress gate in FRONT of stale classification ----------------------
+# Every other stale case in this file pre-seeds .hash-* and .count-* and feeds a
+# static capture, so the suite exercises the triage thoroughly and the gate in
+# front of it not at all. That is why this defect could not fail a test: the
+# watcher used to require three byte-identical captures in a row before it would
+# classify a window as stale, and Claude Code animates the pending-tool-call
+# glyph U+23FA for as long as a tool call is outstanding - which a permission
+# dialog raised mid-tool-call keeps outstanding for the entire block. A worker
+# parked on that dialog, doing nothing at all, changed its capture every few
+# seconds, the counter never reached 2, and the stale branch was never entered.
+# Measured on one unchanged parked pane, the real watcher surfaced it in 52s at
+# FM_POLL=10 and surfaced nothing in 16m01s at the default FM_POLL=15
+# (data/worker-pane-blocked-invisible, 2026-08-15).
+#
+# So this case seeds NEITHER marker and alternates the capture on EVERY poll -
+# the shape a byte-identical gate can never classify, at any poll interval - and
+# asserts a stale wake still arrives within a bounded time.
+
+# Write the measured approval dialog to <file>, with <lead> in front of the one
+# line the animation touches. The two phases differ ONLY there: the live capture
+# alternated between the bullet U+23FA (bytes e2 8f ba) and two plain spaces.
+# Nothing in the dialog matches BUSY_REGEX - "Esc to cancel" is not "esc to
+# interrupt" - so the pane reads idle, exactly as it did on the host.
+write_animated_dialog() {  # <lead> <file>
+  {
+    printf ' Bash command (unsandboxed)\n\n'
+    printf '   echo sandbox-probe\n'
+    printf '%b' "$1"
+    printf 'Echo a probe string\n\n'
+    printf ' Do you want to proceed?\n 1. Yes\n 2. No\n\n'
+    printf ' Esc to cancel - Tab to amend - ctrl+e to explain\n'
+  } > "$2"
+}
+
+test_animated_pane_still_reaches_stale() {
+  local dir state fakebin out drain_out phase_a phase_b counter window sig pid served
+  dir=$(make_case animated-pane-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  phase_a="$dir/pane-a.txt"; phase_b="$dir/pane-b.txt"; counter="$dir/pane.count"
+  window="test:fm-animated"
+
+  write_animated_dialog '  ' "$phase_a"
+  write_animated_dialog '\xe2\x8f\xba ' "$phase_b"
+  cmp -s "$phase_a" "$phase_b" \
+    && fail "the animated fixture's two phases are identical, so the gate would never be exercised"
+
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/animated.meta"
+  # Non-terminal status, .seen-* primed so the signal scan cannot pre-empt the
+  # stale path and surface for the wrong reason.
+  printf 'working: running the probe command\n' > "$state/animated.status"
+  sig=$(seen_sig "$state/animated.status"); printf '%s' "$sig" > "$(seen_path "$state" "animated.status")"
+  # No running pipeline: the worker is parked on the dialog, so once the gate
+  # lets the classification happen at all, the triage surfaces it immediately.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$phase_a" FM_FAKE_TMUX_CAPTURE_ALT="$phase_b" FM_FAKE_TMUX_CAPTURE_COUNT="$counter" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 300 \
+    || fail "a pane that only animates never reached a stale wake within 30s at FM_POLL=1: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "animated pane did not print the stale wake: $(cat "$out")"
+  served=$(cat "$counter" 2>/dev/null || echo 0)
+  [ "$served" -ge 3 ] \
+    || fail "the fixture served only $served captures, so the alternation never actually ran"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the animated stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "animated stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane that only animates still reaches a stale wake, though no two captures are byte-identical"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1202,20 +1274,39 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   printf '1\n' > "$state/.wedge-escalations-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
-  # The pane content changes (the crew is active again): the hash no longer
-  # matches, so the watcher resets escalation bookkeeping instead of escalating.
-  printf 'new output, crew active again' > "$capture_file"
+  # Phase A: the capture changes but carries no busy signature. That is a
+  # REDRAW, not activity - it is precisely what a claude pane parked at a
+  # permission dialog does, and treating it as activity is what kept
+  # FM_STALE_ESCALATE_SECS from ever accumulating there and left
+  # demand-deep-inspection unreachable for that failure. The bookkeeping must
+  # survive it.
+  printf 'redrawn output, still no busy signature' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited on a redrawn pane: $(cat "$out")"
+  fi
+  [ -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "a pane that only redrew reset the wedge-escalation counter"; }
+  reap "$pid"
+
+  # Phase B: the harness itself now says it is working. That IS activity, and it
+  # is the one signal that resets the bookkeeping.
+  printf 'new output, crew active again\nesc to interrupt' > "$capture_file"
+  : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited on a fresh (changed) pane hash: $(cat "$out")"
+    reap "$pid"; fail "watcher exited on a busy pane: $(cat "$out")"
   fi
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a changed pane hash did not reset the wedge-escalation counter"
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a busy pane did not reset the wedge-escalation counter"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "a pane becoming active again resets the consecutive wedge-escalation counter"
+  pass "a redrawn pane keeps its wedge-escalation counter and only a busy pane resets it"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1553,6 +1644,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_animated_pane_still_reaches_stale
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
