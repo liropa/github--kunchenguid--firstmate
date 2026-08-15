@@ -128,7 +128,7 @@ The begin/end markers avoid false matches from absolute-path prompts, previous s
 Concatenating the marked block also handles a long worktree path that zellij's visual screen dump soft-wraps across multiple terminal rows.
 Verified against the real binary in both shapes: a direct `cd` in the pane's own shell, AND a nested subshell's own `cd` (`bash -c` spawned and cd'd inside it) - the load-bearing case matching `treehouse get`'s actual shape (`tests/fm-backend-zellij-smoke.test.sh`'s two `current_path` assertions).
 
-This op is scoped to `fm-spawn.sh`'s own worktree-discovery poll loop, the only caller - injecting a harmless extra cwd probe into the pane's scrollback before the harness ever launches is an acceptable trade for a reliable answer, and does not affect the interactive session the crewmate later runs in.
+This operation remains available to callers that need a live pane cwd, but spawn no longer uses it for worktree discovery; see [Spawn launch delivery](spawn-launch-delivery.md).
 
 ## Focus-steal on new-tab (report gap #5, confirmed - and mitigated)
 
@@ -161,7 +161,7 @@ This means the exit code can **never** be trusted to detect a bad target on this
 2. Output-**shape** validation rejects the "session not found" text fallback structurally: `fm_backend_zellij_create_task` requires `new-tab`'s stdout to parse as a bare integer (the colored session-list text does not), and every `list-panes`/`list-tabs` consumer pipes through `jq`, which fails to parse the plain-text fallback as JSON.
 
 **Accepted residual gaps**: a pane can still die in the brief window between `fm_backend_zellij_target_ready`'s ownership check and the operation's own `zellij action` call.
-That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out after 60s, `fm_backend_zellij_send_text_submit`'s preflight or content-diff retry loop (which reports `send-failed`, `pending`, or `unknown` rather than a false "sent" for these cases), or the watcher's stale-pane detection eventually noticing a pane that never changes.
+That remaining race degrades to "the operation quietly did nothing" and is caught by the spawn launch sentinel, `fm_backend_zellij_send_text_submit`'s preflight or content-diff retry loop (which reports `send-failed`, `pending`, or `unknown` rather than a false "sent" for these cases), or the watcher's stale-pane detection eventually noticing a pane that never changes.
 An explicit raw `session:pane` target can also still address a reused pane id if an operator deliberately bypasses firstmate metadata; that path is kept as an escape hatch, not as the normal task routing path.
 
 ## Every pane op needs an EXPLICIT `--pane-id` (un-anticipated finding)
@@ -198,7 +198,7 @@ Every real-zellij test in this document and its accompanying test files uses a u
 
 Beyond the fake-CLI unit tests (`tests/fm-backend-zellij.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-zellij-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `FM_ZELLIJ_SESSION` (never the real `firstmate` session name):
 
-1. `FM_HOME=<scratch> FM_BACKEND=zellij FM_ZELLIJ_SESSION=<isolated> bin/fm-spawn.sh zellij-e2e-t1 projects/scratch-e2e-project claude` - spawned successfully, printing `window=<session>:<pane>` in the summary and writing `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, `zellij_pane_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-probe workaround.
+1. `FM_HOME=<scratch> FM_BACKEND=zellij FM_ZELLIJ_SESSION=<isolated> bin/fm-spawn.sh zellij-e2e-t1 projects/scratch-e2e-project claude` - spawned successfully under the former pane-cwd discovery implementation, printing `window=<session>:<pane>` in the summary and writing `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, `zellij_pane_id=` to the task's meta.
 2. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-peek.sh fm-zellij-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
 3. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-send.sh fm-zellij-e2e-t1 --key Enter` - accepted the trust dialog.
 4. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-peek.sh fm-zellij-e2e-t1` again - showed claude actively working through the brief (verifying isolation, then implementing).
