@@ -40,6 +40,7 @@ make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   mkdir -p "$fb"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_HERDR_LOG:?}"
 RESP="${FM_HERDR_RESPONSES:?}"
@@ -92,6 +93,7 @@ make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state fi
   printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_HERDR_LOG:?}"
 STATE="${FM_FAKE_HERDR_STATE:?}"
@@ -1385,27 +1387,27 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
 }
 
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
+# The launch is no longer an ambiguous fire-and-forget submission: fm-spawn.sh
+# confirms the pane ran the exact line before it treats the task as started. So
+# the projection is handed over - cleanup disarmed, ordering lock released - only
+# AFTER that confirmation, and in that order. An unconfirmed launch leaves both
+# with the abort path, which is what tears the projection down under the lock.
+test_projected_spawn_hands_over_only_after_confirmed_launch() {
+  local deliver_pattern disarm_pattern release_pattern deliver_line disarm_line release_line
   # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
   # shellcheck disable=SC2016
-  literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
+  deliver_pattern='spawn_deliver_launch ||'
   # shellcheck disable=SC2016
   disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
   release_pattern='spawn_herdr_presentation_order_lock_release'
-  # shellcheck disable=SC2016
-  enter_pattern='spawn_send_key "$T" Enter'
-  literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  deliver_line=$(grep -nF "$deliver_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
+  [ -n "$deliver_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] \
     || fail "could not locate the projected launch cleanup boundary"
-  [ "$literal_line" -lt "$disarm_line" ] \
-    && [ "$disarm_line" -lt "$release_line" ] \
-    && [ "$release_line" -lt "$enter_line" ] \
-    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
-  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
+  [ "$deliver_line" -lt "$disarm_line" ] && [ "$disarm_line" -lt "$release_line" ] \
+    || fail "projected spawn must confirm its launch, then disarm cleanup, then release its lock"
+  pass "fm-spawn: projected cleanup disarms and the lock releases only after a confirmed launch"
 }
 
 test_projected_abort_cleanup_holds_presentation_lock() {
@@ -2426,6 +2428,7 @@ test_scripts_route_explicit_target_through_meta_backend() {
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 printf 'tmux should not be used for a metadata-matched herdr target\n' >&2
 exit 42
@@ -2693,6 +2696,7 @@ make_herdr_eventfake() {  # <dir> -> echoes fakebin dir
   mkdir -p "$fb"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_HERDR_LOG:-/dev/null}"
 { printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$LOG"
@@ -3115,7 +3119,7 @@ test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
+test_projected_spawn_hands_over_only_after_confirmed_launch
 test_projected_abort_cleanup_holds_presentation_lock
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label

@@ -13,6 +13,7 @@ make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   mkdir -p "$fb"
   cat > "$fb/orca" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_ORCA_LOG:?}"
 RESP="${FM_ORCA_RESPONSES:?}"
@@ -63,6 +64,7 @@ add_tmux_fake() {
   local fb=$1
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_ORCA_LOG:?}"
 {
@@ -500,7 +502,10 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
+  # GOTMPDIR now rides the one verified launch chain rather than a separate
+  # typed line (bin/fm-spawn.sh launch delivery), so assert it reaches the Orca
+  # terminal as part of that chain's text.
+  assert_contains "$(cat "$log")" "export GOTMPDIR='/tmp/fm-orcaspawnz1/gotmp'" \
     "spawn did not export GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"

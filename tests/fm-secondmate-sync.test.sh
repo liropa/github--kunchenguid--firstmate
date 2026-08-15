@@ -299,6 +299,7 @@ make_fake_toolchain() {
   fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
@@ -564,6 +565,7 @@ make_nudge_herdr_fake() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 set -u
 cmd=\${1:-}; sub=\${2:-}; arg=\${3:-}
 case "\$cmd \$sub" in
@@ -762,6 +764,7 @@ test_spawn_fast_forwards_before_launch() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -796,6 +799,7 @@ test_spawn_warns_when_sync_skipped_before_launch() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 exit 0
 SH
   chmod +x "$fakebin/tmux"

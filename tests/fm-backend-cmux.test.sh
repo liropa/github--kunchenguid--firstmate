@@ -33,6 +33,7 @@ make_cmux_fakebin() {  # <dir> -> echoes fakebin dir
   mkdir -p "$fb"
   cat > "$fb/cmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 LOG="${FM_CMUX_LOG:?}"
 RESP="${FM_CMUX_RESPONSES:?}"

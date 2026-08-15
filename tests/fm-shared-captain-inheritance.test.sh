@@ -210,6 +210,7 @@ make_fake_spawn_toolchain() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 exit 0
 SH
   chmod +x "$fakebin/tmux"

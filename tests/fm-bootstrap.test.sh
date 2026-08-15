@@ -763,6 +763,7 @@ make_routine_bootstrap_fixture() {
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 if [ "${1:-}" = display-message ]; then
   printf '%s\n' codex
   exit 0

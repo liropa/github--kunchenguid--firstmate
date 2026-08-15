@@ -123,6 +123,7 @@ make_fake_sbx() {
   fi
   cat > "$fakebin/sbx" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 [ -n "${FM_FAKE_SBX_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_SBX_LOG"
 # Retry ordinals still need per-fake persistence when a caller does not log.

@@ -41,9 +41,10 @@ make_case() {
   fm_git_worktree "$dir/project" "$dir/wt" "wt-$name"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -62,7 +63,7 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/tmux" "$fakebin/gh" "$dir/root/bin/fm-guard.sh"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$dir"
 }
 
@@ -71,7 +72,7 @@ run_spawn() {  # <dir> <id>
   FM_ROOT_OVERRIDE='' FM_HOME="$dir/home" \
     FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
     FM_PROJECTS_OVERRIDE="$dir/home/projects" FM_CONFIG_OVERRIDE="$dir/home/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$dir/wt" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_WORKTREE="$dir/wt" \
     PATH="$dir/fakebin:$PATH" \
     "$SPAWN" "$id" "$dir/project"
 }

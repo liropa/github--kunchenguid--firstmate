@@ -251,6 +251,7 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -419,16 +420,17 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
-# `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
+# `#{pane_current_path}` probe from FM_FAKE_WORKTREE so this same stub works
 # for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -436,12 +438,12 @@ case "${1:-}" in
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
+      # The launch is one submitted command line, not a literal send followed by
+      # Enter, so match it by its shape (bin/fm-spawn.sh launch delivery).
       for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
+        case "$a" in
+          'test ! -s '*' && printf %s '*) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
       done
     fi
     exit 0
@@ -450,6 +452,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -671,7 +674,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
@@ -735,6 +738,7 @@ make_fake_toolchain() {
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
@@ -762,8 +766,13 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
+set -u
+if [ "${1:-}" = get ]; then
+  if [ "${2:-}" = --help ]; then
+    printf '%s\n' 'Usage: treehouse get [--lease]'
+  else
+    printf '%s\n' "${FM_FAKE_WORKTREE:-}"
+  fi
 fi
 exit 0
 SH
@@ -1630,6 +1639,7 @@ test_config_reread_serializes_concurrent_pushes() {
   log="$w/config-reread-serialized.tmux.log"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 case "\$*" in
   *send-keys*)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
@@ -1732,6 +1742,7 @@ test_config_reread_cleanup_runs_after_mixed_delivery_failure() {
   mv "$fakebin/tmux" "$fakebin/tmux.real"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
   case "\$*" in
   *send-keys*'.9999-fail'*) exit 1 ;;
 esac
@@ -1777,6 +1788,7 @@ test_config_reread_stops_after_failed_generation() {
   mv "$fakebin/tmux" "$fakebin/tmux.real"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 case "\$*" in
   *send-keys*'.0000-fail'*) exit 1 ;;
 esac
@@ -1952,6 +1964,7 @@ SH
   fakebin=$(make_fake_toolchain "$w")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 case "\$*" in
   *display-message*'#{pane_current_command}'*) printf '%s' zsh ;;
   *display-message*'#{pane_id}'*) printf '%s' '%1' ;;

@@ -1163,7 +1163,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.launched"
   done
 }
 
@@ -1396,7 +1396,7 @@ fi
 if marker_key_ambiguous "$_target_key" target < <(other_task_targets "$STATE" "$ID"); then
   _target_ambiguous=1
 fi
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.launched"
 # Beat-beacon markers (fm-watch.sh scan_sbx_beacon). A leftover
 # .sbx-stranded-alarmed marker would suppress the stranding alarm for a
 # re-provisioned same-id secondmate, and a leftover .sbx-delivered marker would

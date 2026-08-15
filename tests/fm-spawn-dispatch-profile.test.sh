@@ -18,9 +18,10 @@ make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -28,12 +29,12 @@ case "${1:-}" in
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
+      # The launch is one submitted command line, not a literal send followed by
+      # Enter, so match it by its shape (bin/fm-spawn.sh launch delivery).
       for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
+        case "$a" in
+          'test ! -s '*' && printf %s '*) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
       done
     fi
     exit 0
@@ -42,7 +43,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -87,7 +88,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -96,6 +97,16 @@ read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
+}
+
+# The pane receives one verified chain, not a bare launch command: a sentinel
+# claim, then a subshell holding the cd, the GOTMPDIR export, and the launch
+# (bin/fm-spawn.sh launch delivery). Strip that fixed wrapper so these assertions
+# still compare the launch command itself, byte for byte.
+launch_command() {  # <delivered-line>
+  local line=$1
+  line=${line#test ! -s * && printf %s * && ( cd * && export GOTMPDIR=* && }
+  printf '%s' "${line% )}"
 }
 
 assert_meta_profile() {
@@ -117,7 +128,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(launch_command "$(cat "$LAUNCH_LOG")")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
@@ -203,7 +214,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
-  launch=$(cat "$LAUNCH_LOG")
+  launch=$(launch_command "$(cat "$LAUNCH_LOG")")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
