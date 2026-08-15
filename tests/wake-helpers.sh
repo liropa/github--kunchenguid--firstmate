@@ -87,6 +87,22 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  # Two-phase capture, off unless both variables are set: an animated pane (the
+  # claude pending-tool-call glyph) alternates between two renderings while the
+  # worker does nothing at all. The phase advances PER CALL through the counter
+  # file, so the alternation is deterministic rather than a race against the
+  # poll interval - every capture differs from the one before it, which is the
+  # shape a byte-identical stale gate can never classify.
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_ALT:-}" ] && [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT:-}" ]; then
+    _n=$(( $(cat "$FM_FAKE_TMUX_CAPTURE_COUNT" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$_n" > "$FM_FAKE_TMUX_CAPTURE_COUNT"
+    if [ $(( _n % 2 )) -eq 0 ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_ALT"
+    else
+      cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}"
+    fi
+    exit 0
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi

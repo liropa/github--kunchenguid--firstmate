@@ -13,8 +13,9 @@
 #     .hb-surfaced- markers.
 #   - Signal filenames ("<id>.status", "<id>.turn-ended") key the signal scan's
 #     .seen- signatures.
-#   - Window/target strings key the watcher's per-pane stale, hash, count and
-#     pause families and bin/backends/herdr.sh's escalation dedupe marker. These
+#   - Window/target strings key the watcher's per-pane stale, hash, count,
+#     recent-capture and pause families and bin/backends/herdr.sh's escalation
+#     dedupe marker. These
 #     are the least constrained of the three: a tmux "<session>:<window>", a
 #     herdr "<session>:<pane_id>" whose pane_id itself contains a `:`
 #     ("default:wG:pQ"), or an orca terminal id.
@@ -199,6 +200,7 @@ fm_state_watch_target_prefixes() {
   cat <<'EOF'
 .hash-
 .count-
+.recent-
 .stale-
 .stale-since-
 .wedge-escalations-

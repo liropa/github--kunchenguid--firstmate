@@ -14,7 +14,11 @@
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
-#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
+#   stale: <window>        gated by pane_progress_hash, which asks whether the
+#                          window is producing new output rather than whether its
+#                          capture is byte-identical, so an animated pending-tool-
+#                          call glyph cannot pass for work.
+#                          A provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
@@ -196,6 +200,18 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # noticed well inside the wedge timer. See push_block_dwell_check for why an edge
 # alone is not an alarm.
 PUSH_BLOCK_DWELL_SECS=${FM_PUSH_BLOCK_DWELL:-90}
+# How many recent distinct captures the progress gate remembers per window. See
+# pane_progress_hash: a pane that only cycles among this many captures has
+# produced no new output. 4 covers the measured two-phase claude animation with
+# margin for a three-frame indicator, and is small enough that a genuinely
+# progressing pane leaves the memory behind within a few polls. 1 restores the
+# pre-2026-08 byte-identical gate exactly, which is the escape hatch if a harness
+# ever turns out to redraw in a way this shape misreads.
+PANE_CYCLE_MEMORY=${FM_PANE_CYCLE_MEMORY:-4}
+case "$PANE_CYCLE_MEMORY" in
+  ''|*[!0-9]*) PANE_CYCLE_MEMORY=4 ;;
+  *) (( 10#$PANE_CYCLE_MEMORY > 0 )) || PANE_CYCLE_MEMORY=4 ;;
+esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -255,6 +271,64 @@ triage_log() {
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+}
+
+# The progress gate in front of the whole stale classification below. The
+# question it has to answer is whether a window is PROGRESSING, not whether its
+# capture is byte-identical to the last one.
+#
+# Claude Code animates the pending-tool-call glyph U+23FA for as long as a tool
+# call is outstanding, and a permission dialog raised mid-tool-call keeps it
+# outstanding for the entire block. A worker parked on that dialog - doing
+# nothing whatsoever - therefore produces a capture that oscillates between two
+# renderings on a period near 7 seconds. Against a byte-identical gate that is
+# indistinguishable from output: the repeat counter never reaches 2 and the
+# stale branch is never entered at all. Measured on one unchanged parked pane,
+# the real watcher surfaced it in 52s at FM_POLL=10 and surfaced nothing in
+# 16m01s at the default FM_POLL=15 while provably still cycling, so detection
+# was a beat frequency between the poll interval and the animation period rather
+# than a property of the worker (data/worker-pane-blocked-invisible, 2026-08-15).
+#
+# So remember the last PANE_CYCLE_MEMORY distinct captures per window and treat
+# a capture the window has recently shown as NO progress: it carries nothing the
+# previous polls did not already show. Only a capture outside that memory
+# advances the window's progress hash, which is the value the repeat counter
+# below compares. The shape needs no knowledge of any harness's glyphs, which
+# matters because only claude 2.1.233 has been measured; normalizing the
+# specific animated indicator away would need a new measured fact per harness.
+#
+# Known limit, inherent to hashing the raw capture: a monotonic ticker (an
+# elapsed-time counter, a token count) produces a genuinely new capture every
+# poll forever and still defeats this. Such a pane never enters the stale branch
+# at all, so there is no absorbed-stale state and no wedge timer for it either;
+# handle_paused_stale already anchors the one cadence that must survive a ticker
+# on the status file mtime instead.
+#
+# Prints the window's current progress hash; updates the memory in place.
+pane_progress_hash() {  # <key> <raw pane hash>
+  local key=$1 raw=$2 file line anchor='' kept='' n=1 seen=0
+  file="$STATE/.recent-$key"
+  if [ -f "$file" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      # The anchor is the newest capture the window has shown. While the pane
+      # only cycles, every poll reports that same anchor, so the counter below
+      # sees one unchanging progress hash instead of an alternating pair.
+      [ -n "$anchor" ] || anchor=$line
+      if [ "$line" = "$raw" ]; then
+        seen=1
+      elif [ "$n" -lt "$PANE_CYCLE_MEMORY" ]; then
+        kept="$kept$line"$'\n'
+        n=$(( n + 1 ))
+      fi
+    done < "$file"
+  fi
+  if [ "$seen" = 1 ]; then
+    printf '%s' "${anchor:-$raw}"
+    return 0
+  fi
+  printf '%s\n%s' "$raw" "$kept" > "$file"
+  printf '%s' "$raw"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
@@ -379,6 +453,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# Reset a window's wedge timer and escalation count, but ONLY on evidence of
+# genuine activity - a busy signature, which is the harness's own statement that
+# it is working. A capture that merely redrew is not that evidence.
+#
+# The pre-2026-08 gate deleted both markers on every pane-hash change, which is
+# why FM_STALE_ESCALATE_SECS could never accumulate on a claude pane parked at a
+# permission dialog and the demand-deep-inspection escalation was unreachable for
+# that failure: the animated pending-tool-call glyph changed the capture every
+# few seconds and took the timer with it every time. pane_progress_hash already
+# stops an in-memory cycle from reading as a change, and this keeps the timer
+# honest for the churn that outlives that memory. It is the same reasoning
+# handle_paused_stale applies to the pause cadence (see there): an anchor a
+# churny idle pane can keep resetting is not an anchor.
+reset_wedge_timer_on_activity() {  # <window> <tail40> <since-file> <escalation-file>
+  window_is_busy "$1" "$2" || return 0
+  rm -f "$3" "$4"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1194,10 +1286,29 @@ EOF
     fi
   fi
 
-  # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
-  # signature means the crewmate finished, is waiting, or is wedged. Each distinct
-  # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
-  # remembers the hash already classified).
+  # Layer 1 backbone: pane staleness. Two consecutive polls with no PROGRESS (see
+  # pane_progress_hash - a capture the window showed recently carries no new
+  # output, however many bytes moved) and no busy signature mean the crewmate
+  # finished, is waiting, or is wedged. Each distinct progress hash is surfaced,
+  # absorbed, or timed toward escalation once (.stale-* remembers the progress
+  # hash already classified).
+  #
+  # The progress gate decides only whether the repeat counter advances. It
+  # bypasses no guard below it, so the separations that already meet the
+  # false-positive bar all still hold:
+  #   - A mid-turn agent renders its busy footer, and window_is_busy is checked
+  #     independently of the counter, so it never enters the stale branch no
+  #     matter how its capture behaves.
+  #   - An idle secondmate is exempted above, BEFORE the capture, so the gate is
+  #     never reached for it at all.
+  #   - An awaiting-validation: crew is captain-relevant, so stale_is_terminal
+  #     holds, it surfaces once, and .stale-* keeps it quiet after that. The
+  #     suppressor is now keyed by the PROGRESS hash, which is strictly more
+  #     stable than the raw one: an animated pane used to change its hash and
+  #     could re-surface on the same wait, and now holds a single value.
+  #   - A paused: crew still goes to handle_paused_stale on the long
+  #     PAUSE_RESURFACE_SECS cadence, whose anchor was already the status file
+  #     mtime rather than any hash.
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1213,7 +1324,8 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    h_raw=$(printf '%s' "$tail40" | hash_pane)
+    h=$(pane_progress_hash "$key" "$h_raw")
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
@@ -1261,7 +1373,12 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
+              # Seeded, not restarted: the timer belongs to the WINDOW, not to
+              # this progress hash, so a window absorbed as stale without a break
+              # keeps one countdown even when its progress hash advances (a pane
+              # that redraws past PANE_CYCLE_MEMORY). Only genuine activity
+              # clears it - see reset_wedge_timer_on_activity.
+              [ -s "$ssf" ] || date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
@@ -1299,9 +1416,12 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$w"
+                # clear_pause_state, not clear_pause_tracking: the pause family
+                # is what this transition invalidates. The wedge timer is not,
+                # and .stale-* is rewritten on the next line anyway.
+                clear_pause_state "$w"
                 printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
+                [ -s "$ssf" ] || date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -1328,8 +1448,8 @@ EOF
           fi
         fi
       else
-        # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
-        rm -f "$ssf" "$ewf"
+        # Pane busy, or its progress hash is not yet stably repeated.
+        reset_wedge_timer_on_activity "$w" "$tail40" "$ssf" "$ewf"
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
@@ -1337,7 +1457,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
+      reset_wedge_timer_on_activity "$w" "$tail40" "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
