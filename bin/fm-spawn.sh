@@ -1032,14 +1032,22 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # leased anything carries no worktree_lease= field and is never reused, because
 # an unleased worktree can have been pruned or handed to another task since.
 spawn_acquire_leased_worktree() {
-  local prior_wt prior_lease
+  local prior_wt prior_lease prior_project prior_project_real
   prior_wt=
   prior_lease=
+  prior_project=
+  prior_project_real=
   if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     prior_wt=$(grep '^worktree=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2-)
     prior_lease=$(grep '^worktree_lease=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2-)
+    prior_project=$(grep '^project=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2-)
   fi
   if [ "$prior_lease" = treehouse ] && [ -n "$prior_wt" ] && [ -d "$prior_wt" ]; then
+    prior_project_real=$(cd "$prior_project" 2>/dev/null && pwd -P) || prior_project_real=$prior_project
+    if [ "$prior_project_real" != "$PROJ_ABS_REAL" ]; then
+      echo "error: leased worktree $prior_wt for $ID belongs to recorded project '${prior_project:-none}', not requested project '$PROJ_ABS'; refusing to launch" >&2
+      return 1
+    fi
     WT=$prior_wt
     SPAWN_WORKTREE_LEASE=treehouse
     return 0

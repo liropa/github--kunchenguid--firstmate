@@ -169,6 +169,7 @@ case "${1:-}" in
   get)
     for arg in "$@"; do
       if [ "$arg" = "--lease" ]; then
+        printf 'lease\n' >> "${FM_FAKE_LEASE_CALLS:?FM_FAKE_LEASE_CALLS unset}"
         printf '%s\n' "${FM_FAKE_WT:?FM_FAKE_WT unset}"
         exit 0
       fi
@@ -220,6 +221,7 @@ make_case() {
   : > "$case_dir/enters"
   : > "$case_dir/queue-enters"
   : > "$case_dir/queue"
+  : > "$case_dir/lease-calls"
   printf 'zsh\n' > "$case_dir/fg"
   printf '%s\n' "$proj" > "$case_dir/pane-cwd"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$eat_lines"
@@ -243,6 +245,7 @@ run_spawn() {
     FM_FAKE_CWD_COUNT="$CASE_DIR/cwd-reads" FM_FAKE_DROP_COUNT="$CASE_DIR/literal-sends" \
     FM_FAKE_ENTER_COUNT="$CASE_DIR/enters" \
     FM_FAKE_QUEUE_COUNT="$CASE_DIR/queue-enters" FM_FAKE_QUEUE="$CASE_DIR/queue" \
+    FM_FAKE_LEASE_CALLS="$CASE_DIR/lease-calls" \
     FM_FAKE_LINES="$CASE_DIR/lines" FM_FAKE_SHELL_LOG="$CASE_DIR/shell.log" \
     FM_FAKE_LAUNCH_MARKER="$CASE_DIR/launched-marker" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -305,6 +308,52 @@ test_worktree_is_never_acquired_by_typing() {
   assert_no_grep 'treehouse get' "$CASE_DIR/lines" \
     "the worktree acquire was typed into the pane"
   pass "the worktree is acquired off-pane, never typed at a shell prompt"
+}
+
+test_respawn_reuses_lease_for_same_project() {
+  local rec id out status
+  id=launch-reuse-same-project-z4
+  rec=$(make_case reuse-same-project "$id" 0)
+  read_case "$rec"
+  {
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'worktree_lease=treehouse\n'
+    printf 'project=%s\n' "$PROJ_DIR"
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "respawn should reuse the same project's lease; output was: $out"
+  [ ! -s "$CASE_DIR/lease-calls" ] \
+    || fail "respawn took a new lease instead of reusing the recorded worktree"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "respawn did not retain the recorded worktree"
+  pass "a respawn reuses the lease recorded for the same project"
+}
+
+test_respawn_refuses_lease_from_different_project() {
+  local rec id out status other_project
+  id=launch-refuse-other-project-z8
+  rec=$(make_case refuse-other-project "$id" 0)
+  read_case "$rec"
+  other_project="$CASE_DIR/other-project"
+  mkdir -p "$other_project"
+  {
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'worktree_lease=treehouse\n'
+    printf 'project=%s\n' "$other_project"
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "respawn launched with a lease from another project"
+  assert_contains "$out" "$WT_DIR" "mismatch error did not name the recorded worktree"
+  assert_contains "$out" "$other_project" "mismatch error did not name the recorded project"
+  assert_contains "$out" "$PROJ_DIR" "mismatch error did not name the requested project"
+  [ ! -s "$CASE_DIR/lease-calls" ] \
+    || fail "respawn took a new lease after detecting a project mismatch"
+  assert_absent "$CASE_DIR/launched-marker" "respawn launched despite a project mismatch"
+  pass "a respawn refuses a lease recorded for another project"
 }
 
 # A pane can swallow a send whole and leave no trace - measured live on herdr
@@ -371,6 +420,8 @@ test_prompt_eating_first_line_still_launches
 test_unclearable_prompt_fails_loudly
 test_buffered_pane_runs_every_retry_but_launches_once
 test_worktree_is_never_acquired_by_typing
+test_respawn_reuses_lease_for_same_project
+test_respawn_refuses_lease_from_different_project
 test_lost_first_send_retries_without_doubling
 test_lost_enter_submits_once_and_never_twice
 
