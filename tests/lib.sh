@@ -39,6 +39,11 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The shell a fake pane stands in for, so fm-spawn.sh's launch-delivery check
+# sees the acknowledgement a live shell would give. tests/fake-launch-ack.sh
+# owns what it does and which fixtures must NOT call it.
+export FM_TEST_LAUNCH_ACK="$ROOT/tests/fake-launch-ack.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -94,10 +99,31 @@ fm_fake_exit0() {
   for tool in "$@"; do
     cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# fm_fake_treehouse <fakebin>: stub the worktree pool. `treehouse get --lease`
+# is how bin/fm-spawn.sh acquires a ship/scout worktree - in its own process,
+# answering on stdout - so the stub echoes $FM_FAKE_WORKTREE, the worktree the
+# fixture wants that task to land in. Every other subcommand is an exit-0 no-op.
+#
+# REQUIRED by any fixture that drives a ship/scout spawn. That acquire is a real
+# subprocess, not a command typed into a fake pane, so a fixture that leaves the
+# host's own treehouse first on PATH would run it against the captain's live
+# pool. Same obligation the fm-home-seed fixtures already carry.
+fm_fake_treehouse() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" != get ] || printf '%s\n' "${FM_FAKE_WORKTREE:-}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

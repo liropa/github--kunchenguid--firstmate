@@ -53,9 +53,10 @@ make_fakebin() {  # <dir>
   fakebin=$(fm_fakebin "$1")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -66,7 +67,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -114,7 +115,7 @@ run_spawn() {  # <id>
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_WORKTREE="$WT_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$1" "$PROJ_DIR" 2>&1
 }

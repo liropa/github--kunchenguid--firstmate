@@ -149,7 +149,7 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
+# A fake tmux that reports FM_FAKE_WORKTREE as the post-`treehouse get` pane cwd
 # (so the spawn's worktree-resolution loop resolves to a path we control), names
 # the session on '#S', and swallows window ops. Echoes the fakebin dir.
 make_spawn_fakebin() {
@@ -157,9 +157,10 @@ make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -169,7 +170,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -180,7 +181,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$pane" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -234,10 +235,11 @@ make_spawn_record_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_WORKTREE:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -248,7 +250,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -259,7 +261,7 @@ run_spawn_record() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$pane" TMUX="fake,1,0" \
     FM_TMUX_REC="$rec" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
@@ -292,11 +294,13 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
-  assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
-    "the worktree wait loop must query the stable window id, not the name"
+  # Bug 2 fix (b): every spawn-time send targets the stable id, not the name.
+  # The worktree is no longer typed at the pane at all - firstmate leases it in
+  # its own process - so the launch line is what has to reach the right window.
+  assert_grep "send-keys -t @spawnwid test ! -s " "$rec" \
+    "the launch line must be submitted to the stable window id"
+  assert_no_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
+    "the worktree acquire must not be typed into the pane at all"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }

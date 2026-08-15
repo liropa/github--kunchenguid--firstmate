@@ -56,6 +56,7 @@ make_probe_tmux() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 set -u
 case "\${1:-}" in
   display-message)
@@ -221,6 +222,7 @@ make_liveness_tmux() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "${1:-}" in
   display-message)

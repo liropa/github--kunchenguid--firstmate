@@ -22,6 +22,7 @@ make_fake_tmux() {
   printf 'idle prompt\n' > "$capture"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "${1:-}" in
   has-session|new-session|new-window|send-keys|kill-window)

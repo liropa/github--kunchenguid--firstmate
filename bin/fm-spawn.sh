@@ -90,6 +90,19 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Worktree acquisition and launch delivery (docs/spawn-launch-delivery.md owns
+#   the incident and measurements behind both). A ship/scout worktree is leased
+#   with `treehouse get --lease` in THIS process - never typed at the task pane's
+#   shell prompt - and recorded as worktree_lease= so a respawn reuses that slot
+#   instead of leaking it. The launch is then submitted as ONE command line
+#   through the backend's own run-a-command primitive, and this script waits for
+#   the pane to write a nonce into state/<id>.launched (the signal-bridge mount
+#   for sbx) before it treats the task as started. An undelivered launch prints
+#   the pane's last lines, restores the pre-spawn metadata, and exits non-zero.
+#   Tunable, with defaults that only ever need raising on a very slow pane:
+#     FM_SPAWN_LAUNCH_WAIT        seconds to wait for the nonce after each submit (20)
+#     FM_SPAWN_LAUNCH_TRIES       submissions before giving up (3)
+#     FM_SPAWN_LAUNCH_FLUSH_WAIT  seconds a retry gives its flushing Enter (3)
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   A ship/scout spawn also prints one `warning: branch-carried claude settings
@@ -254,6 +267,10 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_LEASE_PATH=
+SPAWN_LEASE_RELEASE_ON_ABORT=0
+SPAWN_WORKTREE_LEASE=
+SPAWN_META_BACKUP=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_PR_URL=
@@ -360,6 +377,22 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  # Release a pool slot this run leased but never handed to a task. The flag is
+  # cleared the moment the task's pane is created, so this only fires while the
+  # slot is still meant to be empty.
+  #
+  # Deliberately NOT `--force`: forcing SIGKILLs whatever lives in the worktree
+  # and resets it, and a spawn that failed late can still have left a dying pane
+  # cwd'd there - measured on a live herdr projection, that kill disturbed the
+  # captain's focused workspace. A plain return refuses instead, which costs a
+  # held pool slot rather than a surprise.
+  if [ "$SPAWN_LEASE_RELEASE_ON_ABORT" = 1 ]; then
+    SPAWN_LEASE_RELEASE_ON_ABORT=0
+    if [ -n "$SPAWN_LEASE_PATH" ]; then
+      treehouse return "$SPAWN_LEASE_PATH" >/dev/null 2>&1 || true
+    fi
+  fi
+  [ -z "$SPAWN_META_BACKUP" ] || rm -f "$SPAWN_META_BACKUP" 2>/dev/null || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -846,25 +879,12 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
-# /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
+# /private/tmp) when it came from the ship/scout branch's logical `pwd` above,
+# while the worktree the pool hands back is already physically resolved.
+# Canonicalize once here so the isolation assertion compares the same physical
+# form on both sides and cannot refuse a spawn that never actually tangled
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
-
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
@@ -983,6 +1003,74 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Worktree acquisition for a ship/scout task, made in THIS process rather than
+# by typing a command at the task pane's shell prompt.
+#
+# A freshly created pane runs the captain's INTERACTIVE login shell, and
+# anything that shell asks before a send lands eats the leading characters of
+# it. Measured 2026-08-13 on the tmux reference backend: oh-my-zsh's auto-update
+# prompt sat at "[oh-my-zsh] Would you like to update? [Y/n]" in every fresh
+# window, ate the "t" of the `treehouse get` this script used to type, and the
+# spawn died on the bounded worktree wait that followed - three times out of
+# three, blocking every fleet member on the host until the prompt was answered
+# by hand. No wait fixes that: an interactive prompt is perfectly stable on
+# screen, so a settle-wait reads a calm pane and types straight into the
+# question, and a clearing newline would answer an unknown question with its
+# default.
+#
+# `treehouse get --lease` is the non-interactive acquire (the same durable lease
+# bin/fm-home-seed.sh takes for a secondmate home): it prints the path on stdout,
+# opens no subshell, and needs no pane at all. The pane is then created already
+# inside the resolved worktree, so no shell prompt sits between firstmate and a
+# correctly placed task.
+#
+# The lease is durable, so it must be acquired ONCE per task: a respawn reuses
+# the slot its own metadata records rather than leaking it and taking another.
+# Metadata and lease are created and destroyed together (bin/fm-teardown.sh
+# returns the worktree and removes the record in one pass), so a record that
+# still names a leased worktree still owns it. A record from before this script
+# leased anything carries no worktree_lease= field and is never reused, because
+# an unleased worktree can have been pruned or handed to another task since.
+spawn_acquire_leased_worktree() {
+  local prior_wt prior_lease
+  prior_wt=
+  prior_lease=
+  if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    prior_wt=$(grep '^worktree=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2-)
+    prior_lease=$(grep '^worktree_lease=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2-)
+  fi
+  if [ "$prior_lease" = treehouse ] && [ -n "$prior_wt" ] && [ -d "$prior_wt" ]; then
+    WT=$prior_wt
+    SPAWN_WORKTREE_LEASE=treehouse
+    return 0
+  fi
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease could not acquire a worktree for $ID in $PROJ_ABS" >&2
+    return 1
+  }
+  [ -n "$WT" ] || {
+    echo "error: treehouse get --lease did not report a worktree for $ID" >&2
+    return 1
+  }
+  SPAWN_LEASE_PATH=$WT
+  SPAWN_LEASE_RELEASE_ON_ABORT=1
+  SPAWN_WORKTREE_LEASE=treehouse
+}
+
+# The task's pane is created in the project, exactly as before, and the launch
+# chain below cd's it into the worktree. Starting the pane in the worktree
+# instead was tried and backed out: on a live herdr tab it intermittently came
+# back with no shell in the pane at all (the pty echoed keystrokes and ran
+# nothing), which the project-rooted pane never did. Placement is guaranteed by
+# the chain's own `cd`, which the agent launch is && - chained behind.
+SPAWN_CWD=$PROJ_ABS
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  spawn_acquire_leased_worktree || exit 1
+  # The isolation assertion now runs BEFORE any pane exists, on the path the
+  # pool actually handed over, so a tangled acquire can never reach a launch.
+  validate_spawn_worktree "treehouse get --lease" "$WT"
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -990,12 +1078,12 @@ case "$BACKEND" in
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
-    WT_TARGET="$WID"
+    # non-default tmux config cannot rename the window away from fm-<id> once the
+    # pane settles in the worktree. SEND_TARGET carries that stable id for every
+    # spawn-time send below; the persisted window= handle stays $T (the name form),
+    # which is safe now that rename is disabled.
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
+    SEND_TARGET="$WID"
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -1035,7 +1123,7 @@ case "$BACKEND" in
           HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
           HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
           if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-            "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+            "$SPAWN_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
             if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
               HERDR_PROJECTION_ABORT_CLEANUP=1
               HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -1073,7 +1161,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -1086,7 +1174,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -1098,7 +1186,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -1222,38 +1310,42 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
-# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
-# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
+# #134 robustness: only tmux needs a send target distinct from $T - its
+# rename-safe stable window id, set as SEND_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
-: "${WT_TARGET:=$T}"
-spawn_send_text_line() {  # <target> <text>
+# SEND_TARGET to $T for them (and for any future backend) - the shared launch
+# delivery below must never reference an unbound SEND_TARGET under set -u.
+: "${SEND_TARGET:=$T}"
+# A pane now lives in the leased worktree, so the abort path must never force it
+# back to the pool: `treehouse return --force` kills what is inside a worktree
+# and resets it. From here on a failed spawn leaves the slot held for this task
+# and says so, instead of destroying whatever the pane is holding.
+SPAWN_LEASE_RELEASE_ON_ABORT=0
+# spawn_send_command_line: hand <line> to the backend's own "run this command
+# line" primitive, which is how the launch is delivered.
+#
+# This is deliberately NOT "type the text, then press Enter". Herdr's `pane run`
+# executes a command line through herdr itself, and a freshly created herdr tab
+# can hand back a pane that has no shell in it yet: measured live on herdr 0.7.5,
+# a pane in that state ECHOES typed characters and executes nothing, so a
+# type-then-Enter launch left the command sitting on screen three times over
+# while the task looked spawned. `pane run` needs no shell to already be there.
+# Where a backend has no such API (tmux and the adapters that mirror it), this
+# is still one call that submits the line, never a separate keystroke pair.
+spawn_send_command_line() {  # <target> <line>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
-    sbx) fm_backend_sbx_send_text_line "$1" "$2" ;;
-  esac
-}
-spawn_current_path() {  # <target>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
-    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
-}
-spawn_send_literal() {  # <target> <text>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_literal "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
-    sbx) fm_backend_sbx_send_literal "$1" "$2" ;;
+    sbx)
+      # sbx keeps its own verified spawn shape: its send_text_line carries the
+      # pending-delivery bookkeeping that belongs to STEERING, not to a launch.
+      fm_backend_sbx_send_literal "$1" "$2" || return 1
+      sleep 0.3
+      fm_backend_sbx_submit_composed "$1"
+      ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -1269,58 +1361,9 @@ spawn_send_key() {  # <target> <key>
       ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
-      fi
-    else
-      candidate=""
-    fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
-
-  validate_spawn_worktree "treehouse get" "$T"
-fi
-
-# Both crewmate worktree paths (orca's create above, treehouse get here) have
-# resolved and validated $WT by now, so one call covers both. A secondmate's
+# Both crewmate worktree paths (orca's create above, the pool lease taken before
+# the pane existed) have resolved and validated $WT by now, so one call covers
+# both. A secondmate's
 # $WT is its own firstmate home rather than a project branch, which is not what
 # this reports on. Detection only - see report_settings_drift; the launch below
 # is unaffected either way.
@@ -1466,9 +1509,19 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Keep the pre-spawn record so an undeliverable launch can put it back rather
+# than leaving a record that reads as a started task (spawn_launch_failed).
+if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  SPAWN_META_BACKUP="$STATE/.$ID.meta.prespawn"
+  cp "$STATE/$ID.meta" "$SPAWN_META_BACKUP" 2>/dev/null || SPAWN_META_BACKUP=
+fi
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
+  # Present only for a worktree THIS script durably leased from the pool. Its
+  # absence is what stops a respawn from adopting a worktree that predates the
+  # lease and can since have been pruned or handed to another task.
+  [ -z "$SPAWN_WORKTREE_LEASE" ] || echo "worktree_lease=$SPAWN_WORKTREE_LEASE"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
@@ -1632,18 +1685,164 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+# Launch delivery, verified before this spawn is allowed to claim a started task.
+#
+# The pane's shell is the captain's own interactive login shell, and this script
+# cannot make it stop asking things. What it CAN do is refuse to believe a send
+# landed until the shell proves it ran the exact bytes that were typed. The line
+# below is one `&&` chain whose first two commands claim a sentinel file
+# firstmate can read:
+#
+#   test ! -s <sentinel> && printf %s <nonce> > <sentinel>
+#     && ( cd <worktree> && export GOTMPDIR=... && <launch> )
+#
+# It is built to survive two different things a pane can do to it.
+#
+# MANGLED: a prompt swallows the leading characters (the measured oh-my-zsh case
+# ate exactly one). The shell is left with a mangled first word, which exits
+# non-zero and short-circuits the whole chain - no nonce, no cd, no export, and
+# above all no agent. Firstmate sees no nonce and knows nothing ran.
+#
+# REPEATED: a pane whose shell has not started yet buffers keystrokes in the tty
+# and runs them all at once when it wakes, so a retyped line can arrive twice.
+# The leading `test ! -s` makes the chain idempotent - the second copy finds the
+# sentinel already claimed and stops before the launch. One agent, always.
+# (`-s`, not `-e`: a mangled copy's redirection can still create the file empty.)
+#
+# The cd and the launch are wrapped in a SUBSHELL so the pane's own shell never
+# moves into the worktree. bin/fm-teardown.sh returns that worktree to the pool
+# before it closes the pane, and the return kills everything living inside it -
+# with the pane's shell cd'd there, teardown killed the pane out from under the
+# backend, which then could not close it cleanly (measured on a live herdr
+# projection: the dying pane took the captain's focus with it). Only the agent
+# and its children live in the worktree, exactly as they did when treehouse's own
+# subshell held it. GOTMPDIR is exported inside that subshell, so it still
+# reaches the agent and every child process (go build, go test, ...).
+LAUNCH_SENTINEL="$STATE_REAL/$ID.launched"
+[ "$BACKEND" != sbx ] || LAUNCH_SENTINEL="$SIG_DIR/$ID.launched"
+LAUNCH_NONCE=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ -n "$LAUNCH_NONCE" ] || LAUNCH_NONCE="fm-$ID-$$-${RANDOM:-0}"
+LAUNCH_LINE="test ! -s $(shell_quote "$LAUNCH_SENTINEL")"
+LAUNCH_LINE="$LAUNCH_LINE && printf %s $(shell_quote "$LAUNCH_NONCE") > $(shell_quote "$LAUNCH_SENTINEL")"
+LAUNCH_LINE="$LAUNCH_LINE && ( cd $(shell_quote "$WT")"
+LAUNCH_LINE="$LAUNCH_LINE && export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
+LAUNCH_LINE="$LAUNCH_LINE && $LAUNCH )"
+
+# Seconds to wait for the nonce after each submission, and how many submissions
+# to make. The wait only has to cover a `printf` in a live shell, so it is
+# generous by a wide margin; the retries cover a pane that needs more than one.
+FM_SPAWN_LAUNCH_WAIT=${FM_SPAWN_LAUNCH_WAIT:-20}
+FM_SPAWN_LAUNCH_TRIES=${FM_SPAWN_LAUNCH_TRIES:-3}
+# Seconds to give a retry's flushing Enter before concluding it submitted nothing.
+FM_SPAWN_LAUNCH_FLUSH_WAIT=${FM_SPAWN_LAUNCH_FLUSH_WAIT:-3}
+
+spawn_launch_delivered() {
+  local seen
+  [ -f "$LAUNCH_SENTINEL" ] || return 1
+  seen=$(cat "$LAUNCH_SENTINEL" 2>/dev/null) || return 1
+  [ "$seen" = "$LAUNCH_NONCE" ]
+}
+
+# 0 delivered, 1 the backend refused the send outright, 2 the pane never ran it.
+spawn_deliver_launch() {
+  local attempt=0 waited state
+  # Cleared ONCE, never between attempts: the chain's own idempotence guard reads
+  # this file, so clearing it per attempt would re-arm a buffered duplicate.
+  rm -f "$LAUNCH_SENTINEL" 2>/dev/null || true
+  while [ "$attempt" -lt "$FM_SPAWN_LAUNCH_TRIES" ]; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -gt 1 ]; then
+      # Flush the pane's input line before retyping. A lost or half-delivered
+      # send can leave a fragment sitting there, and typing the line again on top
+      # of it produces one concatenated command that no check could ever confirm.
+      # This Enter is not the rejected "clear an unknown prompt with a newline"
+      # move: it lands only AFTER a full command line and an Enter of our own
+      # have already gone into that shell, so it answers nothing our own first
+      # attempt did not already reach.
+      spawn_send_key "$SEND_TARGET" Enter || return 1
+      # The flush can itself be the delivery: if the previous attempt's text was
+      # complete and only its Enter went missing, that line just ran. Re-check
+      # before retyping, or the retype starts a SECOND agent - the no-double-text
+      # rule bin/fm-tmux-lib.sh already follows for steering.
+      waited=0
+      while [ "$waited" -lt "$FM_SPAWN_LAUNCH_FLUSH_WAIT" ]; do
+        spawn_launch_delivered && return 0
+        sleep 1
+        waited=$((waited + 1))
+      done
+      spawn_launch_delivered && return 0
+    fi
+    spawn_send_command_line "$SEND_TARGET" "$LAUNCH_LINE" || return 1
+    waited=0
+    while :; do
+      spawn_launch_delivered && return 0
+      [ "$waited" -lt "$FM_SPAWN_LAUNCH_WAIT" ] || break
+      sleep 1
+      waited=$((waited + 1))
+    done
+    # No nonce, so the chain died on its first word. Before retyping, take the
+    # one reading that could contradict that: a backend able to name the pane's
+    # foreground process must not show a live agent. Backends that answer
+    # "unknown" (no probe, or an agent behind a generic interpreter) leave the
+    # chain's own guarantee as the only evidence, which is what it was built for.
+    state=$(fm_backend_agent_alive "$BACKEND" "$SEND_TARGET")
+    if [ "$state" = alive ]; then
+      echo "error: $ID launch is unverifiable: no launch confirmation from the pane, but an agent is already running in it; refusing to retype and risk a second agent" >&2
+      return 2
+    fi
+  done
+  return 2
+}
+
+# The two causes seen live are named without picking one, because the pane's own
+# last lines below tell them apart: a shell sitting at an unanswered startup
+# question eats the leading characters, while a pane with nothing reading its
+# input echoes the whole line and runs none of it
+# (docs/spawn-launch-delivery.md).
+spawn_launch_failed() {  # <exit-status-to-use>
+  local tail_text
+  echo "error: $ID launch command was not delivered to its pane after $FM_SPAWN_LAUNCH_TRIES attempts; $META_WINDOW either has a shell consuming typed input (an unanswered startup question does this) or nothing reading its input at all. Nothing was launched and the task is NOT recorded as started. Inspect that window and spawn again. Worktree $WT is still held for $ID" >&2
+  # Show what the pane is actually displaying. Whatever swallowed the command is
+  # almost always still on screen, and quoting it here saves the operator from
+  # having to reach a pane that may be on another machine entirely.
+  tail_text=$(fm_backend_capture "$BACKEND" "$SEND_TARGET" 30 2>/dev/null | tail -20) || tail_text=
+  if [ -n "$tail_text" ]; then
+    echo "--- last lines of $META_WINDOW ---" >&2
+    printf '%s\n' "$tail_text" >&2
+    echo "--- end ---" >&2
+  fi
+  if [ -n "$SPAWN_META_BACKUP" ] && [ -f "$SPAWN_META_BACKUP" ]; then
+    mv -f "$SPAWN_META_BACKUP" "$STATE/$ID.meta" 2>/dev/null || rm -f "$STATE/$ID.meta"
+  else
+    rm -f "$STATE/$ID.meta"
+  fi
+  exit "$1"
+}
+
+spawn_deliver_launch || {
+  spawn_deliver_status=$?
+  if [ "$spawn_deliver_status" -eq 1 ]; then
+    echo "error: $ID launch could not be sent to $META_WINDOW at all; the runtime refused the send. The task is NOT recorded as started, and worktree $WT is still held for $ID" >&2
+    if [ -n "$SPAWN_META_BACKUP" ] && [ -f "$SPAWN_META_BACKUP" ]; then
+      mv -f "$SPAWN_META_BACKUP" "$STATE/$ID.meta" 2>/dev/null || rm -f "$STATE/$ID.meta"
+    else
+      rm -f "$STATE/$ID.meta"
+    fi
+    exit 1
+  fi
+  spawn_launch_failed 1
+}
+# The projection's ordering lock is held across the WHOLE launch handoff, which
+# is not over until the launch is confirmed: releasing at the send would let a
+# concurrent projected spawn interleave its own create and cleanup with this
+# one's. A handoff that never confirms leaves both the lock and the
+# abort-cleanup claim with spawn_abort_cleanup, which owns tearing the
+# projection down under that same lock.
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+rm -f "$SPAWN_META_BACKUP" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

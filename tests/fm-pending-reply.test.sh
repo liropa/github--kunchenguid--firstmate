@@ -58,6 +58,7 @@ make_stubs() {  # <dir> -> fakebin
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "${1:-}" in
   send-keys)
@@ -1306,6 +1307,7 @@ make_sbx_stub() {  # <dir> <ls-rc> <running|stopped|absent> -> fakebin
   fi
   cat > "$fb/sbx" <<SH
 #!/usr/bin/env bash
+[ -z "\${FM_TEST_LAUNCH_ACK:-}" ] || "\$FM_TEST_LAUNCH_ACK" "\$@"
 set -u
 [ "\${1:-}" = ls ] || exit 0
 [ "$rc" = 0 ] || exit $rc
@@ -1428,6 +1430,7 @@ test_tmux_transport_loss_after_completion_defers_recovery_unspent() {
     # does - so the send could not have landed either.
     cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 if [ ! -f "$FAKE_TMUX_SERVER_UP" ]; then
   echo "error connecting to /private/tmp/tmux-501/default (Operation not permitted)" >&2

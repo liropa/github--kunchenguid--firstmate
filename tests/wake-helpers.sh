@@ -78,6 +78,7 @@ make_case() {
   mkdir -p "$dir/state" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 if [ "${1:-}" = "list-windows" ]; then
   if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
@@ -135,6 +136,7 @@ make_supercase() {
   mkdir -p "$dir/state" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "${1:-}" in
   display-message)
@@ -215,6 +217,7 @@ make_bordered_case() {
   printf '│ > │\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
