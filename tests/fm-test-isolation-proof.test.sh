@@ -189,8 +189,10 @@ test_phase4_consumes_proven_set_only() {
     || fail "CI portable parallel 1 must use --lane portable-parallel-1"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
     || fail "CI portable parallel 2 must use --lane portable-parallel-2"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
-    || fail "CI portable serial must use --lane portable-serial"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial-1' "$CI" \
+    || fail "CI portable serial 1 must use --lane portable-serial-1"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial-2' "$CI" \
+    || fail "CI portable serial 2 must use --lane portable-serial-2"
   # Shard union must equal this harness's proven list.
   local proven shards
   proven=$("$PROOF" --list | LC_ALL=C sort -u)

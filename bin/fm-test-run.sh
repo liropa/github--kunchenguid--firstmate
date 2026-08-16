@@ -8,7 +8,8 @@
 #   fm-test-run.sh --all
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
-#   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
+#   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2
+#   fm-test-run.sh --lane portable-serial|portable-serial-1|portable-serial-2
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -60,6 +61,10 @@
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
 # duration-balanced partition of that exact set (see docs/fm-test-portable-shards.md).
+# portable-serial-1 and portable-serial-2 are a duration-balanced partition of the
+# portable-serial remainder onto two separate CI runners. Each half still runs one
+# script at a time, so no script gains a concurrent neighbour and no isolation
+# property changes; only the machine boundary moves.
 # --changed is conservative: it over-selects related families rather than
 # under-selecting, and never expands to the complete suite unless --all.
 set -eu
@@ -225,6 +230,8 @@ list_known_lanes() {
 portable-parallel-1
 portable-parallel-2
 portable-serial
+portable-serial-1
+portable-serial-2
 real-herdr-gated
 EOF
 }
@@ -312,6 +319,32 @@ tests/fm-no-mistakes-ownership.test.sh
 EOF
 }
 
+# Portable serial CI half 1: the measured heavy head of the portable-serial
+# remainder, sized so its sum matches the other half. Membership was chosen from
+# per-script duration_ms in the CI portable-serial timing artifacts (five main
+# runs up to c1b65de); docs/fm-test-portable-shards.md records the numbers and
+# the rebalance trigger. Order is longest first. Every entry must be in the
+# remainder, and half 2 is whatever the remainder has left, so a newly added
+# stateful test still lands in a serial lane with no edit here.
+list_portable_serial_1() {
+  cat <<'EOF'
+tests/fm-spawn-launch-delivery.test.sh
+tests/fm-pr-check-security.test.sh
+tests/fm-watcher-lock.test.sh
+tests/fm-watch-triage.test.sh
+tests/fm-bearings-snapshot.test.sh
+tests/fm-backend.test.sh
+EOF
+}
+
+is_portable_serial_1_script() {
+  local want=$1 line
+  while IFS= read -r line; do
+    [ "$line" = "$want" ] && return 0
+  done < <(list_portable_serial_1)
+  return 1
+}
+
 is_proven_isolated_script() {
   local want=$1 line
   while IFS= read -r line; do
@@ -328,8 +361,23 @@ select_proven_isolated() {
   done < <(list_proven_isolated)
 }
 
+# Everything in the complete suite that is not proven-isolated and not
+# real-herdr-gated. Watcher/lock/AFK/tmux/daemon/ambiguous/stateful work stays
+# here, serial only. Complement-derived so a new test is covered without an edit.
+list_portable_serial_remainder() {
+  local s base fam
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    base=$(basename "$s")
+    fam=$(family_for_basename "$base")
+    [ "$fam" = "real-herdr-gated" ] && continue
+    is_proven_isolated_script "$s" && continue
+    printf '%s\n' "$s"
+  done < <(all_repo_tests)
+}
+
 select_lane() {
-  local want=$1 s base fam found=0
+  local want=$1 s remainder found=0
   case "$want" in
     portable-parallel-1)
       while IFS= read -r s; do
@@ -346,22 +394,31 @@ select_lane() {
       done < <(list_portable_parallel_2)
       ;;
     portable-serial)
-      # Everything in the complete suite that is not proven-isolated and not
-      # real-herdr-gated. Watcher/lock/AFK/tmux/daemon/ambiguous/stateful work
-      # stays here, serial only.
       while IFS= read -r s; do
         [ -n "$s" ] || continue
-        base=$(basename "$s")
-        fam=$(family_for_basename "$base")
-        if [ "$fam" = "real-herdr-gated" ]; then
-          continue
-        fi
-        if is_proven_isolated_script "$s"; then
-          continue
-        fi
         add_script "$s"
         found=1
-      done < <(all_repo_tests)
+      done < <(list_portable_serial_remainder)
+      ;;
+    portable-serial-1)
+      # Explicit half. Refuse an entry that has drifted out of the remainder
+      # rather than silently running it twice or alongside a parallel shard.
+      remainder=$(list_portable_serial_remainder)
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        printf '%s\n' "$remainder" | grep -Fxq "$s" \
+          || die "lane portable-serial-1 lists '$s', which is not in the portable-serial remainder"
+        add_script "$s"
+        found=1
+      done < <(list_portable_serial_1)
+      ;;
+    portable-serial-2)
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        is_portable_serial_1_script "$s" && continue
+        add_script "$s"
+        found=1
+      done < <(list_portable_serial_remainder)
       ;;
     real-herdr-gated)
       select_family real-herdr-gated
@@ -408,9 +465,35 @@ run_coverage_guard() {
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
   SCRIPTS=()
+  select_lane portable-serial-1
+  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial1"
+  SCRIPTS=()
+  select_lane portable-serial-2
+  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial2"
+  SCRIPTS=()
   select_family real-herdr-gated
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/herdr"
   SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+
+  # The two CI serial halves must partition the serial remainder exactly, so
+  # splitting the lane across runners can neither drop nor double-run a script.
+  comm -12 "$tmp/serial1" "$tmp/serial2" >"$tmp/serial_overlap"
+  if [ -s "$tmp/serial_overlap" ]; then
+    log "coverage guard: portable serial halves share scripts:"
+    cat "$tmp/serial_overlap" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  cat "$tmp/serial1" "$tmp/serial2" | LC_ALL=C sort -u >"$tmp/serial_halves"
+  missing=$(comm -23 "$tmp/serial" "$tmp/serial_halves" || true)
+  extra=$(comm -13 "$tmp/serial" "$tmp/serial_halves" || true)
+  if [ -n "$missing" ] || [ -n "$extra" ]; then
+    log "coverage guard: portable serial halves must equal the portable serial remainder"
+    [ -z "$missing" ] || { log "missing from halves:"; printf '%s\n' "$missing" >&2; }
+    [ -z "$extra" ] || { log "extra beyond remainder:"; printf '%s\n' "$extra" >&2; }
+    rm -rf "$tmp"
+    return 1
+  fi
 
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
@@ -453,10 +536,12 @@ run_coverage_guard() {
     fi
   fi
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s herdr=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial1=%s serial2=%s herdr=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
+    "$(wc -l <"$tmp/serial1" | tr -d ' ')" \
+    "$(wc -l <"$tmp/serial2" | tr -d ' ')" \
     "$(wc -l <"$tmp/herdr" | tr -d ' ')"
   rm -rf "$tmp"
   return 0
