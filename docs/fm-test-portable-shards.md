@@ -183,8 +183,6 @@ Raising the cap deletes the tripwire's meaning, and the next real hang would run
 
 If a further cut is ever needed, the parallel shards still finish in about a minute against a 10-minute cap and have room to absorb work, but moving any remainder script there first requires a new concurrent isolation proof through `bin/fm-test-isolation-proof.sh`.
 
-<!-- /fm-authority -->
-
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` proves:
