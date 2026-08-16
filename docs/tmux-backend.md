@@ -190,60 +190,8 @@ The shape needs no knowledge of any harness's glyphs, which matters because only
 Verified against real tmux with no agent in the loop: a throwaway session ran a pane redrawing two renderings that differ only by those three bytes, one phase per 15s so consecutive polls at `FM_POLL=15` always land in opposite phases, and the real `bin/fm-watch.sh` was pointed at it through a scratch home with its own lock.
 The same unchanged pane, same poll interval, same watcher, twice:
 
-The two phases differed only by the measured U+23FA bytes and had equal line counts and display widths, so a redraw from the home position overwrote cleanly and nothing scrolled into history:
-
-```sh
-{ printf ' Bash command (unsandboxed)\n\n'
-printf ' echo sandbox-probe\n'
-printf ' Echo a probe string\n\n'
-printf ' Do you want to proceed?\n 1. Yes\n 2. No\n\n'
-printf ' Esc to cancel - Tab to amend - ctrl+e to explain\n'; } > "$LAB/phase-a.txt"
-# phase-b.txt is identical except that line 4 is:
-# printf '\xe2\x8f\xba Echo a probe string\n'
-```
-
-The animator showed one phase per 15 seconds, so consecutive polls at `FM_POLL=15` always landed in opposite phases:
-
-```sh
-printf '\033[2J'
-while :; do
-printf '\033[H'; cat "$1"; sleep 15
-printf '\033[H'; cat "$2"; sleep 15
-done
-```
-
-The throwaway session used a scratch home with its own watcher lock:
-
-```sh
-tmux new-session -d -s fmwatchgate -n probe -x 200 -y 50 "$LAB/animate.sh" "$LAB/phase-a.txt" "$LAB/phase-b.txt" 15
-tmux clear-history -t fmwatchgate:probe
-printf 'window=fmwatchgate:probe\nworktree=%s\nproject=%s\nharness=claude\nkind=ship\nmode=no-mistakes\nyolo=off\n' "$LAB" "$LAB" > "$LAB/state/probe-blocked.meta"
-printf 'working: running the probe command\n' > "$LAB/state/probe-blocked.status"
-# prime the signal-scan signature so the pre-existing status cannot pre-empt the stale path
-. "$REPO/bin/fm-state-key-lib.sh"
-printf '%s' "$(stat -L -f '%z:%Fm' "$LAB/state/probe-blocked.status")" > "$LAB/state/$FM_STATE_SEEN_PREFIX$(fm_state_key_encode 'probe-blocked.status')"
-```
-
-These commands confirmed that the pane alternated between exactly two values and only by that glyph:
-
-```sh
-for _ in $(seq 1 14); do tmux capture-pane -p -t fmwatchgate:probe -S -40 | md5 -q; sleep 1; done | uniq -c
-diff "$LAB/phase-a.txt" "$LAB/phase-b.txt" | cat -v
-```
-
-The two watcher runs used that same unchanged pane, were each backgrounded, and were killed at a 200-second bound because macOS has no `timeout(1)`:
-
-```sh
-FM_PANE_CYCLE_MEMORY=1 FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_POLL=15 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$REPO/bin/fm-watch.sh"
-FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_POLL=15 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$REPO/bin/fm-watch.sh"
-```
-
-Cleanup removed the throwaway session, and the final command confirmed that the captain's own session was untouched:
-
-```sh
-tmux kill-session -t fmwatchgate
-tmux list-sessions
-```
+The exact animator-file creation and watcher background, PID capture, and bounded-termination commands were not retained.
+The run is therefore not reproducible from this record, and the block below records observed output only.
 
 ```
 --- real fm-watch.sh, FM_POLL=15, FM_PANE_CYCLE_MEMORY=1 ---
@@ -263,7 +211,7 @@ recent captures remembered: 22df6a8a9b1dca540864208d716b62a8 369b0d18430762784be
 ```
 
 The counter stuck at 0 under the byte-identical gate is the failure reproduced: the stale branch is never entered, so there is nothing to absorb and nothing to surface.
-The sandbox denies the tmux socket on this host (`error connecting to /private/tmp/tmux-501/default (Operation not permitted)`), so every step above ran unsandboxed.
+The sandbox denies the tmux socket on this host (`error connecting to /private/tmp/tmux-501/default (Operation not permitted)`), so the live check ran unsandboxed.
 
 Two limits are inherent to hashing the raw capture and are not closed here:
 
