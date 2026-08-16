@@ -187,6 +187,7 @@ The shape needs no knowledge of any harness's glyphs, which matters because only
 
 ### Verification (2026-08-15, tmux 3.7b, macOS)
 
+<!-- fm-authority: firstmate-observation 2026-08-15 - measured by two watcher runs against one unchanged real tmux pane; the live-host figures cannot be reproduced from inside the gate's checkout -->
 Verified against real tmux with no agent in the loop: a throwaway session ran a pane redrawing two renderings that differ only by those three bytes, one phase per 15s so consecutive polls at `FM_POLL=15` always land in opposite phases, and the real `bin/fm-watch.sh` was pointed at it through a scratch home with its own lock.
 The same unchanged pane, same poll interval, same watcher, twice:
 
@@ -212,6 +213,7 @@ recent captures remembered: 22df6a8a9b1dca540864208d716b62a8 369b0d18430762784be
 
 The counter stuck at 0 under the byte-identical gate is the failure reproduced: the stale branch is never entered, so there is nothing to absorb and nothing to surface.
 The sandbox denies the tmux socket on this host (`error connecting to /private/tmp/tmux-501/default (Operation not permitted)`), so the live check ran unsandboxed.
+<!-- /fm-authority -->
 
 Two limits are inherent to hashing the raw capture and are not closed here:
 
