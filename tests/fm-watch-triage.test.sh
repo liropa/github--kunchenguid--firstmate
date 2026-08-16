@@ -697,6 +697,67 @@ test_animated_pane_still_reaches_stale() {
   pass "a pane that only animates still reaches a stale wake, though no two captures are byte-identical"
 }
 
+test_progressing_pane_without_busy_footer_resets_wedge_timer() {
+  local dir state fakebin out sequence window key sig pid
+  dir=$(make_case progressing-pane-timer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; sequence="$dir/pane.count"
+  window="test:fm-progressing"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/progressing.meta"
+  printf 'working: producing output\n' > "$state/progressing.status"
+  sig=$(seen_sig "$state/progressing.status"); printf '%s' "$sig" > "$(seen_path "$state" "progressing.status")"
+  key=$(fm_state_key_encode "$window")
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_SEQUENCE="$sequence" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 25 || { reap "$pid"; fail "genuinely progressing pane wedge-escalated without a busy footer: $(cat "$out")"; }
+  is_live_non_zombie "$pid" || { reap "$pid"; fail "genuinely progressing pane wedge-escalated without a busy footer: $(cat "$out")"; }
+  [ "$(cat "$sequence" 2>/dev/null || echo 0)" -ge 5 ] || { reap "$pid"; fail "progressing fixture did not emit enough distinct captures"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "novel output did not reset the wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "novel output did not reset the escalation count"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "genuinely new output resets wedge bookkeeping without a busy footer"
+}
+
+test_animated_pane_accumulates_wedge_timer() {
+  local dir state fakebin out phase_a phase_b counter window key sig pid
+  dir=$(make_case animated-pane-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; phase_a="$dir/pane-a.txt"; phase_b="$dir/pane-b.txt"; counter="$dir/pane.count"
+  window="test:fm-animated-wedge"
+  write_animated_dialog '  ' "$phase_a"
+  write_animated_dialog '\xe2\x8f\xba ' "$phase_b"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/animated-wedge.meta"
+  printf 'working: waiting on tool\n' > "$state/animated-wedge.status"
+  sig=$(seen_sig "$state/animated-wedge.status"); printf '%s' "$sig" > "$(seen_path "$state" "animated-wedge.status")"
+  key=$(fm_state_key_encode "$window")
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$phase_a" FM_FAKE_TMUX_CAPTURE_ALT="$phase_b" FM_FAKE_TMUX_CAPTURE_COUNT="$counter" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 80 || { reap "$pid"; fail "animated pane did not start wedge tracking"; }
+  reap "$pid"
+
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$phase_a" FM_FAKE_TMUX_CAPTURE_ALT="$phase_b" FM_FAKE_TMUX_CAPTURE_COUNT="$counter" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "animated pane did not wedge-escalate: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "animated pane lost its wedge timer across recent redraws"
+  unset FM_FAKE_CREW_STATE
+  pass "recent animated captures retain and escalate the wedge timer"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1311,12 +1372,8 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   printf '1\n' > "$state/.wedge-escalations-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
-  # Phase A: the capture changes but carries no busy signature. That is a
-  # REDRAW, not activity - it is precisely what a claude pane parked at a
-  # permission dialog does, and treating it as activity is what kept
-  # FM_STALE_ESCALATE_SECS from ever accumulating there and left
-  # demand-deep-inspection unreachable for that failure. The bookkeeping must
-  # survive it.
+  # Phase A: this capture is outside the recent window, so the progress gate
+  # classifies it as genuine new output even without a busy signature.
   printf 'redrawn output, still no busy signature' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1325,12 +1382,13 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "watcher exited on a redrawn pane: $(cat "$out")"
   fi
-  [ -e "$state/.wedge-escalations-$key" ] \
-    || { reap "$pid"; fail "a pane that only redrew reset the wedge-escalation counter"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "novel pane output did not reset the wedge-escalation counter"; }
   reap "$pid"
 
-  # Phase B: the harness itself now says it is working. That IS activity, and it
-  # is the one signal that resets the bookkeeping.
+  # Phase B: an unchanged capture with a harness busy signature also resets the
+  # bookkeeping.
+  printf '1\n' > "$state/.wedge-escalations-$key"
   printf 'new output, crew active again\nesc to interrupt' > "$capture_file"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1343,7 +1401,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a busy pane did not reset the wedge-escalation counter"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "a redrawn pane keeps its wedge-escalation counter and only a busy pane resets it"
+  pass "novel output and an unchanged busy pane reset wedge escalation tracking"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1683,6 +1741,8 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_recent_capture_hit_refreshes_eviction_order
 test_animated_pane_still_reaches_stale
+test_progressing_pane_without_busy_footer_resets_wedge_timer
+test_animated_pane_accumulates_wedge_timer
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

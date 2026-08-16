@@ -87,6 +87,12 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_SEQUENCE:-}" ]; then
+    _n=$(( $(cat "$FM_FAKE_TMUX_CAPTURE_SEQUENCE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$_n" > "$FM_FAKE_TMUX_CAPTURE_SEQUENCE"
+    printf 'new output %s\n' "$_n"
+    exit 0
+  fi
   # Two-phase capture, off unless both variables are set: an animated pane (the
   # claude pending-tool-call glyph) alternates between two renderings while the
   # worker does nothing at all. The phase advances PER CALL through the counter

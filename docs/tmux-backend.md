@@ -188,38 +188,12 @@ The shape needs no knowledge of any harness's glyphs, which matters because only
 
 ### Verification (2026-08-15, tmux 3.7b, macOS)
 
-<!-- fm-authority: firstmate-observation 2026-08-15 - measured by two watcher runs against one unchanged real tmux pane; the live-host figures cannot be reproduced from inside the gate's checkout -->
-Verified against real tmux with no agent in the loop: a throwaway session ran a pane redrawing two renderings that differ only by those three bytes, one phase per 15s so consecutive polls at `FM_POLL=15` always land in opposite phases, and the real `bin/fm-watch.sh` was pointed at it through a scratch home with its own lock.
-The same unchanged pane, same poll interval, same watcher, twice:
-
-The exact animator-file creation and watcher background, PID capture, and bounded-termination commands were not retained.
-The run is therefore not reproducible from this record, and the block below records observed output only.
-
-```
---- real fm-watch.sh, FM_POLL=15, FM_PANE_CYCLE_MEMORY=1 ---
-start 16:17:55
-watcher STILL RUNNING after 200s - no wake
-printed:
-queue:
-count=0
-
---- real fm-watch.sh, FM_POLL=15, FM_PANE_CYCLE_MEMORY=<default 4> ---
-start 16:21:55
-watcher exited after 46s
-printed: stale: fmwatchgate:probe
-queue: 1786825362	1	stale	fmwatchgate:probe	stale: fmwatchgate:probe
-count=2
-recent captures remembered: 22df6a8a9b1dca540864208d716b62a8 369b0d18430762784bef0eaf122ebd41
-```
-
-The counter stuck at 0 under the byte-identical gate is the failure reproduced: the stale branch is never entered, so there is nothing to absorb and nothing to surface.
-The sandbox denies the tmux socket on this host (`error connecting to /private/tmp/tmux-501/default (Operation not permitted)`), so the live check ran unsandboxed.
-<!-- /fm-authority -->
+The full live reproduction, retained commands, and real output are in the firstmate home's private, gitignored scout report at `data/worker-pane-blocked-invisible/report.md`; that report is not part of this repository.
 
 Two limits are inherent to hashing the raw capture and are not closed here:
 
 - A monotonic ticker (an elapsed-time counter, a token count) produces a genuinely new capture every poll forever. Such a pane never enters the stale branch at all, so it also never accumulates a wedge timer.
-- A pane cycling among more distinct captures than the memory holds still advances its progress hash. The wedge timer survives that, because `reset_wedge_timer_on_activity` clears `.stale-since-*` and `.wedge-escalations-*` only on a busy signature - the harness's own statement that it is working - and never because a capture merely redrew.
+- A pane cycling among more distinct captures than the memory holds still advances its progress hash and is treated as new output, so it does not accumulate a wedge timer.
 
 herdr needs none of this: `push_block_dwell_check` escalates a natively-reported blocked pane after `FM_PUSH_BLOCK_DWELL` and runs before the capture, so neither the gate nor a capture failure can suppress it.
 This is what lets the tmux poll path reach the same state herdr reaches natively.
