@@ -623,35 +623,38 @@ write_animated_dialog() {  # <lead> <file>
 }
 
 test_recent_capture_hit_refreshes_eviction_order() {
-  local dir state key actual expected hash
+  local dir state key trace
   dir=$(make_case recent-capture-recency); state="$dir/state"; key=recency
+  trace="$dir/trace.out"
 
-  if ! (
-    FM_STATE_OVERRIDE="$state" FM_PANE_CYCLE_MEMORY=4
+  if ! FM_STATE_OVERRIDE="$state" FM_PANE_CYCLE_MEMORY=4 \
+    bash -s -- "$WATCH" "$state" "$key" > "$trace" <<'TRACE'; then
+    watch=$1 state=$2 key=$3
     # shellcheck source=bin/fm-watch.sh
-    . "$WATCH"
+    . "$watch"
     expected='A B C D D E E'
     actual=''
     for hash in A B C D A E A; do
       actual="${actual:+$actual }$(pane_progress_hash "$key" "$hash")"
     done
+    printf "%s\n" "$actual"
     [ "$actual" = "$expected" ] \
-      || fail "recent-hit trace returned [$actual], expected [$expected]"
+      || exit 1
 
     PANE_CYCLE_MEMORY=1
     [ "$(pane_progress_hash "$key" D)" = D ] \
-      || fail "memory 1 treated an out-of-window capture as recent"
+      || exit 1
     [ "$(awk 'END { print NR }' "$state/.recent-$key")" -eq 2 ] \
-      || fail "memory 1 did not bound the stored capture window"
+      || exit 1
 
     PANE_CYCLE_MEMORY=4
     printf 'D\nC\nB\nA\n' > "$state/.recent-legacy"
     [ "$(pane_progress_hash legacy A)" = D ] \
-      || fail "legacy recent-capture memory did not preserve its progress anchor"
+      || exit 1
     grep -Fx 'anchor=D' "$state/.recent-legacy" >/dev/null \
-      || fail "legacy recent-capture memory was not migrated"
-  ); then
-    fail "recent-capture recency assertions failed"
+      || exit 1
+TRACE
+    fail "recent-capture recency assertions failed: $(cat "$trace")"
   fi
   pass "recent capture hits refresh eviction order without moving the progress anchor"
 }
