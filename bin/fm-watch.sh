@@ -204,9 +204,9 @@ PUSH_BLOCK_DWELL_SECS=${FM_PUSH_BLOCK_DWELL:-90}
 # pane_progress_hash: a pane that only cycles among this many captures has
 # produced no new output. 4 covers the measured two-phase claude animation with
 # margin for a three-frame indicator, and is small enough that a genuinely
-# progressing pane leaves the memory behind within a few polls. 1 restores the
-# pre-2026-08 byte-identical gate exactly, which is the escape hatch if a harness
-# ever turns out to redraw in a way this shape misreads.
+# progressing pane leaves the memory behind within a few polls. 1 retains only
+# the immediately preceding capture, so a capture is progress unless it is
+# identical to the one before it.
 PANE_CYCLE_MEMORY=${FM_PANE_CYCLE_MEMORY:-4}
 case "$PANE_CYCLE_MEMORY" in
   ''|*[!0-9]*) PANE_CYCLE_MEMORY=4 ;;
@@ -306,7 +306,8 @@ hash_pane() {
 #
 # Prints the window's current progress hash; updates the memory in place.
 pane_progress_hash() {  # <key> <raw pane hash>
-  local key=$1 raw=$2 file line anchor='' kept='' n=1 seen=0 first=1
+  local key=$1 raw=$2 file line anchor='' kept='' seen=0 first=1 examined=0 kept_count=0
+  local keep_limit=$(( PANE_CYCLE_MEMORY - 1 ))
   file="$STATE/.recent-$key"
   if [ -f "$file" ]; then
     while IFS= read -r line; do
@@ -318,23 +319,24 @@ pane_progress_hash() {  # <key> <raw pane hash>
           *) anchor=$line ;;
         esac
       fi
-      if [ "$line" = "$raw" ]; then
-        seen=1
-      elif [ "$n" -lt "$PANE_CYCLE_MEMORY" ]; then
-        kept="$kept$line"$'\n'
-        n=$(( n + 1 ))
+      if [ "$examined" -lt "$PANE_CYCLE_MEMORY" ]; then
+        examined=$(( examined + 1 ))
+        if [ "$line" = "$raw" ]; then
+          seen=1
+        elif [ "$kept_count" -lt "$keep_limit" ]; then
+          kept="$kept$line"$'\n'
+          kept_count=$(( kept_count + 1 ))
+        fi
       fi
     done < "$file"
   fi
-  if [ "$seen" = 1 ]; then
-    # Refresh eviction recency without moving the progress anchor. Moving the
-    # anchor on a hit would make a cycling pane alternate progress hashes again.
-    printf 'anchor=%s\n%s\n%s' "${anchor:-$raw}" "$raw" "$kept" > "$file"
-    printf '%s' "${anchor:-$raw}"
-    return 0
+  # Refresh eviction recency without moving the progress anchor. Moving the
+  # anchor on a hit would make a cycling pane alternate progress hashes again.
+  if [ "$seen" != 1 ]; then
+    anchor=$raw
   fi
-  printf 'anchor=%s\n%s\n%s' "$raw" "$raw" "$kept" > "$file"
-  printf '%s' "$raw"
+  printf 'anchor=%s\n%s\n%s' "${anchor:-$raw}" "$raw" "$kept" > "$file"
+  printf '%s' "${anchor:-$raw}"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
