@@ -626,7 +626,7 @@ test_recent_capture_hit_refreshes_eviction_order() {
   local dir state key actual expected hash
   dir=$(make_case recent-capture-recency); state="$dir/state"; key=recency
 
-  (
+  if ! (
     FM_STATE_OVERRIDE="$state" FM_PANE_CYCLE_MEMORY=4
     # shellcheck source=bin/fm-watch.sh
     . "$WATCH"
@@ -638,12 +638,21 @@ test_recent_capture_hit_refreshes_eviction_order() {
     [ "$actual" = "$expected" ] \
       || fail "recent-hit trace returned [$actual], expected [$expected]"
 
+    PANE_CYCLE_MEMORY=1
+    [ "$(pane_progress_hash "$key" D)" = D ] \
+      || fail "memory 1 treated an out-of-window capture as recent"
+    [ "$(awk 'END { print NR }' "$state/.recent-$key")" -eq 2 ] \
+      || fail "memory 1 did not bound the stored capture window"
+
+    PANE_CYCLE_MEMORY=4
     printf 'D\nC\nB\nA\n' > "$state/.recent-legacy"
     [ "$(pane_progress_hash legacy A)" = D ] \
       || fail "legacy recent-capture memory did not preserve its progress anchor"
     grep -Fx 'anchor=D' "$state/.recent-legacy" >/dev/null \
       || fail "legacy recent-capture memory was not migrated"
-  )
+  ); then
+    fail "recent-capture recency assertions failed"
+  fi
   pass "recent capture hits refresh eviction order without moving the progress anchor"
 }
 

@@ -183,7 +183,8 @@ Detection was a beat frequency between the poll interval and the animation perio
 
 `pane_progress_hash` in `bin/fm-watch.sh` now asks whether the window is progressing instead: a capture the window has shown within its last `FM_PANE_CYCLE_MEMORY` distinct captures (default 4) carries no new output, so it does not advance the window's progress hash.
 The shape needs no knowledge of any harness's glyphs, which matters because only `claude 2.1.233` has been measured; normalizing the animated indicator itself away would need a new measured fact per harness.
-`FM_PANE_CYCLE_MEMORY=1` restores the byte-identical gate exactly, and `tests/fm-watch-triage.test.sh`'s `test_animated_pane_still_reaches_stale` fails under that setting and passes without it.
+`FM_PANE_CYCLE_MEMORY=1` retains only the immediately preceding capture, so a capture is progress unless it is identical to the one before it.
+`tests/fm-watch-triage.test.sh`'s `test_animated_pane_still_reaches_stale` fails under that setting and passes without it.
 
 ### Verification (2026-08-15, tmux 3.7b, macOS)
 
