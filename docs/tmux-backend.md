@@ -186,10 +186,6 @@ The shape needs no knowledge of any harness's glyphs, which matters because only
 `FM_PANE_CYCLE_MEMORY=1` retains only the immediately preceding capture, so a capture is progress unless it is identical to the one before it.
 `tests/fm-watch-triage.test.sh`'s `test_animated_pane_still_reaches_stale` fails under that setting and passes without it.
 
-### Verification (2026-08-15, tmux 3.7b, macOS)
-
-The full live reproduction, retained commands, and real output are in the firstmate home's private, gitignored scout report at `data/worker-pane-blocked-invisible/report.md`; that report is not part of this repository.
-
 Two limits are inherent to hashing the raw capture and are not closed here:
 
 - A monotonic ticker (an elapsed-time counter, a token count) produces a genuinely new capture every poll forever. Such a pane never enters the stale branch at all, so it also never accumulates a wedge timer.
