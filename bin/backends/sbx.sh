@@ -1051,10 +1051,10 @@ fm_backend_sbx_ensure_stack() {  # <target>
   # its TUI accepts input yet: codex's resume spends seconds redrawing the
   # restored conversation and DROPS keys typed into that window (observed
   # live - the fg check passed at settle+8s and the steer vanished into the
-  # redraw). Readiness is two consecutive identical pane captures - the same
-  # stability idiom the watcher uses for idleness - so no per-harness UI
-  # signature is needed. A pane still changing past the cap (e.g. the agent
-  # resumed busy) falls through and delivers anyway: a live TUI queues input.
+  # redraw). Readiness is two consecutive identical pane captures, so no
+  # per-harness UI signature is needed. A pane still changing past the cap
+  # (e.g. the agent resumed busy) falls through and delivers anyway: a live TUI
+  # queues input.
   ready_prev=
   ready_i=0
   while [ "$ready_i" -lt "$FM_SBX_RESURRECT_READY_TRIES" ]; do
