@@ -200,7 +200,7 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # noticed well inside the wedge timer. See push_block_dwell_check for why an edge
 # alone is not an alarm.
 PUSH_BLOCK_DWELL_SECS=${FM_PUSH_BLOCK_DWELL:-90}
-# How many recent distinct captures the progress gate remembers per window. See
+# How many most-recently shown distinct captures the progress gate remembers per window. See
 # pane_progress_hash: a pane that only cycles among this many captures has
 # produced no new output. 4 covers the measured two-phase claude animation with
 # margin for a three-frame indicator, and is small enough that a genuinely
@@ -289,7 +289,7 @@ hash_pane() {
 # was a beat frequency between the poll interval and the animation period rather
 # than a property of the worker (data/worker-pane-blocked-invisible, 2026-08-15).
 #
-# So remember the last PANE_CYCLE_MEMORY distinct captures per window and treat
+# So remember the PANE_CYCLE_MEMORY most-recently shown distinct captures per window and treat
 # a capture the window has recently shown as NO progress: it carries nothing the
 # previous polls did not already show. Only a capture outside that memory
 # advances the window's progress hash, which is the value the repeat counter
@@ -306,15 +306,18 @@ hash_pane() {
 #
 # Prints the window's current progress hash; updates the memory in place.
 pane_progress_hash() {  # <key> <raw pane hash>
-  local key=$1 raw=$2 file line anchor='' kept='' n=1 seen=0
+  local key=$1 raw=$2 file line anchor='' kept='' n=1 seen=0 first=1
   file="$STATE/.recent-$key"
   if [ -f "$file" ]; then
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      # The anchor is the newest capture the window has shown. While the pane
-      # only cycles, every poll reports that same anchor, so the counter below
-      # sees one unchanging progress hash instead of an alternating pair.
-      [ -n "$anchor" ] || anchor=$line
+      if [ "$first" = 1 ]; then
+        first=0
+        case "$line" in
+          anchor=*) anchor=${line#anchor=}; continue ;;
+          *) anchor=$line ;;
+        esac
+      fi
       if [ "$line" = "$raw" ]; then
         seen=1
       elif [ "$n" -lt "$PANE_CYCLE_MEMORY" ]; then
@@ -324,10 +327,13 @@ pane_progress_hash() {  # <key> <raw pane hash>
     done < "$file"
   fi
   if [ "$seen" = 1 ]; then
+    # Refresh eviction recency without moving the progress anchor. Moving the
+    # anchor on a hit would make a cycling pane alternate progress hashes again.
+    printf 'anchor=%s\n%s\n%s' "${anchor:-$raw}" "$raw" "$kept" > "$file"
     printf '%s' "${anchor:-$raw}"
     return 0
   fi
-  printf '%s\n%s' "$raw" "$kept" > "$file"
+  printf 'anchor=%s\n%s\n%s' "$raw" "$raw" "$kept" > "$file"
   printf '%s' "$raw"
 }
 

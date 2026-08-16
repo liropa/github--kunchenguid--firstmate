@@ -622,6 +622,31 @@ write_animated_dialog() {  # <lead> <file>
   } > "$2"
 }
 
+test_recent_capture_hit_refreshes_eviction_order() {
+  local dir state key actual expected hash
+  dir=$(make_case recent-capture-recency); state="$dir/state"; key=recency
+
+  (
+    FM_STATE_OVERRIDE="$state" FM_PANE_CYCLE_MEMORY=4
+    # shellcheck source=bin/fm-watch.sh
+    . "$WATCH"
+    expected='A B C D D E E'
+    actual=''
+    for hash in A B C D A E A; do
+      actual="${actual:+$actual }$(pane_progress_hash "$key" "$hash")"
+    done
+    [ "$actual" = "$expected" ] \
+      || fail "recent-hit trace returned [$actual], expected [$expected]"
+
+    printf 'D\nC\nB\nA\n' > "$state/.recent-legacy"
+    [ "$(pane_progress_hash legacy A)" = D ] \
+      || fail "legacy recent-capture memory did not preserve its progress anchor"
+    grep -Fx 'anchor=D' "$state/.recent-legacy" >/dev/null \
+      || fail "legacy recent-capture memory was not migrated"
+  )
+  pass "recent capture hits refresh eviction order without moving the progress anchor"
+}
+
 test_animated_pane_still_reaches_stale() {
   local dir state fakebin out drain_out phase_a phase_b counter window sig pid served
   dir=$(make_case animated-pane-gate); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1644,6 +1669,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_recent_capture_hit_refreshes_eviction_order
 test_animated_pane_still_reaches_stale
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
