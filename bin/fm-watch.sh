@@ -463,19 +463,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# Reset a window's wedge timer and escalation count, but ONLY on evidence of
-# genuine activity - a busy signature, which is the harness's own statement that
-# it is working. A capture that merely redrew is not that evidence.
+# Reset a window's wedge timer and escalation count on an unchanged progress
+# hash only when the harness's busy signature says it is working.
 #
 # The pre-2026-08 gate deleted both markers on every pane-hash change, which is
 # why FM_STALE_ESCALATE_SECS could never accumulate on a claude pane parked at a
 # permission dialog and the demand-deep-inspection escalation was unreachable for
 # that failure: the animated pending-tool-call glyph changed the capture every
 # few seconds and took the timer with it every time. pane_progress_hash already
-# stops an in-memory cycle from reading as a change, and this keeps the timer
-# honest for the churn that outlives that memory. It is the same reasoning
-# handle_paused_stale applies to the pause cadence (see there): an anchor a
-# churny idle pane can keep resetting is not an anchor.
+# stops an in-memory cycle from reading as a change, so those redraws reach this
+# helper with an unchanged progress hash and cannot reset the timer. A changed
+# progress hash is genuine new output by construction and resets the timer in
+# the stale loop before this helper is relevant.
 reset_wedge_timer_on_activity() {  # <window> <tail40> <since-file> <escalation-file>
   window_is_busy "$1" "$2" || return 0
   rm -f "$3" "$4"
@@ -1381,11 +1380,8 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
-              # Seeded, not restarted: the timer belongs to the WINDOW, not to
-              # this progress hash, so a window absorbed as stale without a break
-              # keeps one countdown even when its progress hash advances (a pane
-              # that redraws past PANE_CYCLE_MEMORY). Only genuine activity
-              # clears it - see reset_wedge_timer_on_activity.
+              # Seeded, not restarted: classification must not move the timer
+              # after the progress branch has decided this hash is unchanged.
               [ -s "$ssf" ] || date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
@@ -1425,8 +1421,8 @@ EOF
             case "$(pause_state_class "$w" "$task")" in
               working)
                 # clear_pause_state, not clear_pause_tracking: the pause family
-                # is what this transition invalidates. The wedge timer is not,
-                # and .stale-* is rewritten on the next line anyway.
+                # is what this transition invalidates, and .stale-* is rewritten
+                # on the next line anyway.
                 clear_pause_state "$w"
                 printf '%s' "$h" > "$sf"
                 [ -s "$ssf" ] || date +%s > "$ssf"
@@ -1465,7 +1461,11 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      reset_wedge_timer_on_activity "$w" "$tail40" "$ssf" "$ewf"
+      # pane_progress_hash changes only for a capture outside the recent window.
+      # That is genuine new output, so it resets wedge bookkeeping even without
+      # a busy footer. Recent redraws keep the same progress hash and can reset
+      # it only through the busy-signature path above.
+      rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
