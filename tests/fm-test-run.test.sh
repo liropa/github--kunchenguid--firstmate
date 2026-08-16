@@ -17,6 +17,28 @@ CONTRIB="$ROOT/CONTRIBUTING.md"
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
 
+ci_job_block() {
+  local job=$1
+  awk -v header="  $job:" '
+    $0 == header { found = 1 }
+    found && $0 != header && /^  [[:alnum:]_-]+:/ { exit }
+    found { print }
+  ' "$CI"
+}
+
+assert_serial_job_setup() {
+  local job=$1 block setup
+  block=$(ci_job_block "$job")
+  [ -n "$block" ] || fail "CI job block missing: $job"
+  for setup in \
+    'Install pinned ShellCheck' \
+    'Require tmux for e2e tests' \
+    'npm install -g tasks-axi'; do
+    [ "$(printf '%s\n' "$block" | grep -Fc "$setup")" = "1" ] \
+      || fail "$job must contain shared setup exactly once: $setup"
+  done
+}
+
 test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
@@ -377,10 +399,10 @@ test_ci_and_docs_call_the_owner() {
     fail "CI must not restore the unsplit portable serial lane"
   fi
   # Both halves run stateful work, so neither may lose the shared tool setup.
-  [ "$(grep -c 'Require tmux for e2e tests' "$CI")" = "2" ] \
-    || fail "both portable serial halves must require tmux"
-  [ "$(grep -c 'npm install -g tasks-axi' "$CI")" = "2" ] \
-    || fail "both portable serial halves must install tasks-axi"
+  local serial_job
+  for serial_job in tests-portable-serial-1 tests-portable-serial-2; do
+    assert_serial_job_setup "$serial_job"
+  done
   grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
     || fail "CI must run the coverage guard"
   grep -Fq 'tests-herdr:' "$CI" \
