@@ -360,14 +360,27 @@ test_ci_and_docs_call_the_owner() {
     || fail "CI must define portable parallel shard 1"
   grep -Fq 'tests-portable-parallel-2:' "$CI" \
     || fail "CI must define portable parallel shard 2"
-  grep -Fq 'tests-portable-serial:' "$CI" \
-    || fail "CI must define the portable serial lane"
+  grep -Fq 'tests-portable-serial-1:' "$CI" \
+    || fail "CI must define portable serial half 1"
+  grep -Fq 'tests-portable-serial-2:' "$CI" \
+    || fail "CI must define portable serial half 2"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI" \
     || fail "CI shard 1 must invoke --lane portable-parallel-1"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
     || fail "CI shard 2 must invoke --lane portable-parallel-2"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
-    || fail "CI portable serial must invoke --lane portable-serial"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial-1' "$CI" \
+    || fail "CI portable serial 1 must invoke --lane portable-serial-1"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial-2' "$CI" \
+    || fail "CI portable serial 2 must invoke --lane portable-serial-2"
+  # The single unsplit lane had grown into its own cap; it must not come back.
+  if grep -Eq '^[[:space:]]*tests-portable-serial:' "$CI"; then
+    fail "CI must not restore the unsplit portable serial lane"
+  fi
+  # Both halves run stateful work, so neither may lose the shared tool setup.
+  [ "$(grep -c 'Require tmux for e2e tests' "$CI")" = "2" ] \
+    || fail "both portable serial halves must require tmux"
+  [ "$(grep -c 'npm install -g tasks-axi' "$CI")" = "2" ] \
+    || fail "both portable serial halves must install tasks-axi"
   grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
     || fail "CI must run the coverage guard"
   grep -Fq 'tests-herdr:' "$CI" \
@@ -384,8 +397,8 @@ test_ci_and_docs_call_the_owner() {
     || fail "Herdr CI job must use bounded lab cleanup"
   grep -Fq 'tests-timing-aggregate:' "$CI" \
     || fail "CI must aggregate per-lane timing artifacts"
-  grep -Fq 'timeout-minutes: 20' "$CI" \
-    || fail "portable serial hang tripwire must be timeout-minutes: 20"
+  [ "$(grep -c 'timeout-minutes: 20' "$CI")" = "2" ] \
+    || fail "both portable serial halves must keep the 20m hang tripwire"
   grep -Fq 'timeout-minutes: 10' "$CI" \
     || fail "portable parallel shards must keep a hang tripwire (10m)"
   # Interim full-suite 25m portable timeout must not remain after sharding.
@@ -459,8 +472,54 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_portable_serial_halves_partition_the_remainder() {
+  local serial h1 h2 overlap tmp rc f
+  serial=$("$RUNNER" --list --lane portable-serial)
+  h1=$("$RUNNER" --list --lane portable-serial-1)
+  h2=$("$RUNNER" --list --lane portable-serial-2)
+  [ -n "$h1" ] && [ -n "$h2" ] || fail "both portable serial halves must be non-empty"
+  overlap=$(comm -12 <(printf '%s\n' "$h1" | LC_ALL=C sort) <(printf '%s\n' "$h2" | LC_ALL=C sort) || true)
+  [ -z "$overlap" ] || fail "portable serial halves overlap: $overlap"
+  [ "$(printf '%s\n' "$h1" "$h2" | LC_ALL=C sort -u)" = \
+    "$(printf '%s\n' "$serial" | LC_ALL=C sort -u)" ] \
+    || fail "portable serial halves must equal the portable serial remainder"
+  # The balance rests on half 1 owning the two heaviest measured scripts; assert
+  # those anchors so a silent reshuffle back into one lane is caught here.
+  printf '%s\n' "$h1" | grep -Fq 'tests/fm-spawn-launch-delivery.test.sh' \
+    || fail "portable serial half 1 must own the spawn launch delivery test"
+  printf '%s\n' "$h1" | grep -Fq 'tests/fm-pr-check-security.test.sh' \
+    || fail "portable serial half 1 must own the PR check security test"
+  # Stateful families stay serial: neither half may leak into a parallel shard.
+  printf '%s\n' "$h1" "$h2" | grep -Fq 'tests/fm-watcher-lock.test.sh' \
+    || fail "watcher lock test must stay in a serial half"
+  "$RUNNER" --list --proven-isolated | grep -Fq 'tests/fm-watcher-lock.test.sh' \
+    && fail "watcher lock test must not enter the proven-isolated set"
+  # A half-1 entry that drifts out of the remainder must refuse, not double-run.
+  # fm-lint.test.sh is proven-isolated, so pointing half 1 at it is exactly the
+  # drift that would otherwise run one script in a serial half and a shard both.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-serial-half.XXXXXX")
+  mkdir -p "$tmp/bin" "$tmp/tests"
+  cp "$RUNNER" "$tmp/bin/fm-test-run.sh"
+  for f in "$ROOT"/tests/*.test.sh; do
+    [ -f "$f" ] || continue
+    : >"$tmp/tests/$(basename "$f")"
+  done
+  sed -i.bak 's#^tests/fm-backend\.test\.sh$#tests/fm-lint.test.sh#' "$tmp/bin/fm-test-run.sh"
+  rm -f "$tmp/bin/fm-test-run.sh.bak"
+  set +e
+  "$tmp/bin/fm-test-run.sh" --list --lane portable-serial-1 >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "half 1 listing a non-remainder script must refuse (exit 2), got $rc"
+  grep -Fq 'not in the portable-serial remainder' "$tmp/err" \
+    || fail "drift refusal message missing: $(cat "$tmp/err")"
+  rm -rf "$tmp"
+  pass "portable serial halves partition the remainder and refuse drift"
+}
+
 test_jobs_requires_proven_isolated() {
-  local tmp rc
+  local tmp rc lane
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
   set +e
   "$RUNNER" --jobs 2 --lane portable-serial >"$tmp/out" 2>"$tmp/err"
@@ -469,6 +528,15 @@ test_jobs_requires_proven_isolated() {
   [ "$rc" -eq 2 ] || fail "--jobs with portable-serial must refuse (exit 2), got $rc"
   grep -Fq 'not in the proven-isolated set' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
+  # Splitting the remainder across runners must not open a concurrency door in
+  # either half; both stay serial-only locally too.
+  for lane in portable-serial-1 portable-serial-2; do
+    set +e
+    "$RUNNER" --jobs 2 --lane "$lane" >"$tmp/out-$lane" 2>"$tmp/err-$lane"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || fail "--jobs with $lane must refuse (exit 2), got $rc"
+  done
   set +e
   "$RUNNER" --jobs 2 tests/fm-watcher-lock.test.sh >"$tmp/out2" 2>"$tmp/err2"
   rc=$?
@@ -653,6 +721,7 @@ test_fail_on_gate_skip_token
 test_exclude_family
 test_ci_and_docs_call_the_owner
 test_portable_shard_union_and_coverage_guard
+test_portable_serial_halves_partition_the_remainder
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json

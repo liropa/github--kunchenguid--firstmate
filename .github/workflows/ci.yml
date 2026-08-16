@@ -25,7 +25,8 @@ jobs:
       - run: bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
-  # equal the complete tests/*.test.sh inventory with no missing or duplicates.
+  # equal the complete tests/*.test.sh inventory with no missing or duplicates,
+  # and that the two serial halves partition the serial remainder exactly.
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
@@ -94,12 +95,21 @@ jobs:
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
-  tests-portable-serial:
-    name: Behavior portable serial
+  #
+  # The remainder is split across two runners because it had grown into its own
+  # cap: on c1b65de the single lane finished in 19m52s against a 20m tripwire,
+  # leaving 8 seconds. Each half still runs one script at a time, so no stateful
+  # test gains a concurrent neighbour - only the machine boundary moves, and two
+  # GitHub runners are separate VMs with separate filesystems, process tables,
+  # and tmux servers. Both halves therefore need the identical tool setup below;
+  # keep the two step lists identical. Composition owner: bin/fm-test-run.sh
+  # (docs/fm-test-portable-shards.md).
+  tests-portable-serial-1:
+    name: Behavior portable serial 1
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
+    # Measured half is ~10.1 min of script time (docs/fm-test-portable-shards.md).
+    # Cap is a hang tripwire at roughly twice the healthy wall, not the expected
+    # healthy end. Rebalance membership when a half passes ~12 min; do not raise.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -123,18 +133,60 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable serial remainder
+      - name: Run portable serial half 1
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
-      - name: Upload portable serial timing artifact
+          bin/fm-test-run.sh --lane portable-serial-1 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-1.json"
+      - name: Upload portable serial 1 timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-portable-serial
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
+          name: fm-test-timing-portable-serial-1
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-1.json
+          if-no-files-found: warn
+
+  tests-portable-serial-2:
+    name: Behavior portable serial 2
+    runs-on: ubuntu-latest
+    # Measured half is ~9.7 min of script time. Same tripwire contract as half 1.
+    # New stateful tests land here by complement, so watch this half for drift.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Require tmux for e2e tests
+        run: |
+          set -eu
+          command -v tmux >/dev/null || {
+            echo "::error::tmux is required for real afk injection e2e coverage"
+            exit 1
+          }
+          tmux -V
+      - name: Install tasks-axi for backlog-handoff delegation
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - name: Run portable serial half 2
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --lane portable-serial-2 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-2.json"
+      - name: Upload portable serial 2 timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-portable-serial-2
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-2.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
@@ -262,7 +314,8 @@ jobs:
     needs:
       - tests-portable-parallel-1
       - tests-portable-parallel-2
-      - tests-portable-serial
+      - tests-portable-serial-1
+      - tests-portable-serial-2
       - tests-herdr
     if: always()
     steps:
