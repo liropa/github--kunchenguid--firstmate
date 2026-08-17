@@ -43,6 +43,12 @@
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     The recheck reads the attributed run's step logs before the pane, because a
+#     crew blocked inside a BLOCKING gate call idles while its pipeline works
+#     elsewhere and the pane cannot show that. An advancing run resets the timer;
+#     a run that has stopped writing escalates on the SAME bound, reported against
+#     the run rather than the pane. The latency guarantee is unchanged either way -
+#     nothing here lengthens a timer or suppresses an alarm.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -428,16 +434,33 @@ classify_unknown() {  # <reason>
 _stale_key() { fm_state_key_encode "$1"; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
-  local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  local win=$1 state=$2 key marker task out class rid
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
   marker="$state/.subsuper-stale-$key"
-  [ -e "$marker" ] || _now > "$marker"
+  [ -e "$marker" ] && return 0
+  _now > "$marker"
+  # Seed this stale episode's pipeline-progress witness, so the housekeeping
+  # recheck can tell a crew blocked inside a BLOCKING gate call - idle by
+  # construction, while its run keeps writing step logs - from a wedged one, whose
+  # run writes nothing. Costs one crew-state read per episode, never per tick,
+  # because only the marker-creating branch reaches here. See fm-classify-lib.sh's
+  # run_log_witness.
+  out=$(crew_absorb_read "$task")
+  IFS=$'\t' read -r class rid <<< "$out"
+  if [ "$class" = working ] && [ -n "$rid" ]; then
+    printf '%s' "$rid" > "$state/.subsuper-run-id-$key"
+    run_log_witness "$rid" > "$state/.subsuper-run-witness-$key"
+  else
+    rm -f "$state/.subsuper-run-id-$key" "$state/.subsuper-run-witness-$key"
+  fi
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-stale-$key"
+  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-run-id-$key" \
+    "$state/.subsuper-run-witness-$key"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
@@ -464,8 +487,10 @@ clear_pause_tracking() {  # <window> <state>
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+    "$state/.subsuper-run-id-$key" "$state/.subsuper-run-witness-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
-    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
+    "$state/.run-id-$watcher_key" "$state/.run-witness-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -955,7 +980,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs run_id
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1008,11 +1033,25 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    # Ask the pipeline before blaming the pane. stale_window_is_busy below reads
+    # only the pane, which cannot see a crew blocked in a blocking gate call, so
+    # every such crew escalated here as a possible wedge. An advancing run resets
+    # the timer instead; with no run, no logs, or a frozen witness this falls
+    # straight through and escalates on the unchanged schedule.
+    run_id=$(cat "$state/.subsuper-run-id-$key" 2>/dev/null || true)
+    if run_progress_advanced "$run_id" "$state/.subsuper-run-witness-$key"; then
+      _now > "$marker"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      *) if [ -n "$run_id" ]; then
+           escalate_add "$state" "run $run_id has not advanced in ${age}s (no step log written; inspect the run, not the pane): $win"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+         fi
          stale_marker_remove "$win" "$state" ;;
     esac
   done

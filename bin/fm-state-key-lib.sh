@@ -204,6 +204,8 @@ fm_state_watch_target_prefixes() {
 .stale-
 .stale-since-
 .wedge-escalations-
+.run-id-
+.run-witness-
 .blind-
 .paused-
 .paused-rechecked-
