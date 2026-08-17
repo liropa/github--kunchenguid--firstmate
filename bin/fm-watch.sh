@@ -626,6 +626,14 @@ surface_nonterminal_stale() {  # <window> <hash>
 # denial is an environment fact, not a bug to retry) reports once instead of
 # spinning the supervisor. A successful capture deletes the counter, re-arming
 # the alarm for the next run.
+# The one-alarm guarantee holds while the threshold stays fixed for the blind
+# run, as BLIND_CAPTURE_POLLS is a configuration constant read at startup, not
+# a value changed while a watcher runs. Changing FM_BLIND_CAPTURE_POLLS during
+# blindness can suppress that run's alarm when lowered below the count or cause
+# a second alarm when raised after one fired; a successful capture still clears
+# the count and re-arms it. Persisting alarm state separately was considered
+# and declined because it would grow durable machinery around a deliberately
+# small fix for a case unreachable in normal operation.
 #
 # A stale: reason keyed by the window, not a new wake kind, because the handling
 # it needs is the one AGENTS.md section 8 already prescribes for stale: inspect
