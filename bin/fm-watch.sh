@@ -35,6 +35,13 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
+#   stale: <window> (pane unreadable ...)
+#                          the window's pane could not be CAPTURED at all for
+#                          FM_BLIND_CAPTURE_POLLS consecutive polls, so every
+#                          pane-derived alarm above is off for that window and
+#                          the watcher is saying so rather than skipping it in
+#                          silence. Always actionable, afk or not. See
+#                          blind_capture_check.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
@@ -211,6 +218,14 @@ PANE_CYCLE_MEMORY=${FM_PANE_CYCLE_MEMORY:-4}
 case "$PANE_CYCLE_MEMORY" in
   ''|*[!0-9]*) PANE_CYCLE_MEMORY=4 ;;
   *) (( 10#$PANE_CYCLE_MEMORY > 0 )) || PANE_CYCLE_MEMORY=4 ;;
+esac
+# Consecutive FAILED pane captures for one window before the watcher says it
+# cannot see that window. See blind_capture_check for why a threshold exists
+# and why this is the value.
+BLIND_CAPTURE_POLLS=${FM_BLIND_CAPTURE_POLLS:-3}
+case "$BLIND_CAPTURE_POLLS" in
+  ''|*[!0-9]*) BLIND_CAPTURE_POLLS=3 ;;
+  *) (( 10#$BLIND_CAPTURE_POLLS > 0 )) || BLIND_CAPTURE_POLLS=3 ;;
 esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -587,6 +602,51 @@ surface_nonterminal_stale() {  # <window> <hash>
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
   wake "stale: $win"
+}
+
+# A pane the watcher CANNOT READ is not a window that is fine. The poll loop
+# used to end its capture with `|| continue`, and the heartbeat backstop cannot
+# compensate because scan_captain_relevant_statuses reads state/*.status and
+# never touches a backend. A watcher that could read no pane at all therefore
+# kept absorbing heartbeats on schedule and kept touching .last-watcher-beat -
+# alive to the guard, alive in the log, every pane-derived alarm silently off
+# (data/worker-pane-blocked-invisible section 6; a capture denied by the
+# sandbox fails exactly that way on this host).
+#
+# The threshold is what keeps an occasional miss quiet: a backend hiccup, a
+# tmux server restart, a herdr API blip or a briefly unavailable target costs
+# one or two captures and must not wake anyone. BLIND_CAPTURE_POLLS=3 is
+# deliberately the same "not a one-off" bar the stale gate itself applies -
+# three consecutive captures, so the condition has held across two full poll
+# intervals (30s at the default FM_POLL=15) - rather than a second threshold
+# chosen independently of it.
+#
+# One alarm per unbroken blind run: the count outlives the wake's exit and a
+# watcher re-arm, so a blindness firstmate cannot immediately fix (a sandbox
+# denial is an environment fact, not a bug to retry) reports once instead of
+# spinning the supervisor. A successful capture deletes the counter, re-arming
+# the alarm for the next run.
+#
+# A stale: reason keyed by the window, not a new wake kind, because the handling
+# it needs is the one AGENTS.md section 8 already prescribes for stale: inspect
+# the recorded endpoint, and load stuck-crewmate-recovery when that endpoint is
+# the problem.
+blind_capture_check() {  # <window> <count-file>
+  local win=$1 file=$2 n reason
+  n=$(cat "$file" 2>/dev/null || echo 0)
+  case "$n" in
+    ''|*[!0-9]*) n=0 ;;
+  esac
+  n=$(( n + 1 ))
+  echo "$n" > "$file"
+  if [ "$n" -eq "$BLIND_CAPTURE_POLLS" ]; then
+    reason="stale: $win (pane unreadable - $n consecutive capture failures; supervision cannot see this window, so every pane-derived alarm for it is off until a capture succeeds)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    wake "$reason"
+  fi
+  if [ "$n" -lt "$BLIND_CAPTURE_POLLS" ]; then
+    triage_log "absorbed unreadable pane (capture failure $n of $BLIND_CAPTURE_POLLS, still within the transient allowance): $win"
+  fi
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -1330,7 +1390,12 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # A failed capture is reported, not skipped in silence: blind_capture_check.
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      blind_capture_check "$w" "$STATE/.blind-$key"
+      continue
+    fi
+    rm -f "$STATE/.blind-$key"
     h_raw=$(printf '%s' "$tail40" | hash_pane)
     h=$(pane_progress_hash "$key" "$h_raw")
     hf="$STATE/.hash-$key"

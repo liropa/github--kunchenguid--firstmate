@@ -87,6 +87,28 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  # Capture FAILURE, off unless FM_FAKE_TMUX_CAPTURE_FAIL is set. On the
+  # measured host a sandboxed capture fails exactly this way - "error
+  # connecting to /private/tmp/tmux-501/default (Operation not permitted)",
+  # exit 1 - and the watcher used to skip such a window in silence.
+  # The value is a pattern CYCLED one character per capture call: `x` fails,
+  # anything else serves the normal capture. So `x` is a permanently blind
+  # backend and `xx.` is an intermittent one that never misses three captures
+  # in a row, which is the case that must stay quiet. Cycling (not
+  # first-n-then-serve) keeps the intermittent case unbounded, so a test cannot
+  # pass merely by running out of failures. Calls are counted in
+  # FM_FAKE_TMUX_CAPTURE_FAIL_COUNT, which a test also reads to prove the
+  # fixture really served the captures it claims.
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL:-}" ]; then
+    _c="${FM_FAKE_TMUX_CAPTURE_FAIL_COUNT:-/dev/null}"
+    _n=$(( $(cat "$_c" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$_n" > "$_c"
+    _i=$(( (_n - 1) % ${#FM_FAKE_TMUX_CAPTURE_FAIL} ))
+    if [ "${FM_FAKE_TMUX_CAPTURE_FAIL:$_i:1}" = "x" ]; then
+      printf 'error connecting to /fake/tmux/socket (Operation not permitted)\n' >&2
+      exit 1
+    fi
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE_SEQUENCE:-}" ]; then
     _n=$(( $(cat "$FM_FAKE_TMUX_CAPTURE_SEQUENCE" 2>/dev/null || echo 0) + 1 ))
     printf '%s' "$_n" > "$FM_FAKE_TMUX_CAPTURE_SEQUENCE"

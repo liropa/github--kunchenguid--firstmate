@@ -194,6 +194,28 @@ Two limits are inherent to hashing the raw capture and are not closed here:
 herdr needs none of this: `push_block_dwell_check` escalates a natively-reported blocked pane after `FM_PUSH_BLOCK_DWELL` and runs before the capture, so neither the gate nor a capture failure can suppress it.
 This is what lets the tmux poll path reach the same state herdr reaches natively.
 
+## An unreadable pane is reported, not skipped (2026-08-16)
+
+Everything above assumes the capture succeeded.
+`bin/fm-watch.sh` used to end that capture with `|| continue`, so a failed capture skipped the window with no triage line and no wake.
+The heartbeat backstop cannot compensate, because `scan_captain_relevant_statuses` reads `state/*.status` and never touches a backend.
+A watcher that could read no pane at all therefore kept absorbing heartbeats on schedule and kept touching `state/.last-watcher-beat`: alive to the guard, alive in its own log, and every pane-derived alarm silently off.
+
+<!-- fm-authority: firstmate-observation 2026-08-15 - measured on the captain's host by the worker-pane-blocked-invisible investigation, section 6; a checkout cannot reproduce a sandbox denial -->
+That failure is reachable on this host rather than hypothetical.
+A sandboxed `tmux capture-pane -p -t <target> -S -40` fails with `error connecting to /private/tmp/tmux-501/default (Operation not permitted)` and exit 1, and `bin/fm-crew-state.sh` then reports `backend target gone` for a window that is present and running.
+<!-- /fm-authority -->
+
+`blind_capture_check` now counts consecutive capture failures per window in `state/.blind-<key>` and surfaces a `stale:` wake naming the pane unreadable once the count reaches `FM_BLIND_CAPTURE_POLLS` (default 3).
+Three is the same "not a one-off" bar the progress gate applies, so a transient miss costs one or two captures and wakes nobody, while a sustained blindness is reported within two poll intervals.
+The alarm fires once per unbroken blind run: the count survives the wake's exit and a watcher re-arm, so a blindness that cannot be fixed on the spot reports once instead of spinning the supervisor, and a successful capture deletes the count and re-arms the alarm.
+It is a `stale:` reason keyed by the window rather than a new wake kind, because the handling it needs is the one `AGENTS.md` section 8 already prescribes for `stale:`.
+
+`tests/fm-watch-triage.test.sh` covers both halves.
+`test_blind_capture_surfaces_after_threshold` fails against the previous `|| continue`, where the watcher stays silent and alive.
+`test_intermittent_capture_failure_stays_quiet` holds an unbounded fail/fail/succeed cycle silent, which is also what proves the count resets on a success.
+Both are fixture-driven; no live-host run was taken for this change, so the sandbox denial recorded above remains the investigation's measurement rather than a fresh one.
+
 ## Limitations
 
 The reference path is fully verified, with two probe-specific limitations:
