@@ -790,6 +790,13 @@ test_concurrent_watcher_sees_only_complete_publication() {
 sleep 0.3
 SH
     chmod +x "$dir/fakebin/cp"
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = capture-pane ]; then
+  printf 'publishing poll\nesc to interrupt\n'
+fi
+SH
+    chmod +x "$dir/fakebin/tmux"
 
     FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
