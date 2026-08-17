@@ -209,6 +209,10 @@ A sandboxed `tmux capture-pane -p -t <target> -S -40` fails with `error connecti
 `blind_capture_check` now counts consecutive capture failures per window in `state/.blind-<key>` and surfaces a `stale:` wake naming the pane unreadable once the count reaches `FM_BLIND_CAPTURE_POLLS` (default 3).
 Three is the same "not a one-off" bar the progress gate applies, so a transient miss costs one or two captures and wakes nobody, while a sustained blindness is reported within two poll intervals.
 The alarm fires once per unbroken blind run: the count survives the wake's exit and a watcher re-arm, so a blindness that cannot be fixed on the spot reports once instead of spinning the supervisor, and a successful capture deletes the count and re-arms the alarm.
+<!-- fm-authority: captain-decision 2026-08-17 - the captain reviewed this exact edge case at the review gate and chose to accept it rather than add durable alarm state -->
+That one-alarm guarantee assumes a fixed threshold for the blind run, as `BLIND_CAPTURE_POLLS` is read at watcher startup.
+Changing `FM_BLIND_CAPTURE_POLLS` during blindness can suppress the alarm when lowered below the count or cause a second alarm when raised after one fired; a successful capture still re-arms it, and separate durable alarm state was declined as unnecessary machinery for a case unreachable in normal operation.
+<!-- /fm-authority -->
 It is a `stale:` reason keyed by the window rather than a new wake kind, because the handling it needs is the one `AGENTS.md` section 8 already prescribes for `stale:`.
 
 `tests/fm-watch-triage.test.sh` covers both halves.
