@@ -957,6 +957,55 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 
+# Away mode shares fm-classify-lib.sh with the always-on watcher, so the
+# blocking-gate-call false positive lived here too: housekeeping decided purely on
+# stale_window_is_busy, a PANE read, which cannot see that a crew is blocked inside
+# a gate call while its pipeline works elsewhere. Under away mode that false alarm
+# is worse than a stray wake - it is INJECTED at the captain.
+test_afk_gate_blocked_crew_is_not_wedge_escalated() {
+  local dir state key win pane fakebin logs run_id
+  dir=$(make_supercase afk-gate-blocked)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-gateblocked"; pane="$dir/pane.txt"
+  run_id=01AFKGATEBLOCKED; logs="$dir/nmlogs"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf 'working: implementation committed\n' > "$state/gateblocked.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(fm_state_key_encode "gateblocked")
+  mkdir -p "$logs/$run_id"
+  printf 'running tests\n' > "$logs/$run_id/test.log"
+  export FM_FAKE_CREW_STATE="state: working · source: run-step · validating (running) · run: $run_id"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_NM_LOGS_DIR="$logs"
+
+  FM_STATE_OVERRIDE="$state" stale_marker_record "$win" "$state"
+  [ "$(cat "$state/.subsuper-run-id-$key" 2>/dev/null || true)" = "$run_id" ] \
+    || fail "the stale episode did not record the attributed run id"
+  [ -s "$state/.subsuper-run-witness-$key" ] || fail "the stale episode did not seed a run witness"
+
+  # Age past the escalate bound, and let the pipeline advance while the pane stays
+  # idle: the gate call blocks the worker, so only the run writes anything.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  printf 'test 12 passed\n' >> "$logs/$run_id/test.log"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a crew blocked in a gate call was escalated while its pipeline advanced: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "the advancing-pipeline reset dropped the stale marker"
+
+  # The other half: once the run stops writing, the SAME schedule still escalates,
+  # named as a stalled run rather than blamed on the pane.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "a stalled pipeline was absorbed instead of escalating on the unchanged schedule"
+  grep -q 'has not advanced' "$state/.subsuper-escalations" \
+    || fail "a non-advancing run was reported as a pane wedge: $(cat "$state/.subsuper-escalations")"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN FM_NM_LOGS_DIR
+  pass "away mode absorbs a gate-blocked crew while its pipeline advances, and still escalates a stalled run on schedule"
+}
+
 test_afk_genuine_done_still_terminal_stale() {
   local dir state out
   dir=$(make_supercase afk-genuine-done-stale)
@@ -1837,6 +1886,7 @@ test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
+test_afk_gate_blocked_crew_is_not_wedge_escalated
 test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending

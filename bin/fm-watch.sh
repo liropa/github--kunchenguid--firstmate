@@ -200,7 +200,11 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Idle secs before a provably-working stale escalates as a possible wedge. The
+# timer measures the PIPELINE's idleness, not the pane's, whenever a run is
+# attributed: see wedge_timer_check for why a pane-only reading cannot tell a crew
+# blocked in a gate call from a wedged one.
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}
 # Blocked secs a pane on the native push path must sustain before its blocked
 # edge escalates - the same duration predicate STALE_ESCALATE_SECS applies on the
 # poll path, at a much shorter threshold so a genuinely stuck crew is still
@@ -448,13 +452,35 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
+# can be absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+#
+# It never re-reads the crew state - that costly check ran once, at
+# classification time - but when that classification recorded an attributed run
+# id it DOES re-read the pipeline, which is free (fm-classify-lib.sh's
+# run_log_witness: a glob and a stat over the run's step logs). That read is what
+# separates the two idle panes this timer used to conflate. A crew sitting in a
+# BLOCKING gate call is idle because the call blocks while the pipeline works
+# elsewhere, so its run keeps writing step logs; a wedged crew's does not. Both
+# false-positive observations of 2026-08-17 - a review step advancing its run head
+# through real fix commits, and `validating (running)` disagreeing with the pane at
+# the same instant - are pipeline progress this witness sees and pane capture
+# cannot. Absorbing on that evidence is not a suppression: with no id, no logs, or
+# a frozen witness the timer ages and fires exactly as before, so a crew that is
+# genuinely wedged, and a pipeline that has genuinely stalled, both still escalate
+# within STALE_ESCALATE_SECS of going quiet.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason key run_id stalled
+  key=$(fm_state_key_encode "$win")
+  run_id=$(cat "$STATE/.run-id-$key" 2>/dev/null || true)
+  if run_progress_advanced "$run_id" "$STATE/.run-witness-$key"; then
+    date +%s > "$since_file"
+    rm -f "$escalation_file"
+    triage_log "absorbed $label (pipeline advancing, run $run_id): $win"
+    return
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -466,9 +492,16 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        # An attributed run whose logs stopped moving points at the RUN, not the
+        # pane, so the reason says which one to inspect. It states only what was
+        # measured - no step log written - because a run that simply finished stops
+        # writing too, and this fix exists precisely because an alarm that overstates
+        # its evidence trains a supervisor to discount it.
+        stalled=""
+        [ -n "$run_id" ] && stalled=" (run $run_id has not advanced in ${age}s: no step log written - inspect the run, not the pane)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)$stalled"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)$stalled"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -491,8 +524,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # progress hash is genuine new output by construction and resets the timer in
 # the stale loop before this helper is relevant.
 reset_wedge_timer_on_activity() {  # <window> <tail40> <since-file> <escalation-file>
+  local key
   window_is_busy "$1" "$2" || return 0
-  rm -f "$3" "$4"
+  key=$(fm_state_key_encode "$1")
+  rm -f "$3" "$4" "$STATE/.run-id-$key" "$STATE/.run-witness-$key"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -510,7 +545,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(fm_state_key_encode "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.run-id-$key" "$STATE/.run-witness-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -536,7 +572,27 @@ clear_pause_tracking() {  # <window>
   local win=$1 key
   key=$(fm_state_key_encode "$win")
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.run-id-$key" "$STATE/.run-witness-$key"
+}
+
+# crew_absorb_class, plus the bookkeeping that lets the per-poll wedge witness work:
+# the same single read also yields the attributed run id, recorded here so
+# wedge_timer_check knows which run's step logs to stat. Recorded ONLY for a
+# working verdict, and cleared otherwise, so a crew that stops having a live run
+# cannot leave a stale id behind that would keep answering for it. Class semantics
+# are unchanged - callers still see exactly working/paused/none.
+absorb_class_recording_run() {  # <window> <task>
+  local win=$1 task=$2 key out class rid
+  key=$(fm_state_key_encode "$win")
+  out=$(crew_absorb_read "$task")
+  IFS=$'\t' read -r class rid <<< "$out"
+  if [ "$class" = working ] && [ -n "$rid" ]; then
+    printf '%s' "$rid" > "$STATE/.run-id-$key"
+  else
+    rm -f "$STATE/.run-id-$key" "$STATE/.run-witness-$key"
+  fi
+  printf '%s' "$class"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -549,7 +605,7 @@ pause_state_class() {  # <window> <task>
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    absorb_class_recording_run "$win" "$task"
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
@@ -564,7 +620,7 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  class=$(absorb_class_recording_run "$win" "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
@@ -1451,7 +1507,7 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if [ "$(absorb_class_recording_run "$w" "$(window_to_task "$w" "$STATE")")" = working ]; then
               printf '%s' "$h" > "$sf"
               # Seeded, not restarted: classification must not move the timer
               # after the progress branch has decided this hash is unchanged.

@@ -1553,6 +1553,159 @@ SH
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
+# --- blocking gate call vs a real wedge --------------------------------------
+# A crew sitting in a BLOCKING `no-mistakes` gate call has a genuinely idle pane:
+# the call blocks while the pipeline works in the shared daemon. Pane capture
+# alone cannot tell it from a wedged crew, so the wedge timer used to escalate
+# every one of them - a false alarm carrying the same durable signature as a real
+# one. The discriminator is the pipeline's own step logs, which keep moving for the
+# blocked crew and stop for the wedged one.
+
+# Set up a fake no-mistakes run log directory and return its witness.
+seed_run_logs() {  # <logs-dir> <run-id> <step> <content>
+  mkdir -p "$1/$2"
+  printf '%s\n' "$4" > "$1/$2/$3.log"
+}
+
+test_run_progress_witness_predicates() {
+  local dir logs w1 wf
+  dir=$(make_case run-witness)
+  local FM_NM_LOGS_DIR="$dir/nmlogs"
+  logs="$FM_NM_LOGS_DIR"; wf="$dir/witness"
+
+  crew_state_run_id 'state: working · source: run-step · validating (running) · run: 01RUNID9' \
+    | grep -qx '01RUNID9' || fail "crew_state_run_id did not parse an attributed run id"
+  [ -z "$(crew_state_run_id 'state: working · source: pane · harness busy')" ] \
+    || fail "crew_state_run_id invented an id for a pane verdict"
+  # The id names a directory, so a traversal attempt must be refused, not joined.
+  [ -z "$(crew_state_run_id 'state: working · source: run-step · run: ../../etc')" ] \
+    || fail "crew_state_run_id accepted a path-traversal run id"
+
+  [ -z "$(run_log_witness '')" ] || fail "run_log_witness invented a witness for an empty id"
+  [ -z "$(run_log_witness 01ABSENT)" ] || fail "run_log_witness invented a witness for a run with no logs"
+
+  seed_run_logs "$logs" 01RUNID9 test 'running tests'
+  w1=$(run_log_witness 01RUNID9)
+  [ -n "$w1" ] || fail "run_log_witness produced nothing for a run with logs"
+  [ "$(run_log_witness 01RUNID9)" = "$w1" ] || fail "run_log_witness is not stable for unchanged logs"
+
+  # First observation has no baseline: no progress proven YET, so the caller must
+  # keep its existing schedule rather than spend a free window.
+  run_progress_advanced 01RUNID9 "$wf" && fail "run_progress_advanced claimed progress on its first observation"
+  run_progress_advanced 01RUNID9 "$wf" && fail "run_progress_advanced claimed progress for unchanged logs"
+  printf 'more output\n' >> "$logs/01RUNID9/test.log"
+  run_progress_advanced 01RUNID9 "$wf" || fail "run_progress_advanced missed an appended step log"
+  run_progress_advanced 01RUNID9 "$wf" && fail "run_progress_advanced did not re-baseline after progress"
+  # A fix commit landing writes a NEW step log - the shape of the run head
+  # advancing through real fix commits.
+  seed_run_logs "$logs" 01RUNID9 review 'applying fix 1'
+  run_progress_advanced 01RUNID9 "$wf" || fail "run_progress_advanced missed a new step log"
+  run_progress_advanced '' "$wf" && fail "run_progress_advanced claimed progress with no run id"
+  pass "run-progress witness: parses the run id safely, tracks step-log growth, and proves nothing without a baseline"
+}
+
+# Observation B (2026-08-17, task watch-blind-capture-loud): a stale possible-wedge
+# wake fired while the run-step reader reported `validating (running)` at the same
+# instant. The two readers disagreed and the run-step reader was right.
+test_gate_blocked_crew_is_not_wedge_escalated() {
+  local dir state fakebin out window key pane_hash sig pid logs run_id
+  dir=$(make_case gate-blocked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-gateblocked"; run_id=01GATEBLOCKED
+  logs="$dir/nmlogs"
+  printf 'idle building output' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/gateblocked.meta"
+  printf 'working: implementation committed\n' > "$state/gateblocked.status"
+  sig=$(seen_sig "$state/gateblocked.status"); printf '%s' "$sig" > "$(seen_path "$state" "gateblocked.status")"
+  key=$(fm_state_key_encode "$window")
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_run_logs "$logs" "$run_id" test 'running tests'
+  export FM_FAKE_CREW_STATE="state: working · source: run-step · validating (running) · run: $run_id"
+
+  # The crew was already absorbed as provably working and its wedge timer has run
+  # past the threshold: today that escalates on the next poll.
+  printf '%s' "$run_id" > "$state/.run-id-$key"
+  FM_NM_LOGS_DIR="$logs" run_log_witness "$run_id" > "$state/.run-witness-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # The pipeline advances while the pane stays byte-identical: the gate call is
+  # blocking, so the worker writes nothing and the run writes everything.
+  printf 'test 12 passed\n' >> "$logs/$run_id/test.log"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOGS_DIR="$logs" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher escalated a crew blocked in a gate call while its pipeline advanced: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "gate-blocked crew printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "gate-blocked crew enqueued a possible-wedge wake"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "advancing pipeline did not reset the wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "gate-blocked crew recorded a wedge escalation"; }
+  reap "$pid"
+
+  # Observation A (2026-08-17, agent-dotfiles secondmate): real fix commits landed
+  # mid-window, advancing the run head. That writes a new step log, which the
+  # witness must see just as it sees an appended one.
+  : > "$out"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  seed_run_logs "$logs" "$run_id" review 'applying fix 1 of 3'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOGS_DIR="$logs" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher escalated a crew whose run head advanced through fix commits: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an advancing run head still enqueued a possible-wedge wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew blocked in a gate call is not wedge-escalated while its pipeline advances"
+}
+
+# The other half of the discrimination: absorbing on pipeline progress must not
+# become a mute. A run that has genuinely stopped moving still escalates on the
+# SAME schedule, and says the pipeline stalled rather than blaming the pane.
+test_stalled_pipeline_still_escalates_on_schedule() {
+  local dir state fakebin out drain_out window key pane_hash sig pid logs run_id
+  dir=$(make_case pipeline-stalled); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-stalled"; run_id=01STALLEDRUN; logs="$dir/nmlogs"
+  printf 'idle building output' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stalled.meta"
+  printf 'working: implementation committed\n' > "$state/stalled.status"
+  sig=$(seen_sig "$state/stalled.status"); printf '%s' "$sig" > "$(seen_path "$state" "stalled.status")"
+  key=$(fm_state_key_encode "$window")
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_run_logs "$logs" "$run_id" test 'running tests'
+  export FM_FAKE_CREW_STATE="state: working · source: run-step · validating (running) · run: $run_id"
+
+  printf '%s' "$run_id" > "$state/.run-id-$key"
+  FM_NM_LOGS_DIR="$logs" run_log_witness "$run_id" > "$state/.run-witness-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # Nothing appends to the run's logs: the pipeline is frozen, not blocked.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOGS_DIR="$logs" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a stalled pipeline was absorbed instead of escalating on schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "stalled pipeline did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "stalled pipeline lost the possible-wedge signal"
+  grep -F "has not advanced" "$out" >/dev/null || fail "a non-advancing run was reported as a pane wedge, not a stalled run"
+  [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stalled-pipeline escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stalled-pipeline escalation was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a stalled pipeline still escalates on the unchanged schedule, named as a stalled run"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -1823,6 +1976,9 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
+test_run_progress_witness_predicates
+test_gate_blocked_crew_is_not_wedge_escalated
+test_stalled_pipeline_still_escalates_on_schedule
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status

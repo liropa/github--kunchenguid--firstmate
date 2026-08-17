@@ -486,7 +486,7 @@ signal_reason_is_actionable() {  # <file> ...
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
+# ("state: <s> · source: <src> · <detail>"). The classification is exactly one of:
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
@@ -500,18 +500,34 @@ signal_reason_is_actionable() {  # <file> ...
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+# Print "<class><TAB><run-id>" from ONE crew-state read, for callers that need the
+# attributed run id as well as the class. The run id is empty whenever none was
+# attributed (no run, a coarse runs-list bind, or a non-run-step verdict).
+# crew_absorb_class is the class-only facade over this, so either entry point costs
+# exactly one read - a caller wanting both facts must never call them both.
+crew_absorb_read() {  # <id>
+  local id=$1 line state src class=none rid=""
+  [ -n "$id" ] || { printf 'none\t'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
-  printf 'none'
+  case "$line" in
+    state:*)
+      state=${line#state: }; state=${state%% *}
+      if [ "$state" = paused ]; then
+        class=paused
+      elif [ "$state" = working ]; then
+        src=${line#*source: }; src=${src%% *}
+        case "$src" in run-step|pane) class=working ;; esac
+      fi
+      rid=$(crew_state_run_id "$line")
+      ;;
+  esac
+  printf '%s\t%s' "$class" "$rid"
+}
+
+crew_absorb_class() {  # <id>
+  local out
+  out=$(crew_absorb_read "$1")
+  printf '%s' "${out%%$'\t'*}"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
@@ -530,6 +546,84 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# --- run-progress witness ----------------------------------------------------
+# A crew blocked inside a BLOCKING `no-mistakes` gate call has a genuinely idle
+# pane: the call blocks while the pipeline works in the shared daemon. Pane
+# capture - the only evidence the wedge timer had - therefore cannot tell that
+# crew apart from a wedged one, because both are equally still. Asking the
+# PIPELINE separates them, because a live run leaves a trace the pane does not:
+# no-mistakes appends to per-step logs under its own run directory, and that
+# directory's name IS the run id `axi status` reports (verified 2026-08-17
+# against the installed v1.40.2: `no-mistakes axi logs --run <dir> --step lint`
+# answers `run: "<dir>"` with that directory's lint.log contents). Reading their
+# mtime and size costs a glob and a stat, never a CLI call, so unlike
+# crew_absorb_class this is cheap enough to run on every poll.
+FM_NM_LOGS_DIR="${FM_NM_LOGS_DIR:-${NO_MISTAKES_HOME:-$HOME/.no-mistakes}/logs}"
+
+# Portable mtime+size, resolved once rather than per log file. Linux stat lacks
+# -f, macOS stat lacks -c.
+if [ "$(uname 2>/dev/null)" = Darwin ]; then
+  _fm_stat_mtime_size() { stat -L -f '%m %z' "$1" 2>/dev/null; }
+else
+  _fm_stat_mtime_size() { stat -L -c '%Y %s' "$1" 2>/dev/null; }
+fi
+
+# Print the run id fm-crew-state.sh attributed to this crew, empty when it
+# attributed none. Parsed out of the emitted line's `run: <id>` detail field so
+# the caller pays for exactly ONE crew-state call and can then poll cheaply.
+crew_state_run_id() {  # <crew-state-line>
+  local line=$1 rest
+  case "$line" in *'run: '*) ;; *) return 0 ;; esac
+  rest=${line##*'run: '}
+  rest=${rest%% *}
+  # The id names a directory below, so anything outside the ULID alphabet is
+  # rejected rather than path-joined.
+  case "$rest" in ''|*[!0-9A-Za-z_-]*) return 0 ;; esac
+  printf '%s' "$rest"
+}
+
+# Print a fingerprint of a run's most recent log activity, empty when the run has
+# no readable logs. ANY change means the pipeline advanced - a step appending
+# output, a step transition, or a fix commit landing, since each writes its step
+# log. Deliberately not the run head alone: the head is static for the whole of a
+# long single step, so a head-only witness would still read a working test step as
+# frozen.
+run_log_witness() {  # <run-id>
+  local id=$1 f raw=""
+  [ -n "$id" ] || return 0
+  # The id is path-joined below, so re-check it here too: this is the function
+  # that builds the path, and it is also reached from the supervisors' recorded
+  # marker files rather than only from crew_state_run_id.
+  case "$id" in *[!0-9A-Za-z_-]*) return 0 ;; esac
+  for f in "$FM_NM_LOGS_DIR/$id"/*.log; do
+    [ -f "$f" ] || continue
+    raw="$raw${f##*/} $(_fm_stat_mtime_size "$f")
+"
+  done
+  # An unmatched glob must stay EMPTY rather than becoming a stable fingerprint:
+  # cksum digests empty input to a perfectly valid-looking constant, which would
+  # read as "this run has logs and they never change" - a permanent absorb.
+  [ -n "$raw" ] || return 0
+  printf '%s' "$raw" | sort | cksum | tr -d ' \n'
+}
+
+# 0 when this run's logs advanced since <witness-file> was last written (the file
+# is refreshed to the new witness), 1 when they did not - including a run with no
+# id, a run with no readable logs, and the first observation of all. A caller with
+# nothing to compare against has observed no progress YET, so it keeps its existing
+# escalation schedule rather than spending a free window on an unproven baseline.
+run_progress_advanced() {  # <run-id> <witness-file>
+  local id=$1 wf=$2 now prev
+  [ -n "$id" ] || return 1
+  now=$(run_log_witness "$id")
+  [ -n "$now" ] || return 1
+  prev=$(cat "$wf" 2>/dev/null || true)
+  printf '%s' "$now" > "$wf"
+  [ -n "$prev" ] || return 1
+  [ "$now" = "$prev" ] && return 1
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

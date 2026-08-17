@@ -19,6 +19,12 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# On a run-step verdict from the full `axi status` read, <detail> ends with
+# `run: <id>`, naming the attributed run's log directory. That id is what lets the
+# supervisors' wedge timers watch the PIPELINE for progress instead of the pane,
+# so a crew blocked inside a blocking gate call is not read as wedged; see
+# fm-classify-lib.sh's run_log_witness.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -802,6 +808,22 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
     else
       RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
+    fi
+  fi
+
+  # The attributed run's id, appended LAST so it cannot disturb the state/source
+  # prefix parsing consumers do. It names this run's log directory, which the
+  # supervisors' wedge timers stat to tell a crew blocked inside a gate call apart
+  # from a wedged one (fm-classify-lib.sh's run_log_witness). Only the full `axi
+  # status` read carries an id; the coarse runs-list fallback has none to give.
+  if [ "$RUN_SOURCE" = full ]; then
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    if [ -n "$RUN_ID" ]; then
+      if [ -n "$RUN_DETAIL" ]; then
+        RUN_DETAIL="$RUN_DETAIL${SEP}run: $RUN_ID"
+      else
+        RUN_DETAIL="run: $RUN_ID"
+      fi
     fi
   fi
 
