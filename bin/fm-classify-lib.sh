@@ -578,8 +578,12 @@ crew_state_run_id() {  # <crew-state-line>
   case "$line" in *'run: '*) ;; *) return 0 ;; esac
   rest=${line##*'run: '}
   rest=${rest%% *}
-  # The id names a directory below, so anything outside the ULID alphabet is
-  # rejected rather than path-joined.
+  # <!-- fm-authority: captain-decision 2026-08-17 - approved the path-safe-token contract over strict ULID validation; rationale cannot be derived from this diff -->
+  # External constraint: accept a path-safe token, not a format-validated ULID.
+  # Excluding '/' and '.' blocks traversal; stricter validation adds no security
+  # and couples this reader to another tool's identifier format. A format change
+  # would silently remove the progress evidence used to discriminate real wedges.
+  # <!-- /fm-authority -->
   case "$rest" in ''|*[!0-9A-Za-z_-]*) return 0 ;; esac
   printf '%s' "$rest"
 }
@@ -593,9 +597,8 @@ crew_state_run_id() {  # <crew-state-line>
 run_log_witness() {  # <run-id>
   local id=$1 f raw=""
   [ -n "$id" ] || return 0
-  # The id is path-joined below, so re-check it here too: this is the function
-  # that builds the path, and it is also reached from the supervisors' recorded
-  # marker files rather than only from crew_state_run_id.
+  # External constraint: re-check crew_state_run_id's path-safe-token contract
+  # here because recorded supervisor markers can reach this path join directly.
   case "$id" in *[!0-9A-Za-z_-]*) return 0 ;; esac
   for f in "$FM_NM_LOGS_DIR/$id"/*.log; do
     [ -f "$f" ] || continue
