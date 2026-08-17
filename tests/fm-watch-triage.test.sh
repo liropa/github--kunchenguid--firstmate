@@ -758,6 +758,70 @@ test_animated_pane_accumulates_wedge_timer() {
   pass "recent animated captures retain and escalate the wedge timer"
 }
 
+# --- a watcher that cannot SEE a pane says so -------------------------------
+# The stale machinery above all assumes the capture succeeded. When it fails the
+# poll loop used to `continue`: no triage line, no wake, and every pane-derived
+# alarm for that window silently off, while the heartbeat backstop kept
+# reporting the fleet healthy because it reads state/*.status and never touches
+# a backend. A watcher that could read no pane at all therefore looked alive to
+# the guard and alive in the log while supervising nothing
+# (data/worker-pane-blocked-invisible section 6). These two cases pin both
+# halves of the fix: a blind run is loud, and an intermittent miss is not.
+
+test_intermittent_capture_failure_stays_quiet() {
+  local dir state fakebin out counter window key pid served blind
+  dir=$(make_case intermittent-capture-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; counter="$dir/capture.count"
+  window="test:fm-flaky"
+  # The captures that DO succeed carry a busy footer, so the ordinary stale path
+  # can never fire here and the only wake this case can produce is a blind one.
+  printf 'building\nesc to interrupt\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/flaky.meta"
+  key=$(fm_state_key_encode "$window")
+
+  # `xx.` cycles forever: two failures, one success, repeat. The success must
+  # reset the counter - without that reset the third FAILURE (the fifth call)
+  # would reach the threshold and alarm, so staying silent here is exactly what
+  # proves the reset.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CAPTURE_FAIL='xx.' FM_FAKE_TMUX_CAPTURE_FAIL_COUNT="$counter" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 40 || { reap "$pid"; fail "an intermittently unreadable pane alarmed: $(cat "$out")"; }
+  served=$(cat "$counter" 2>/dev/null || echo 0)
+  reap "$pid"
+  [ "$served" -ge 9 ] || fail "the fixture served only $served captures, so three full fail/fail/succeed cycles never ran"
+  [ ! -s "$out" ] || fail "an intermittently unreadable pane produced a wake: $(cat "$out")"
+  blind=$(cat "$state/.blind-$key" 2>/dev/null || echo 0)
+  [ "$blind" -lt 3 ] || fail "consecutive-failure count reached $blind across a recovering capture"
+  pass "an occasional failed capture stays quiet and its count resets on the next success"
+}
+
+test_blind_capture_surfaces_after_threshold() {
+  local dir state fakebin out drain_out counter window key pid
+  dir=$(make_case blind-capture); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; counter="$dir/capture.count"
+  window="test:fm-blind"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/blind.meta"
+  key=$(fm_state_key_encode "$window")
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE_FAIL='x' FM_FAKE_TMUX_CAPTURE_FAIL_COUNT="$counter" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a watcher that could read no pane at all never said so: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "blind watcher did not name the unreadable window: $(cat "$out")"
+  grep -F "pane unreadable" "$out" >/dev/null || fail "blind wake did not report the pane as unreadable: $(cat "$out")"
+  [ "$(cat "$state/.blind-$key" 2>/dev/null || echo 0)" -eq 3 ] \
+    || fail "blind alarm did not fire at the third consecutive failure"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the blind capture wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "pane unreadable" >/dev/null \
+    || fail "blind capture wake was not queued"
+  pass "a watcher that cannot capture a pane surfaces it instead of skipping the window in silence"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1743,6 +1807,8 @@ test_recent_capture_hit_refreshes_eviction_order
 test_animated_pane_still_reaches_stale
 test_progressing_pane_without_busy_footer_resets_wedge_timer
 test_animated_pane_accumulates_wedge_timer
+test_intermittent_capture_failure_stays_quiet
+test_blind_capture_surfaces_after_threshold
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
