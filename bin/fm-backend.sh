@@ -754,10 +754,10 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # switched its tmux arm to `has-session` because `display-message -p -t` exits 0
 # for an absent window and an absent session alike (measured 2026-08-17, tmux
 # 3.7b - docs/tmux-backend.md "Endpoint target resolution"), so the arm below
-# answers "a tmux server is reachable", not "this endpoint exists". Left as-is
-# deliberately: tightening it flips currently-alive tmux readings to dead across
-# the session-start digest and the secondmate liveness sweep, which respawns on a
-# confident dead reading, so it is the captain's call and not a comment fix.
+# answers "a tmux server is reachable", not "this endpoint exists". The captain
+# left it unchanged under backend-target-exists-false-alive because a strict
+# error relaunches live workers and destroys their in-flight work, while the
+# lenient error leaves a worker alone. See the doc for the measured evidence.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
