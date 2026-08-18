@@ -195,9 +195,16 @@ pane_readable() {  # <target>
     # has-session, not display-message: the latter does not resolve its target
     # at all - it exits 0 for an absent window and an absent session alike, so it
     # answered "a tmux server is reachable" and let a closed window pass here to
-    # be answered from a stale status log below (measured 2026-08-17 on tmux
-    # 3.7b; docs/tmux-backend.md "Endpoint target resolution").
-    tmux) tmux has-session -t "$1" 2>/dev/null ;;
+    # be answered from a stale status log below. Exact selectors are required on
+    # both components because tmux otherwise prefix-matches an absent target to a
+    # longer-named sibling (measured 2026-08-17 on tmux 3.7b;
+    # docs/tmux-backend.md "Endpoint target resolution").
+    tmux)
+      case "$1" in
+        ?*:?*) tmux has-session -t "=${1%%:*}:=${1#*:}" 2>/dev/null ;;
+        *) return 1 ;;
+      esac
+      ;;
     sbx)
       # State probe, never a capture: `sbx exec` auto-starts a stopped
       # sandbox, so a capture-based readability check would churn an
