@@ -70,10 +70,21 @@
 #   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A crew whose last event is
+#      one of those has NO source left and reports `unknown`, because idleness is
+#      not establishable here: a secondmate is never busy-checked at all, and a
+#      not-busy pane equally covers a harness parked at a permission dialog and a
+#      capture that failed. There is deliberately no `idle` state to default to.
 #   6. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      attributed to this crew, an endpoint this reader cannot read also reports
+#      unknown · none rather than trusting a stale status log. It never reports the
+#      endpoint GONE: no backend check here separates a closed endpoint from a
+#      caller that cannot reach the control plane. The DETAIL names which was seen
+#      - `backend unreachable from here` means an unroutable caller, a reading
+#      that says nothing about the crew, while `backend endpoint unreadable` means
+#      the control plane was reachable-or-unproven and the endpoint did not
+#      answer. Both stay `unknown`, because the crew's state is equally unknown
+#      either way and the state field is not where that difference belongs.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -181,12 +192,17 @@ BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    # has-session, not display-message: the latter does not resolve its target
+    # at all - it exits 0 for an absent window and an absent session alike, so it
+    # answered "a tmux server is reachable" and let a closed window pass here to
+    # be answered from a stale status log below (measured 2026-08-17 on tmux
+    # 3.7b; docs/tmux-backend.md "Endpoint target resolution").
+    tmux) tmux has-session -t "$1" 2>/dev/null ;;
     sbx)
       # State probe, never a capture: `sbx exec` auto-starts a stopped
       # sandbox, so a capture-based readability check would churn an
       # idle-stopped secondmate's VM on every triage - and its failure would
-      # misread that healthy, resumable endpoint as gone instead of letting
+      # misread that healthy, resumable endpoint as unread instead of letting
       # the status-log fallback below classify it (design §7.3). A stopped
       # sandbox is PRESENT; only confirmed-absent/unreadable fails here.
       fm_backend_source sbx >/dev/null 2>&1 || return 1
@@ -833,10 +849,21 @@ fi
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
+# is no run to consult, so a target this reader cannot read leaves no current-state
+# source: report unknown rather than trusting a possibly-stale status log.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+if ! pane_readable "$BACKEND_TARGET"; then
+  # Report the read that failed, never a death certificate (header, step 6): a
+  # denied socket, a downed server and a closed endpoint all land on this line, and
+  # the "gone" this used to claim was reproduced against a LIVE secondmate from a
+  # sandboxed session on 2026-08-17. The probe is asked only here, on the
+  # already-failed path, because a denied sbx probe costs ~10s (bin/fm-backend.sh).
+  if fm_backend_transport_reachable "$TASK_BACKEND" "$BACKEND_TARGET"; then
+    emit unknown none "backend endpoint unreadable: $BACKEND_TARGET"
+  else
+    emit unknown none "backend unreachable from here: $BACKEND_TARGET"
+  fi
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
@@ -859,11 +886,14 @@ fi
 # FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
 # it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
 # resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
-# `unknown` verdict as the "not a state" test needs no second verb list here.
+# detail. Skipping it leaves no source at all, and `unknown` is the honest answer
+# (header, step 5): a secondmate - the typical case - never reaches the busy check
+# above, and for every other crew a false `crew_pane_is_busy` equally covers a
+# harness parked at a permission dialog and a capture that simply failed
+# (fm_pane_is_busy returns 1 on a tmux error), so idleness is not establishable
+# here. map_log_state is the single owner of the verb->state mapping (including the
+# configurable paused verb), so reusing its `unknown` verdict as the "not a state"
+# test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then

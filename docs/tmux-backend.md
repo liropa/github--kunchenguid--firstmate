@@ -67,6 +67,30 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Endpoint target resolution (2026-08-17)
+
+`tmux display-message -p -t <target> '#{pane_id}'` does not resolve the target it is given.
+It exits 0 for an absent window, printing the session's active pane instead, and exits 0 for an absent session, printing nothing.
+So the command can only fail when no server answers, which makes it a server-reachability probe and never an endpoint-existence check.
+
+Measured on this host, tmux 3.7b, against a private socket (`tmux -L fmprobe<pid>`) holding one session `fm` with one window `fm-alpha`:
+
+```
+display-message -p -t fm:fm-alpha  '#{pane_id}'  rc=0 out=[%0]
+display-message -p -t fm:fm-nosuch '#{pane_id}'  rc=0 out=[%0]        <- ABSENT window
+display-message -p -t nosuch:fm-alpha '#{pane_id}'  rc=0 out=[]       <- ABSENT session
+has-session -t fm:fm-alpha      rc=0
+has-session -t fm:fm-gone       rc=1  can't find window: fm-gone
+has-session -t nosuch:fm-alpha  rc=1  can't find session: nosuch
+has-session -t fm:fm-alpha      rc=1  error connecting to <socket> (No such file or directory)   <- no server
+has-session -t fm:fm-alpha      rc=1  no server running on <socket>   <- after kill-server
+capture-pane -p -t fm:fm-nosuch -S -40  rc=1  can't find window: fm-nosuch
+```
+
+`has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
+`bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
+`fm_backend_target_exists` (`bin/fm-backend.sh`) still uses `display-message` and so reports every tmux endpoint as existing whenever any tmux server is reachable; it is left alone deliberately, because tightening it flips currently-alive readings to dead in the session-start digest and the secondmate liveness sweep, which respawns on a confident dead reading.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
@@ -203,8 +227,11 @@ A watcher that could read no pane at all therefore kept absorbing heartbeats on 
 
 <!-- fm-authority: firstmate-observation 2026-08-15 - measured on the captain's host by the worker-pane-blocked-invisible investigation, section 6; a checkout cannot reproduce a sandbox denial -->
 That failure is reachable on this host rather than hypothetical.
-A sandboxed `tmux capture-pane -p -t <target> -S -40` fails with `error connecting to /private/tmp/tmux-501/default (Operation not permitted)` and exit 1, and `bin/fm-crew-state.sh` then reports `backend target gone` for a window that is present and running.
+A sandboxed `tmux capture-pane -p -t <target> -S -40` fails with `error connecting to /private/tmp/tmux-501/default (Operation not permitted)` and exit 1, and `bin/fm-crew-state.sh` then reported `backend target gone` for a window that is present and running.
 <!-- /fm-authority -->
+
+That last claim is fixed: the same denial now reports `backend unreachable from here`, which names the caller's own route rather than asserting the crew is dead.
+The capture blindness the rest of this section covers is unchanged.
 
 `blind_capture_check` now counts consecutive capture failures per window in `state/.blind-<key>` and surfaces a `stale:` wake naming the pane unreadable once the count reaches `FM_BLIND_CAPTURE_POLLS` (default 3).
 Three is the same "not a one-off" bar the progress gate applies, so a transient miss costs one or two captures and wakes nobody, while a sustained blindness is reported within two poll intervals.

@@ -33,6 +33,9 @@
 #       tip stays rejected - the counterfactual pair for the blind-read gap.
 #   (n) block-scoped field reads: `branch_sync`'s duplicate `head:`/`branch:`
 #       keys must never supply the run's own, in either emission order.
+#   (o) no source is `unknown`, and an unread endpoint is never called GONE: a
+#       trailing decision-only `resolved:` cannot establish idleness, and an
+#       unroutable caller is told apart from an endpoint that did not answer.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -100,12 +103,22 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  # Two independent failure knobs, because the reader now tells them apart:
+  # FM_FAKE_TMUX_MISSING is a REACHABLE server whose window is gone (has-session
+  # and capture-pane fail, list-sessions answers), and FM_FAKE_TMUX_NO_SERVER is
+  # an unroutable caller - a denied socket or no server - where every client
+  # command fails. Real behaviour both arms mirror is measured in
+  # docs/tmux-backend.md "Endpoint target resolution": display-message never
+  # resolves its target, so it answers whenever the server does.
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ "${FM_FAKE_TMUX_NO_SERVER:-0}" = 1 ] && exit 1
 case "${1:-}" in
+  list-sessions) printf 'fm: 1 windows\n' ;;
+  has-session)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1 ;;
   display-message)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
@@ -179,6 +192,7 @@ reset_fakes() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_NO_SERVER=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
@@ -190,6 +204,7 @@ reset_fakes() {
   FM_FAKE_CI_LOGS_RC=0
   FM_FAKE_NM_CALLS=/dev/null
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_NO_SERVER
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
   export FM_FAKE_AXI_HANG FM_FAKE_AXI_PARTIAL FM_FAKE_AXI_STATUS_RC FM_FAKE_RUNS_RC FM_FAKE_CI_LOGS_RC
   export FM_FAKE_NM_CALLS
@@ -1057,7 +1072,86 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: working" "a real trailing state verb still renders"
   assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
-  pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
+  pass "a trailing resolved: event does not corrupt state render"
+}
+
+# WHY that answer is `unknown` and not an `idle` default, which the code comment
+# used to promise: nothing on this path establishes idleness. Both legs below are
+# crews that are demonstrably NOT idle, and the reader cannot tell either of them
+# from a genuinely finished one - so claiming idle would be a confidently wrong
+# answer of exactly the kind the run-step hardening exists to prevent.
+test_resolved_event_does_not_imply_idleness() {
+  reset_fakes
+  local d out; d=$(new_case resolved-not-idle)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_AXI_STATUS=""
+
+  # Leg 1: a secondmate mid-turn. kind=secondmate skips the busy check entirely,
+  # so a visibly BUSY pane still reaches the same answer as a quiet one - the
+  # reader never even looked.
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
+  printf 'resolved [key=race]: captain chose option (a)\n' > "$d/state/mate.status"
+  FM_FAKE_BUSY=1
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown" "a busy secondmate after resolved: is still unknown, never idle"
+  assert_not_contains "$out" "state: idle" "the reader must not invent an idle state"
+
+  # Leg 2: an ordinary crew parked at a permission dialog. It renders no busy
+  # banner (bin/fm-crew-state.sh crew_pane_is_busy), so not-busy covers a crew
+  # that is waiting on a human just as it covers a finished one.
+  fm_write_meta "$d/state/crew.meta" "window=fm:fm-crew" "worktree=$d/wt" "kind=ship"
+  printf 'resolved [key=race]: captain chose option (a)\n' > "$d/state/crew.status"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" crew)
+  assert_contains "$out" "state: unknown" "a dialog-parked crew after resolved: is unknown, never idle"
+  assert_contains "$out" "no current-state source available" "the detail names the missing source"
+  pass "a trailing resolved: leaves no source, and idleness is not inferred from a quiet pane"
+}
+
+# An endpoint this reader cannot read is reported as unread, never as GONE. The
+# claim was unsupportable on every backend - a denied socket, a downed server and
+# a closed endpoint all fail the same check - and firstmate reproduced it against
+# a LIVE secondmate from a sandboxed session on 2026-08-17, where every tmux
+# client call fails at the socket. The two arms differ only in the detail,
+# because the crew's state is equally unknown either way.
+test_unroutable_caller_is_not_a_dead_endpoint() {
+  reset_fakes
+  local d out; d=$(new_case unroutable-caller)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
+  printf 'resolved [key=k]: captain chose option (a)\n' > "$d/state/mate.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_TMUX_NO_SERVER=1
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown" "an unroutable caller cannot establish a state"
+  assert_contains "$out" "backend unreachable from here" "the detail names the caller's route as what failed"
+  assert_not_contains "$out" "gone" "an unroutable caller must never be reported as a gone endpoint"
+  pass "an unroutable caller reports its own broken route, not a dead crew"
+}
+
+# The reachable arm: the control plane answered and the endpoint did not. That is
+# still not proof of absence on every backend, so the detail says unreadable - but
+# it must never fall through to the status log, which is the guarantee the header's
+# step 6 states and which tmux silently lacked while pane_readable used
+# display-message (docs/tmux-backend.md "Endpoint target resolution").
+test_unreadable_endpoint_does_not_republish_stale_log() {
+  reset_fakes
+  local d out; d=$(new_case unreadable-endpoint)
+  make_repo_on_branch "$d/wt" fm/feat-unread
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unread.meta" "window=fm:fm-feat-unread" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/feat-unread.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" feat-unread)
+  assert_contains "$out" "state: unknown" "a reachable server plus an unreadable endpoint is unknown"
+  assert_contains "$out" "backend endpoint unreadable" "the detail names the endpoint as what did not answer"
+  assert_not_contains "$out" "source: status-log" "a stale done: must not stand in for the endpoint"
+  assert_not_contains "$out" "state: done" "a stale done: must not be republished as current state"
+  pass "an unreadable endpoint reports unknown instead of republishing a stale status log"
 }
 
 test_dead_window_ignores_stale_status_log() {
@@ -1986,6 +2080,9 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_resolved_event_does_not_imply_idleness
+test_unroutable_caller_is_not_a_dead_endpoint
+test_unreadable_endpoint_does_not_republish_stale_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
