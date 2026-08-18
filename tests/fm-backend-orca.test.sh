@@ -758,7 +758,10 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should not treat an Orca read error as a live endpoint"
-  assert_contains "$out" "backend target gone: term-stale" "crew-state should report the stale Orca terminal as gone"
+  # Unreadable, not gone: Orca has no verified transport probe, so this reader
+  # cannot separate a stale terminal handle from a caller that cannot reach the
+  # control plane (bin/fm-crew-state.sh, header step 6).
+  assert_contains "$out" "backend endpoint unreadable: term-stale" "crew-state should report the stale Orca terminal as unread, not gone"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-stale' \
     "fm-peek/fm-crew-state did not read the recorded Orca terminal"
   pass "fm-peek/fm-crew-state: Orca read error JSON fails closed"
