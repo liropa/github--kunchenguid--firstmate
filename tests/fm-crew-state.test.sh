@@ -117,7 +117,27 @@ set -u
 case "${1:-}" in
   list-sessions) printf 'fm: 1 windows\n' ;;
   has-session)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1 ;;
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    target=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = -t ] && { shift; target=${1:-}; break; }
+      shift
+    done
+    [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ] || exit 0
+    session=${target%%:*}; window=${target#*:}
+    session_exact=0; window_exact=0
+    case "$session" in =*) session_exact=1; session=${session#=} ;; esac
+    case "$window" in =*) window_exact=1; window=${window#=} ;; esac
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      candidate_session=${candidate%%:*}; candidate_window=${candidate#*:}
+      if [ "$session_exact" = 1 ]; then [ "$candidate_session" = "$session" ] || continue
+      else case "$candidate_session" in "$session"*) ;; *) continue ;; esac; fi
+      if [ "$window_exact" = 1 ]; then [ "$candidate_window" = "$window" ] || continue
+      else case "$candidate_window" in "$window"*) ;; *) continue ;; esac; fi
+      exit 0
+    done <<< "$FM_FAKE_TMUX_WINDOWS"
+    exit 1 ;;
   display-message)
     printf '%%1\n' ;;
   capture-pane)
@@ -193,6 +213,7 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_NO_SERVER=0
+  FM_FAKE_TMUX_WINDOWS=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
@@ -205,6 +226,7 @@ reset_fakes() {
   FM_FAKE_NM_CALLS=/dev/null
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_TMUX_NO_SERVER
+  export FM_FAKE_TMUX_WINDOWS
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
   export FM_FAKE_AXI_HANG FM_FAKE_AXI_PARTIAL FM_FAKE_AXI_STATUS_RC FM_FAKE_RUNS_RC FM_FAKE_CI_LOGS_RC
   export FM_FAKE_NM_CALLS
@@ -1154,6 +1176,23 @@ test_unreadable_endpoint_does_not_republish_stale_log() {
   pass "an unreadable endpoint reports unknown instead of republishing a stale status log"
 }
 
+test_prefix_collision_does_not_republish_stale_log() {
+  reset_fakes
+  local d out; d=$(new_case prefix-collision)
+  make_repo_on_branch "$d/wt" fm/task
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=ship"
+  printf 'done: stale result from removed task\n' > "$d/state/task.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_WINDOWS="fm:fm-task-extra"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" "state: unknown" "a longer-named sibling is not the requested endpoint"
+  assert_contains "$out" "backend endpoint unreadable" "the missing exact endpoint is unreadable"
+  assert_not_contains "$out" "state: done" "a prefix collision must not republish stale state"
+  pass "a tmux prefix collision does not make a removed endpoint readable"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -2083,6 +2122,7 @@ test_no_run_idle_secondmate_resolved_event_not_state
 test_resolved_event_does_not_imply_idleness
 test_unroutable_caller_is_not_a_dead_endpoint
 test_unreadable_endpoint_does_not_republish_stale_log
+test_prefix_collision_does_not_republish_stale_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

@@ -87,6 +87,18 @@ has-session -t fm:fm-alpha      rc=1  no server running on <socket>   <- after k
 capture-pane -p -t fm:fm-nosuch -S -40  rc=1  can't find window: fm-nosuch
 ```
 
+Measured on tmux 3.7b against a private socket with one session `fm` holding one window named `fm-task-extra`:
+
+```
+has-session -t fm:fm-task rc=0 <- WRONG: prefix-matched fm-task-extra
+has-session -t fm:fm-tas rc=0 <- WRONG
+has-session -t fm:zzz rc=1 can't find window: zzz
+has-session -t f:fm-task-extra rc=0 <- WRONG: SESSION name prefix-matches too
+has-session -t fmm:fm-task-extra rc=1 can't find session: fmm
+has-session -t =fm:=fm-task rc=1 can't find window: fm-task <- correct
+has-session -t =fm:=fm-task-extra rc=0 <- correct
+```
+
 `has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
 `bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
 `fm_backend_target_exists` (`bin/fm-backend.sh`) still uses `display-message` and so reports every tmux endpoint as existing whenever any tmux server is reachable; it is left alone deliberately, because tightening it flips currently-alive readings to dead in the session-start digest and the secondmate liveness sweep, which respawns on a confident dead reading.
