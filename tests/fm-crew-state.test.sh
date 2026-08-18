@@ -1065,9 +1065,9 @@ test_no_run_idle_pane_custom_paused_verb() {
 
 # A trailing keyed resolved: event is a decision-CLOSING event, not a run-state
 # verb. It must never become the current state or leak its resolution prose as the
-# detail: a healthy idle secondmate that just closed a keyed decision falls through
-# to the idle default (unknown/none), not `unknown` with the resolution note as its
-# `doing`. Regression for the bearings render bug where such a secondmate showed
+# detail: a secondmate that just closed a keyed decision has no current-state source
+# and reports unknown/none, without the resolution note as its `doing`. Regression
+# for the bearings render bug where such a secondmate showed
 # state=unknown with resolution prose. The one-owner keyed fold in fm-classify-lib.sh
 # is untouched; this only stops the deriver from reading a non-state event as state.
 test_no_run_idle_secondmate_resolved_event_not_state() {
