@@ -105,8 +105,8 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 
 ## Agent liveness probe
 
-`fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
-A secondmate agent that exits leaves its pane alive as a bare idle shell, which passes that check as "alive" - the gap `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep exists to close (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell, invisible to that check).
+`fm_backend_target_exists` (`bin/fm-backend.sh`) is the shared endpoint-presence probe, but its tmux arm currently proves only that a tmux server answers, as [Endpoint target resolution](#endpoint-target-resolution-2026-08-17) explains.
+Even after that arm is corrected, pane presence will not prove agent liveness: a secondmate agent that exits leaves its pane alive as a bare idle shell. `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep closes that separate gap (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell).
 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
