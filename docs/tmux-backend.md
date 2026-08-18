@@ -101,7 +101,12 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 
 `has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
 `bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
-`fm_backend_target_exists` (`bin/fm-backend.sh`) still uses `display-message` and so reports every tmux endpoint as existing whenever any tmux server is reachable; it is left alone deliberately, because tightening it flips currently-alive readings to dead in the session-start digest and the secondmate liveness sweep, which respawns on a confident dead reading.
+<!-- fm-authority: captain-decision 2026-08-18 - the captain reviewed this exact gap at the review gate and chose to leave the shared probe unchanged; the rationale is not derivable from this diff -->
+The captain decided to leave `fm_backend_target_exists` (`bin/fm-backend.sh`) unchanged under tracking ID `backend-target-exists-false-alive`, which is blocked behind this task so it inherits these measurements.
+The shared probe still uses `display-message` and reports every tmux endpoint as existing whenever any tmux server is reachable.
+Tightening the probe changes when a stopped worker is relaunched, and an error in the strict direction relaunches live workers and destroys their in-flight work.
+The lenient direction instead fails toward leaving a worker alone.
+<!-- /fm-authority -->
 
 ## Agent liveness probe
 
