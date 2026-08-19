@@ -1434,10 +1434,11 @@ fm_super_main() {
   local TARGET="$FM_SUPERVISOR_TARGET"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
-  # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
+  # Dispatches through bin/fm-backend.sh instead of a raw probe, so a herdr
+  # supervisor pane is checked via the herdr adapter. That primitive owns how
+  # each backend decides existence; note it resolves this daemon's own two
+  # target shapes - a bare $TMUX_PANE pane id and the firstmate:0 fallback -
+  # so a startup refusal here means a genuinely unresolvable target.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"

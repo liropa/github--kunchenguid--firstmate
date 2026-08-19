@@ -33,6 +33,22 @@ case "${1:-}" in
     done
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
+  # Endpoint existence reads through has-session now (fm_backend_target_exists,
+  # bin/fm-backend.sh), which anchors each component with '='. Strip those back
+  # off so FM_FAKE_TMUX_DEAD_TARGET keeps naming the target in its plain form.
+  has-session)
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    target=${target//=/}
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    exit 0 ;;
   display-message)
     target=
     while [ $# -gt 0 ]; do

@@ -29,6 +29,10 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  # Endpoint existence reads through has-session now (fm_backend_target_exists,
+  # bin/fm-backend.sh); keep the same dead-target model so the unhealthy-endpoint
+  # surface still sees these as gone.
+  has-session) case "$*" in *dead-*) exit 1 ;; esac ;;
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
     case "$*" in
