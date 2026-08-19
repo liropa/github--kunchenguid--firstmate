@@ -156,6 +156,69 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- target existence (fm_backend_target_exists, tmux arm) -------------------
+#
+# Both directions are asserted because the two errors are not symmetric: a LIVE
+# endpoint read as gone makes recovery relaunch a working crew and destroy its
+# in-flight work, while a gone endpoint read as live only leaves a stopped crew
+# unattended. The lenient direction is the defect being closed here; the strict
+# direction is what must never appear.
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must report the live window '$TARGET' as present"
+pass "real tmux: fm_backend_target_exists reports a live session:window as present"
+
+if fm_backend_target_exists tmux "$SESSION:fm-no-such-window"; then
+  fail "fm_backend_target_exists must report an absent WINDOW as gone (a reachable server is not an endpoint)"
+fi
+if fm_backend_target_exists tmux "no-such-session:$WINDOW"; then
+  fail "fm_backend_target_exists must report an absent SESSION as gone (a reachable server is not an endpoint)"
+fi
+pass "real tmux: fm_backend_target_exists reports an absent window and an absent session as gone"
+
+# tmux name matching is a prefix match unless the selector is anchored with '=',
+# so a shorter name must not be answered by a longer live sibling.
+if fm_backend_target_exists tmux "$SESSION:${WINDOW%1}"; then
+  fail "fm_backend_target_exists must not prefix-match window '${WINDOW%1}' onto the longer live '$WINDOW'"
+fi
+if fm_backend_target_exists tmux "${SESSION%e}:$WINDOW"; then
+  fail "fm_backend_target_exists must not prefix-match session '${SESSION%e}' onto the longer live '$SESSION'"
+fi
+pass "real tmux: fm_backend_target_exists prefix-matches neither the session nor the window component"
+
+# The away-mode daemon's supervisor target is a bare pane id ($TMUX_PANE, see
+# discover_supervisor_target in bin/fm-supervisor-target-lib.sh), not a
+# session:window pair, so that form has to answer correctly too.
+PANE_ID=$(tmux display-message -p -t "$TARGET" '#{pane_id}') \
+  || fail "could not read the live pane id for the pane-id assertions"
+fm_backend_target_exists tmux "$PANE_ID" \
+  || fail "fm_backend_target_exists must report the live pane id '$PANE_ID' as present"
+if fm_backend_target_exists tmux "%999999"; then
+  fail "fm_backend_target_exists must report an absent pane id as gone"
+fi
+pass "real tmux: fm_backend_target_exists answers a bare pane id (the daemon's target form) in both directions"
+
+# A task id may contain '.' (fm_task_id_path_safe, bin/fm-pr-lib.sh), so
+# fm-spawn can record a window whose NAME holds a dot. tmux reads that dot as
+# the pane separator and cannot be told otherwise, so has-session misses the
+# live window under either selector - the destructive direction. This target
+# shape therefore stays on the lenient probe.
+DOT_WINDOW="fm-smoke.dot"
+DOT_TARGET="$SESSION:$DOT_WINDOW"
+fm_backend_tmux_create_task "$SESSION" "$DOT_WINDOW" "$HOME" \
+  || fail "could not create the dotted-name window for the leniency assertion"
+fm_backend_target_exists tmux "$DOT_TARGET" \
+  || fail "fm_backend_target_exists must report the LIVE dotted window '$DOT_TARGET' as present (anchoring it asks tmux for window '${DOT_WINDOW%%.*}')"
+pass "real tmux: a live window whose name contains a dot still reports present"
+
+# Pins the accepted cost of that leniency: this shape keeps the pre-existing
+# false-alive reading rather than risk relaunching a live crew. Tightening it
+# needs a selector that survives the assertion above.
+if ! fm_backend_target_exists tmux "$SESSION:fm-absent.dot"; then
+  fail "the dotted shape is deliberately lenient; if it now discriminates, re-verify the live-dotted-window case above and update docs/tmux-backend.md"
+fi
+pass "real tmux: an absent dotted window stays lenient (documented, deliberate coverage gap)"
+
 # --- kill ---------------------------------------------------------------------
 
 fm_backend_tmux_kill "$TARGET"
@@ -165,6 +228,14 @@ fi
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
+
+# The reported defect, end to end: a crew whose window has closed must read as
+# gone in the session-start and recovery digests, on the same still-running
+# server that hosts every other crew.
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "fm_backend_target_exists must report '$TARGET' as gone once its window is killed"
+fi
+pass "real tmux: a killed window reads as gone while its server keeps answering"
 
 cleanup_all
 trap - EXIT

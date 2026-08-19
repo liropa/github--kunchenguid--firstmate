@@ -225,15 +225,29 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: has-session succeeds only for the
+# given "session:window" target, EXACT-ANCHORED on both components - the exact
+# primitive fm_backend_target_exists uses for a tmux endpoint liveness read.
+# display-message is kept as a targeted stub for any other reader; it is no
+# longer the liveness primitive, because real tmux exits 0 for an absent window
+# and an absent session alike (docs/tmux-backend.md "Endpoint target
+# resolution"), which reported every endpoint alive while a server answered.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
+  has-session)
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "=${live%%:*}:=${live#*:}" ] && exit 0
+    exit 1
+    ;;
   display-message)
     target=""
     prev=""

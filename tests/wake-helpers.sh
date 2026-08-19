@@ -183,6 +183,12 @@ make_supercase() {
 [ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 case "${1:-}" in
+  # Endpoint existence now reads through has-session, not display-message
+  # (fm_backend_target_exists, bin/fm-backend.sh). Same aliveness flag, so a
+  # case that models a gone pane keeps modelling one.
+  has-session)
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    exit 0 ;;
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
@@ -265,6 +271,8 @@ make_bordered_case() {
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
+  # See make_supercase: endpoint existence reads through has-session now.
+  has-session) exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done

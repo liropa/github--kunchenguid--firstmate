@@ -744,25 +744,79 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # going through fm_backend_herdr_target_ready (which auto-starts the herdr
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
-# probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, or unreadable Orca terminal simply fails, which
-# IS "does not exist" for this purpose - except on tmux, where nothing fails
-# while a server answers (see below).
+# probe). A gone tmux endpoint, an unqueryable herdr pane (server down, pane
+# closed), a missing zellij pane, or an unreadable Orca terminal simply fails,
+# which IS "does not exist" for this purpose.
 # Exists here as one shared primitive so callers that only need a fast alive/dead
 # read (recovery digests, the session-start fleet digest) do not re-derive it
-# inline. It no longer mirrors fm-crew-state.sh's pane_readable: that reader
-# switched its tmux arm to `has-session` because `display-message -p -t` exits 0
-# for an absent window and an absent session alike (measured 2026-08-17, tmux
-# 3.7b - docs/tmux-backend.md "Endpoint target resolution"), so the arm below
-# answers "a tmux server is reachable", not "this endpoint exists". The captain
-# left it unchanged under backend-target-exists-false-alive because a strict
-# error relaunches live workers and destroys their in-flight work, while the
-# lenient error leaves a worker alone. See the doc for the measured evidence.
+# inline.
+#
+# The tmux arm answers per-endpoint, not per-server. `display-message -p -t`
+# resolves nothing: it exits 0 for an absent window (printing the session's
+# ACTIVE pane instead), an absent session, and an absent pane id alike, failing
+# only when no server answers (measured 2026-08-17, re-measured 2026-08-19,
+# tmux 3.7b - docs/tmux-backend.md "Endpoint target resolution"). Using it here
+# reported every tmux endpoint as present while any tmux server was reachable,
+# so a digest read a stopped crew as fine and left genuinely dead work
+# unattended. `has-session` is the discriminator, the same primitive
+# fm-crew-state.sh's pane_readable uses, and it is passive (it never starts a
+# server).
+#
+# Anchoring differs from pane_readable's, because the two readers see different
+# target populations and the difference is load-bearing. pane_readable only ever
+# sees a recorded task endpoint (`<session>:fm-<id>`), so it anchors both
+# components with `=` unconditionally and rejects everything else; tmux
+# prefix-matches an unanchored name, so `f:fm-task1` would otherwise be answered
+# by a live session `fm`. This primitive additionally serves the away-mode
+# daemon, whose supervisor target is a bare pane id from $TMUX_PANE
+# (discover_supervisor_target, bin/fm-supervisor-target-lib.sh). `=` must NOT be
+# applied to a tmux id token: `=%0` makes tmux look for a SESSION NAMED "%0" and
+# report a genuinely live pane gone (measured 2026-08-19). An id is already
+# exact and unique, so it needs no anchoring and carries no prefix hazard.
+#
+# Only the two shapes measured safe are tightened; every other shape stays on the
+# old lenient probe, so this change is one-directional by construction: a shape is
+# either newly discriminated or byte-identical to before, and no live endpoint can
+# start reading as gone. That asymmetry is the whole point - the lenient error
+# leaves a live worker alone, while the strict error relaunches workers that are
+# alive and mid-task and destroys their in-flight work. So a `.` after the colon
+# stays lenient (see the arm below), and so do the residual shapes (a bare session
+# name, `<session>:`, a `$`-prefixed session id), which fm-spawn never records - it
+# always writes `window=<session>:fm-<id>` - and which can only arrive through
+# FM_SUPERVISOR_TARGET or fm-send's explicit-target escape hatch.
+#
+# Callers and what a `gone` answer costs them, worst case first: the away-mode
+# daemon refuses to start on a target it cannot resolve and otherwise backs off
+# its escalation loop (bin/fm-supervise-daemon.sh); fm-send refuses the steer;
+# the session-start fleet digest and fm-fleet-snapshot mark the endpoint dead,
+# which is what routes a task into recovery. None of them tears down a worktree
+# on this answer alone, but recovery relaunching a live crew is still the
+# destructive outcome this arm is shaped to avoid.
+#
+# Endpoint presence is still not agent liveness, and the two questions divide
+# cleanly: this function answers "is the endpoint there", so an exited agent's
+# leftover bare shell is a pane that genuinely exists and correctly reports
+# present here. fm_backend_agent_alive below owns "is a real agent process
+# running in it", which is the only question that can see through that husk.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      case "$target" in
+        # A tmux id token is exact and unique already; anchoring it is what
+        # would report a live endpoint gone.
+        %*|@*) tmux has-session -t "$target" 2>/dev/null ;;
+        # A '.' after the colon is tmux's PANE separator, so it cannot be
+        # told apart from a dot inside the window name - and a task id may
+        # contain one (fm_task_id_path_safe, bin/fm-pr-lib.sh). Anchoring
+        # `fm:fm-my.task` asks for window `fm-my`, which reports a LIVE
+        # endpoint gone, so this shape keeps the lenient probe.
+        *:*.*) tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 ;;
+        # <session>:<window>, the shape fm-spawn records.
+        ?*:?*) tmux has-session -t "=${target%%:*}:=${target#*:}" 2>/dev/null ;;
+        # Unmeasured shapes keep the pre-existing lenient probe.
+        *) tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 ;;
+      esac
       ;;
     herdr)
       fm_backend_source herdr || return 1

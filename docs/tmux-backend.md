@@ -101,17 +101,68 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 
 `has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
 `bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
-<!-- fm-authority: captain-decision 2026-08-18 - the captain reviewed this exact gap at the review gate and chose to leave the shared probe unchanged; the rationale is not derivable from this diff -->
-The captain decided to leave `fm_backend_target_exists` (`bin/fm-backend.sh`) unchanged under tracking ID `backend-target-exists-false-alive`, which is blocked behind this task so it inherits these measurements.
-The shared probe still uses `display-message` and reports every tmux endpoint as existing whenever any tmux server is reachable.
-Tightening the probe changes when a stopped worker is relaunched, and an error in the strict direction relaunches live workers and destroys their in-flight work.
-The lenient direction instead fails toward leaving a worker alone.
-<!-- /fm-authority -->
+
+### Anchoring is safe for a name, wrong for an id (2026-08-19)
+
+`fm_backend_target_exists` (`bin/fm-backend.sh`) was left on `display-message` when `pane_readable` was corrected, and now uses `has-session` too.
+It could not simply copy `pane_readable`'s selector, because it also serves the away-mode daemon, whose supervisor target is a bare pane id from `$TMUX_PANE` rather than a `<session>:<window>` pair.
+Anchoring a tmux id token with `=` makes tmux look for a session named by that id, which never exists, so it reports a live endpoint gone.
+
+Measured on this host, tmux 3.7b, against a private socket holding session `fm` with live windows `fm-task1` (`@0`, `%0`, index 0) and `fm-task1-extra` (`@1`, `%1`, index 1):
+
+```
+has-session -t fm:fm-task1         rc=0
+has-session -t =fm:=fm-task1       rc=0                             <- LIVE pair still resolves
+has-session -t f:fm-task1          rc=0                             <- WRONG: session prefix-matched
+has-session -t =f:=fm-task1        rc=1  can't find session: f      <- correct
+has-session -t %0                  rc=0                             <- LIVE pane id, unanchored
+has-session -t =%0                 rc=1  can't find session: %0     <- LIVE pane id, anchored: WRONG
+has-session -t @0                  rc=0                             <- LIVE window id, unanchored
+has-session -t =@0                 rc=1  can't find session: @0     <- LIVE window id, anchored: WRONG
+has-session -t %999999             rc=1  can't find pane: %999999
+has-session -t =fm:=0              rc=0                             <- numeric window INDEX anchors safely
+has-session -t =fm:=9              rc=1  can't find window: 9
+has-session -t =fm:=nope           rc=1  can't find window: nope
+has-session -t =nosuch:=fm-task1   rc=1  can't find session: nosuch
+display-message -p -t fm:nope          '#{pane_id}'  rc=0 out=[%0]  <- old probe, ABSENT window
+display-message -p -t nosuch:fm-task1  '#{pane_id}'  rc=0 out=[]    <- old probe, ABSENT session
+display-message -p -t %999999          '#{pane_id}'  rc=0 out=[]    <- old probe, ABSENT pane id
+```
+
+An id is exact and unique, so it needs no anchoring and carries no prefix hazard.
+A numeric window index is not an id and stays safe to anchor, so the daemon's `firstmate:0` fallback target keeps resolving.
+A dot inside the session name is safe too, because tmux looks for the pane separator only after the colon: against a live session `fm.x`, both `has-session -t fm.x:fm-task` and `has-session -t =fm.x:=fm-task` exit 0.
+
+#### A dot after the colon must stay lenient
+
+A task id may contain `.` (`fm_task_id_path_safe`, `bin/fm-pr-lib.sh`), so `fm-spawn` can record `window=fm:fm-my.task`.
+tmux reads that dot as the pane separator and cannot be told it belongs to the window name, which turns a LIVE endpoint into a miss under `has-session` either way.
+Measured the same way, against a private socket holding session `fm` with live windows `fm-my.task` and `fm-plain`:
+
+```
+has-session -t fm:fm-my.task        rc=1  can't find pane: task     <- LIVE window, unanchored
+has-session -t =fm:=fm-my.task      rc=1  can't find window: fm-my  <- LIVE window, anchored
+display-message -p -t fm:fm-my.task '#{pane_id}'  rc=0 out=[%0]     <- old probe: present
+```
+
+That is the destructive direction, so the arm excludes any target with a `.` after the colon and leaves it on the lenient probe.
+Such an endpoint keeps the false-alive reading rather than risk a live crew being relaunched.
+The exclusion also covers an explicit `<session>:<window>.<pane>` target, which does resolve correctly when anchored but is indistinguishable from a dotted window name here; `fm-spawn` never records that form.
+
+The arm therefore anchors only a dot-free `<session>:<window>` pair, passes an id token through unanchored, and leaves every other target shape on the old `display-message` probe.
+That split is one-directional by construction: each shape is either newly discriminated or byte-identical to before, so no live endpoint can start reading as gone.
+This matters more than closing the gap quickly, because the two errors are not symmetric.
+Reporting a gone endpoint as live leaves a stopped worker unattended; reporting a live endpoint as gone makes recovery relaunch a worker that is alive and mid-task, destroying its in-flight work.
+The residual shapes are never recorded by `bin/fm-spawn.sh`, which always writes `window=<session>:fm-<id>`; they reach this probe only through `FM_SUPERVISOR_TARGET` or `bin/fm-send.sh`'s explicit-target escape hatch.
+
+`bin/fm-crew-state.sh`'s `pane_readable` anchors unconditionally and misses a dotted window name the same way, but a miss there only falls back to the status log instead of routing a task into recovery, so it is left unchanged here.
+
+`tests/fm-backend-tmux-smoke.test.sh` covers both directions against a real tmux server: a live pair, a live pane id, a live dotted window name, an absent window, an absent session, an absent pane id, a session prefix that must not match a longer live sibling, and a window that reads gone once killed while its server keeps answering.
 
 ## Agent liveness probe
 
-`fm_backend_target_exists` (`bin/fm-backend.sh`) is the shared endpoint-presence probe, but its tmux arm currently proves only that a tmux server answers, as [Endpoint target resolution](#endpoint-target-resolution-2026-08-17) explains.
-Even after that arm is corrected, pane presence will not prove agent liveness: a secondmate agent that exits leaves its pane alive as a bare idle shell. `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep closes that separate gap (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell).
+`fm_backend_target_exists` (`bin/fm-backend.sh`) is the shared endpoint-presence probe, and [Endpoint target resolution](#endpoint-target-resolution-2026-08-17) owns how its tmux arm decides that.
+Presence is still not agent liveness: a secondmate agent that exits leaves its pane alive as a bare idle shell, and that pane genuinely exists, so it correctly reports present there. `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep closes that separate gap (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell).
 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
