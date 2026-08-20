@@ -156,8 +156,6 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
-# --- target existence (fm_backend_target_exists, tmux arm) -------------------
-#
 # Both directions are asserted because the two errors are not symmetric: a LIVE
 # endpoint read as gone makes recovery relaunch a working crew and destroy its
 # in-flight work, while a gone endpoint read as live only leaves a stopped crew
