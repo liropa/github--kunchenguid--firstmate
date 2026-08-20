@@ -108,25 +108,59 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 It could not simply copy `pane_readable`'s selector, because it also serves the away-mode daemon, whose supervisor target is a bare pane id from `$TMUX_PANE` rather than a `<session>:<window>` pair.
 Anchoring a tmux id token with `=` makes tmux look for a session named by that id, which never exists, so it reports a live endpoint gone.
 
-Measured on this host, tmux 3.7b, against a private socket holding session `fm` with live windows `fm-task1` (`@0`, `%0`, index 0) and `fm-task1-extra` (`@1`, `%1`, index 1):
+Measured on this host, tmux 3.7b, against a private socket holding session `fm` with live windows `fm-task1` (`@0`, `%0`, index 0) and `fm-task1-extra` (`@1`, `%1`, index 1).
+The private-socket setup commands produced no output:
 
+```sh
+$ tmux -L fm-target-exists-20260819 new-session -d -s fm -n fm-task1
+$ tmux -L fm-target-exists-20260819 new-window -d -t fm -n fm-task1-extra
 ```
-has-session -t fm:fm-task1         rc=0
-has-session -t =fm:=fm-task1       rc=0                             <- LIVE pair still resolves
-has-session -t f:fm-task1          rc=0                             <- WRONG: session prefix-matched
-has-session -t =f:=fm-task1        rc=1  can't find session: f      <- correct
-has-session -t %0                  rc=0                             <- LIVE pane id, unanchored
-has-session -t =%0                 rc=1  can't find session: %0     <- LIVE pane id, anchored: WRONG
-has-session -t @0                  rc=0                             <- LIVE window id, unanchored
-has-session -t =@0                 rc=1  can't find session: @0     <- LIVE window id, anchored: WRONG
-has-session -t %999999             rc=1  can't find pane: %999999
-has-session -t =fm:=0              rc=0                             <- numeric window INDEX anchors safely
-has-session -t =fm:=9              rc=1  can't find window: 9
-has-session -t =fm:=nope           rc=1  can't find window: nope
-has-session -t =nosuch:=fm-task1   rc=1  can't find session: nosuch
-display-message -p -t fm:nope          '#{pane_id}'  rc=0 out=[%0]  <- old probe, ABSENT window
-display-message -p -t nosuch:fm-task1  '#{pane_id}'  rc=0 out=[]    <- old probe, ABSENT session
-display-message -p -t %999999          '#{pane_id}'  rc=0 out=[]    <- old probe, ABSENT pane id
+
+Each probe command and its observed output follow:
+
+```sh
+$ tmux -L fm-target-exists-20260819 has-session -t fm:fm-task1; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t =fm:=fm-task1; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t f:fm-task1; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t =f:=fm-task1; printf 'rc=%s\n' "$?"
+can't find session: f
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t %0; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t =%0; printf 'rc=%s\n' "$?"
+can't find session: %0
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t @0; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t =@0; printf 'rc=%s\n' "$?"
+can't find session: @0
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t %999999; printf 'rc=%s\n' "$?"
+can't find pane: %999999
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t =fm:=0; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-target-exists-20260819 has-session -t =fm:=9; printf 'rc=%s\n' "$?"
+can't find window: 9
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t =fm:=nope; printf 'rc=%s\n' "$?"
+can't find window: nope
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t =nosuch:=fm-task1; printf 'rc=%s\n' "$?"
+can't find session: nosuch
+rc=1
+$ out=$(tmux -L fm-target-exists-20260819 display-message -p -t fm:nope '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[%0]
+rc=0
+$ out=$(tmux -L fm-target-exists-20260819 display-message -p -t nosuch:fm-task1 '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[]
+rc=0
+$ out=$(tmux -L fm-target-exists-20260819 display-message -p -t %999999 '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[]
+rc=0
 ```
 
 An id is exact and unique, so it needs no anchoring and carries no prefix hazard.
@@ -137,12 +171,27 @@ A dot inside the session name is safe too, because tmux looks for the pane separ
 
 A task id may contain `.` (`fm_task_id_path_safe`, `bin/fm-pr-lib.sh`), so `fm-spawn` can record `window=fm:fm-my.task`.
 tmux reads that dot as the pane separator and cannot be told it belongs to the window name, which turns a LIVE endpoint into a miss under `has-session` either way.
-Measured the same way, against a private socket holding session `fm` with live windows `fm-my.task` and `fm-plain`:
+Measured the same way, after replacing that private server with session `fm` holding live windows `fm-my.task` and `fm-plain`.
+The replacement setup commands produced no output:
 
+```sh
+$ tmux -L fm-target-exists-20260819 kill-server
+$ tmux -L fm-target-exists-20260819 new-session -d -s fm -n fm-my.task
+$ tmux -L fm-target-exists-20260819 new-window -d -t fm -n fm-plain
 ```
-has-session -t fm:fm-my.task        rc=1  can't find pane: task     <- LIVE window, unanchored
-has-session -t =fm:=fm-my.task      rc=1  can't find window: fm-my  <- LIVE window, anchored
-display-message -p -t fm:fm-my.task '#{pane_id}'  rc=0 out=[%0]     <- old probe: present
+
+Each probe command and its observed output follow:
+
+```sh
+$ tmux -L fm-target-exists-20260819 has-session -t fm:fm-my.task; printf 'rc=%s\n' "$?"
+can't find pane: task
+rc=1
+$ tmux -L fm-target-exists-20260819 has-session -t =fm:=fm-my.task; printf 'rc=%s\n' "$?"
+can't find window: fm-my
+rc=1
+$ out=$(tmux -L fm-target-exists-20260819 display-message -p -t fm:fm-my.task '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[%0]
+rc=0
 ```
 
 That is the destructive direction, so the arm excludes any target with a `.` after the colon and leaves it on the lenient probe.
