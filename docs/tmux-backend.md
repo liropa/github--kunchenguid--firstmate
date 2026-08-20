@@ -108,6 +108,7 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 It could not simply copy `pane_readable`'s selector, because it also serves the away-mode daemon, whose supervisor target is a bare pane id from `$TMUX_PANE` rather than a `<session>:<window>` pair.
 Anchoring a tmux id token with `=` makes tmux look for a session named by that id, which never exists, so it reports a live endpoint gone.
 
+<!-- fm-authority: firstmate-observation 2026-08-19 - live tmux target-selector measurements made outside this checkout -->
 Measured on this host, tmux 3.7b, against a private socket holding session `fm` with live windows `fm-task1` (`@0`, `%0`, index 0) and `fm-task1-extra` (`@1`, `%1`, index 1).
 The private-socket setup commands produced no output:
 
@@ -162,6 +163,7 @@ $ out=$(tmux -L fm-target-exists-20260819 display-message -p -t %999999 '#{pane_
 out=[]
 rc=0
 ```
+<!-- /fm-authority -->
 
 An id is exact and unique, so it needs no anchoring and carries no prefix hazard.
 A numeric window index is not an id and stays safe to anchor, so the daemon's `firstmate:0` fallback target keeps resolving.
@@ -171,6 +173,7 @@ A dot inside the session name is safe too, because tmux looks for the pane separ
 
 A task id may contain `.` (`fm_task_id_path_safe`, `bin/fm-pr-lib.sh`), so `fm-spawn` can record `window=fm:fm-my.task`.
 tmux reads that dot as the pane separator and cannot be told it belongs to the window name, which turns a LIVE endpoint into a miss under `has-session` either way.
+<!-- fm-authority: firstmate-observation 2026-08-19 - live dotted-window measurements made outside this checkout -->
 Measured the same way, after replacing that private server with session `fm` holding live windows `fm-my.task` and `fm-plain`.
 The replacement setup commands produced no output:
 
@@ -193,6 +196,7 @@ $ out=$(tmux -L fm-target-exists-20260819 display-message -p -t fm:fm-my.task '#
 out=[%0]
 rc=0
 ```
+<!-- /fm-authority -->
 
 That is the destructive direction, so the arm excludes any target with a `.` after the colon and leaves it on the lenient probe.
 Such an endpoint keeps the false-alive reading rather than risk a live crew being relaunched.

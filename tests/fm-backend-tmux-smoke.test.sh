@@ -227,9 +227,6 @@ fi
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
 
-# The reported defect, end to end: a crew whose window has closed must read as
-# gone in the session-start and recovery digests, on the same still-running
-# server that hosts every other crew.
 if fm_backend_target_exists tmux "$TARGET"; then
   fail "fm_backend_target_exists must report '$TARGET' as gone once its window is killed"
 fi
