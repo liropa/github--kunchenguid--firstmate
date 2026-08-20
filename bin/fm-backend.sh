@@ -785,14 +785,6 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # always writes `window=<session>:fm-<id>` - and which can only arrive through
 # FM_SUPERVISOR_TARGET or fm-send's explicit-target escape hatch.
 #
-# Callers and what a `gone` answer costs them, worst case first: the away-mode
-# daemon refuses to start on a target it cannot resolve and otherwise backs off
-# its escalation loop (bin/fm-supervise-daemon.sh); fm-send refuses the steer;
-# the session-start fleet digest and fm-fleet-snapshot mark the endpoint dead,
-# which is what routes a task into recovery. None of them tears down a worktree
-# on this answer alone, but recovery relaunching a live crew is still the
-# destructive outcome this arm is shaped to avoid.
-#
 # Endpoint presence is still not agent liveness, and the two questions divide
 # cleanly: this function answers "is the endpoint there", so an exited agent's
 # leftover bare shell is a pane that genuinely exists and correctly reports
@@ -812,7 +804,6 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
         # `fm:fm-my.task` asks for window `fm-my`, which reports a LIVE
         # endpoint gone, so this shape keeps the lenient probe.
         *:*.*) tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 ;;
-        # <session>:<window>, the shape fm-spawn records.
         ?*:?*) tmux has-session -t "=${target%%:*}:=${target#*:}" 2>/dev/null ;;
         # Unmeasured shapes keep the pre-existing lenient probe.
         *) tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 ;;
