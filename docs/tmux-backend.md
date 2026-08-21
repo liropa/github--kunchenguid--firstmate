@@ -173,22 +173,22 @@ Measured on this host, tmux 3.7b on macOS, against a private socket:
 
 ```sh
 tmux 3.7b
-$ tmux -L fmprobe5 -f /dev/null new-session -d -s fm.x -n fm-task sh -c "while :; do sleep 1; done"
+$ tmux -L fmprobe6 -f /dev/null new-session -d -s 'fm.x' -n 'fm-task' 'sh -c "while :; do sleep 1; done"'
 rc=0
-$ tmux -L fmprobe5 list-panes -a -F #{session_name}:#{window_name} session_id=#{session_id}
+$ tmux -L fmprobe6 list-panes -a -F '#{session_name}:#{window_name} session_id=#{session_id}'
 fm.x:fm-task session_id=$0
 rc=0
-$ tmux -L fmprobe5 has-session -t fm.x:fm-task
+$ tmux -L fmprobe6 has-session -t 'fm.x:fm-task'
 rc=0
-$ tmux -L fmprobe5 has-session -t =fm.x:=fm-task
+$ tmux -L fmprobe6 has-session -t '=fm.x:=fm-task'
 rc=0
-$ tmux -L fmprobe5 has-session -t $0:fm-task
+$ tmux -L fmprobe6 has-session -t '$0:fm-task'
 rc=0
-$ tmux -L fmprobe5 has-session -t =$0:=fm-task
+$ tmux -L fmprobe6 has-session -t '=$0:=fm-task'
 rc=0
-$ tmux -L fmprobe5 has-session -t $0
+$ tmux -L fmprobe6 has-session -t '$0'
 rc=0
-$ tmux -L fmprobe5 has-session -t =$0
+$ tmux -L fmprobe6 has-session -t '=$0'
 rc=0
 ```
 
