@@ -770,9 +770,9 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # by a live session `fm`. This primitive additionally serves the away-mode
 # daemon, whose supervisor target is a bare pane id from $TMUX_PANE
 # (discover_supervisor_target, bin/fm-supervisor-target-lib.sh). `=` must NOT be
-# applied to a tmux id token: `=%0` makes tmux look for a SESSION NAMED "%0" and
-# report a genuinely live pane gone (measured 2026-08-19). An id is already
-# exact and unique, so it needs no anchoring and carries no prefix hazard.
+# applied to a bare `%` pane or `@` window id: `=%0` makes tmux look for a SESSION
+# NAMED "%0" and report a genuinely live pane gone (measured 2026-08-19). Those
+# ids are already exact and unique, so they need no anchoring or prefix guard.
 #
 # Only the two shapes measured safe are tightened; every other shape stays on the
 # old lenient probe, so this change is one-directional by construction: a shape is
@@ -796,8 +796,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   case "$backend" in
     tmux)
       case "$target" in
-        # A tmux id token is exact and unique already; anchoring it is what
-        # would report a live endpoint gone.
+        # A bare `%` pane or `@` window id is exact and unique already;
+        # anchoring it would report a live endpoint gone.
         %*|@*) tmux has-session -t "$target" 2>/dev/null ;;
         # A '.' after the colon is tmux's PANE separator, so it cannot be
         # told apart from a dot inside the window name - and a task id may

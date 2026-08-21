@@ -165,7 +165,7 @@ rc=0
 ```
 <!-- /fm-authority -->
 
-An id is exact and unique, so it needs no anchoring and carries no prefix hazard.
+A bare `%` pane or `@` window id is exact and unique, so it needs no anchoring and carries no prefix hazard.
 A numeric window index is not an id and stays safe to anchor, so the daemon's `firstmate:0` fallback target keeps resolving.
 
 <!-- fm-authority: firstmate-observation 2026-08-20 - live dotted-session and session-id measurements made outside this checkout -->
@@ -230,7 +230,7 @@ That is the destructive direction, so the arm excludes any target with a `.` aft
 Such an endpoint keeps the false-alive reading rather than risk a live crew being relaunched.
 The exclusion also covers an explicit `<session>:<window>.<pane>` target, which does resolve correctly when anchored but is indistinguishable from a dotted window name here; `fm-spawn` never records that form.
 
-The arm therefore anchors only a dot-free `<session>:<window>` pair, passes an id token through unanchored, and leaves every other target shape on the old `display-message` probe.
+The arm therefore anchors a dot-free `<session>:<window>` pair, passes a bare `%` pane or `@` window id through unanchored, and leaves every other target shape on the old `display-message` probe.
 That split is one-directional by construction: each shape is either newly discriminated or byte-identical to before, so no live endpoint can start reading as gone.
 This matters more than closing the gap quickly, because the two errors are not symmetric.
 Reporting a gone endpoint as live leaves a stopped worker unattended; reporting a live endpoint as gone makes recovery relaunch a worker that is alive and mid-task, destroying its in-flight work.
