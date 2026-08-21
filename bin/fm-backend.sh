@@ -781,9 +781,10 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # leaves a live worker alone, while the strict error relaunches workers that are
 # alive and mid-task and destroys their in-flight work. So a `.` after the colon
 # stays lenient (see the arm below), and so do the residual shapes (a bare session
-# name, `<session>:`, a `$`-prefixed session id), which fm-spawn never records - it
-# always writes `window=<session>:fm-<id>` - and which can only arrive through
-# FM_SUPERVISOR_TARGET or fm-send's explicit-target escape hatch.
+# name, `<session>:`, or a bare `$`-prefixed session id). A `$id:window` pair is
+# anchored because both components were measured safe. fm-spawn never records the
+# residual shapes - it always writes `window=<session>:fm-<id>` - and they can only
+# arrive through FM_SUPERVISOR_TARGET or fm-send's explicit-target escape hatch.
 #
 # Endpoint presence is still not agent liveness, and the two questions divide
 # cleanly: this function answers "is the endpoint there", so an exited agent's
