@@ -26,8 +26,8 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend target probe result. Backend-specific
-#     limits belong to the backend docs; tmux cannot yet prove endpoint presence.
+#     endpoint.exists is the cheap backend target probe result. External constraint:
+#     backend-specific limits belong to the backend docs.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
