@@ -167,7 +167,35 @@ rc=0
 
 An id is exact and unique, so it needs no anchoring and carries no prefix hazard.
 A numeric window index is not an id and stays safe to anchor, so the daemon's `firstmate:0` fallback target keeps resolving.
-A dot inside the session name is safe too, because tmux looks for the pane separator only after the colon: against a live session `fm.x`, both `has-session -t fm.x:fm-task` and `has-session -t =fm.x:=fm-task` exit 0.
+
+<!-- fm-authority: firstmate-observation 2026-08-20 - live dotted-session and session-id measurements made outside this checkout -->
+Measured on this host, tmux 3.7b on macOS, against a private socket:
+
+```sh
+tmux 3.7b
+$ tmux -L fmprobe5 -f /dev/null new-session -d -s fm.x -n fm-task sh -c "while :; do sleep 1; done"
+rc=0
+$ tmux -L fmprobe5 list-panes -a -F #{session_name}:#{window_name} session_id=#{session_id}
+fm.x:fm-task session_id=$0
+rc=0
+$ tmux -L fmprobe5 has-session -t fm.x:fm-task
+rc=0
+$ tmux -L fmprobe5 has-session -t =fm.x:=fm-task
+rc=0
+$ tmux -L fmprobe5 has-session -t $0:fm-task
+rc=0
+$ tmux -L fmprobe5 has-session -t =$0:=fm-task
+rc=0
+$ tmux -L fmprobe5 has-session -t $0
+rc=0
+$ tmux -L fmprobe5 has-session -t =$0
+rc=0
+```
+
+A dot inside the session name is safe because tmux looks for the pane separator only after the colon.
+tmux strips a leading `=` before it recognizes a `$`-prefixed session id, unlike `%` pane and `@` window ids, which it treats as session names when they are anchored.
+Both anchored forms resolve a live endpoint, so neither live endpoint reads as gone.
+<!-- /fm-authority -->
 
 #### A dot after the colon must stay lenient
 
