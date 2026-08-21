@@ -102,11 +102,11 @@ has-session -t =fm:=fm-task-extra rc=0 <- correct
 `has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
 `bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
 
-### Anchoring is safe for a name, wrong for an id (2026-08-19)
+### Anchoring is safe for a name, wrong for pane and window ids (2026-08-19)
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) was left on `display-message` when `pane_readable` was corrected, and now uses `has-session` too.
 It could not simply copy `pane_readable`'s selector, because it also serves the away-mode daemon, whose supervisor target is a bare pane id from `$TMUX_PANE` rather than a `<session>:<window>` pair.
-Anchoring a tmux id token with `=` makes tmux look for a session named by that id, which never exists, so it reports a live endpoint gone.
+Anchoring a `%` pane or `@` window id with `=` makes tmux look for a session named by that id, which never exists, so it reports a live endpoint gone.
 
 <!-- fm-authority: firstmate-observation 2026-08-19 - live tmux target-selector measurements made outside this checkout -->
 Measured on this host, tmux 3.7b, against a private socket holding session `fm` with live windows `fm-task1` (`@0`, `%0`, index 0) and `fm-task1-extra` (`@1`, `%1`, index 1).
