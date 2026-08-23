@@ -73,31 +73,97 @@ You should see a `fm-<id>` window for the task, live and updating as the crewmat
 It exits 0 for an absent window, printing the session's active pane instead, and exits 0 for an absent session, printing nothing.
 So the command can only fail when no server answers, which makes it a server-reachability probe and never an endpoint-existence check.
 
-Measured on this host, tmux 3.7b, against a private socket (`tmux -L fmprobe<pid>`) holding one session `fm` with one window `fm-alpha`:
+<!-- fm-authority: firstmate-observation 2026-08-21 - live tmux endpoint-probe commands and output re-captured outside this checkout; the condensed summary they replace recorded no socket name and no setup commands -->
+Measured on this host, tmux 3.7b, against a private socket holding one session `fm` with one window `fm-alpha` (`@0`, `%0`).
+The setup command produced no output, and the listing after it confirms what the socket held:
 
-```
-display-message -p -t fm:fm-alpha  '#{pane_id}'  rc=0 out=[%0]
-display-message -p -t fm:fm-nosuch '#{pane_id}'  rc=0 out=[%0]        <- ABSENT window
-display-message -p -t nosuch:fm-alpha '#{pane_id}'  rc=0 out=[]       <- ABSENT session
-has-session -t fm:fm-alpha      rc=0
-has-session -t fm:fm-gone       rc=1  can't find window: fm-gone
-has-session -t nosuch:fm-alpha  rc=1  can't find session: nosuch
-has-session -t fm:fm-alpha      rc=1  error connecting to <socket> (No such file or directory)   <- no server
-has-session -t fm:fm-alpha      rc=1  no server running on <socket>   <- after kill-server
-capture-pane -p -t fm:fm-nosuch -S -40  rc=1  can't find window: fm-nosuch
+```sh
+$ tmux -L fm-endpoint-20260821 new-session -d -s fm -n fm-alpha
+$ tmux -L fm-endpoint-20260821 list-windows -a -F '#{session_name}:#{window_name} #{window_id} #{pane_id}'
+fm:fm-alpha @0 %0
 ```
 
-Measured on tmux 3.7b against a private socket with one session `fm` holding one window named `fm-task-extra`:
+Each probe command and its observed output follow:
 
+```sh
+$ out=$(tmux -L fm-endpoint-20260821 display-message -p -t fm:fm-alpha '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[%0]
+rc=0
+$ out=$(tmux -L fm-endpoint-20260821 display-message -p -t fm:fm-nosuch '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[%0]
+rc=0
+$ out=$(tmux -L fm-endpoint-20260821 display-message -p -t nosuch:fm-alpha '#{pane_id}'); rc=$?; printf 'out=[%s]\nrc=%s\n' "$out" "$rc"
+out=[]
+rc=0
+$ tmux -L fm-endpoint-20260821 has-session -t fm:fm-alpha; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-endpoint-20260821 has-session -t fm:fm-gone; printf 'rc=%s\n' "$?"
+can't find window: fm-gone
+rc=1
+$ tmux -L fm-endpoint-20260821 has-session -t nosuch:fm-alpha; printf 'rc=%s\n' "$?"
+can't find session: nosuch
+rc=1
+$ tmux -L fm-endpoint-20260821 capture-pane -p -t fm:fm-nosuch -S -40; printf 'rc=%s\n' "$?"
+can't find window: fm-nosuch
+rc=1
 ```
-has-session -t fm:fm-task rc=0 <- WRONG: prefix-matched fm-task-extra
-has-session -t fm:fm-tas rc=0 <- WRONG
-has-session -t fm:zzz rc=1 can't find window: zzz
-has-session -t f:fm-task-extra rc=0 <- WRONG: SESSION name prefix-matches too
-has-session -t fmm:fm-task-extra rc=1 can't find session: fmm
-has-session -t =fm:=fm-task rc=1 can't find window: fm-task <- correct
-has-session -t =fm:=fm-task-extra rc=0 <- correct
+
+A socket that never had a server and a socket whose server was killed answer differently.
+The bracketing `ls` probes read the socket file before and after, and `kill-server` produced no output:
+
+```sh
+$ ls /private/tmp/tmux-501/fm-noserver-20260821; printf 'rc=%s\n' "$?"
+ls: /private/tmp/tmux-501/fm-noserver-20260821: No such file or directory
+rc=1
+$ tmux -L fm-noserver-20260821 has-session -t fm:fm-alpha; printf 'rc=%s\n' "$?"
+error connecting to /private/tmp/tmux-501/fm-noserver-20260821 (No such file or directory)
+rc=1
+$ ls /private/tmp/tmux-501/fm-noserver-20260821; printf 'rc=%s\n' "$?"
+ls: /private/tmp/tmux-501/fm-noserver-20260821: No such file or directory
+rc=1
+$ tmux -L fm-endpoint-20260821 kill-server
+$ tmux -L fm-endpoint-20260821 has-session -t fm:fm-alpha; printf 'rc=%s\n' "$?"
+no server running on /private/tmp/tmux-501/fm-endpoint-20260821
+rc=1
 ```
+<!-- /fm-authority -->
+
+<!-- fm-authority: firstmate-observation 2026-08-21 - live tmux prefix-match commands and output re-captured outside this checkout; the condensed summary they replace recorded no socket name and no setup commands -->
+Measured the same way on a second private socket, holding one session `fm` with one window named `fm-task-extra`.
+The setup command produced no output, and the listing after it confirms what the socket held:
+
+```sh
+$ tmux -L fm-prefix-20260821 new-session -d -s fm -n fm-task-extra
+$ tmux -L fm-prefix-20260821 list-windows -a -F '#{session_name}:#{window_name} #{window_id} #{pane_id}'
+fm:fm-task-extra @0 %0
+```
+
+Each probe command and its observed output follow:
+
+```sh
+$ tmux -L fm-prefix-20260821 has-session -t fm:fm-task; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-prefix-20260821 has-session -t fm:fm-tas; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-prefix-20260821 has-session -t fm:zzz; printf 'rc=%s\n' "$?"
+can't find window: zzz
+rc=1
+$ tmux -L fm-prefix-20260821 has-session -t f:fm-task-extra; printf 'rc=%s\n' "$?"
+rc=0
+$ tmux -L fm-prefix-20260821 has-session -t fmm:fm-task-extra; printf 'rc=%s\n' "$?"
+can't find session: fmm
+rc=1
+$ tmux -L fm-prefix-20260821 has-session -t =fm:=fm-task; printf 'rc=%s\n' "$?"
+can't find window: fm-task
+rc=1
+$ tmux -L fm-prefix-20260821 has-session -t =fm:=fm-task-extra; printf 'rc=%s\n' "$?"
+rc=0
+```
+<!-- /fm-authority -->
+
+An unanchored target prefix-matches a longer live name, so `fm:fm-task` and `fm:fm-tas` both resolve the live `fm-task-extra`.
+The session half prefix-matches the same way, so `f:fm-task-extra` resolves the live session `fm`.
+Anchoring both halves with `=` removes that, so `=fm:=fm-task` correctly misses while `=fm:=fm-task-extra` still resolves.
 
 `has-session` is passive: the socket did not appear after probing a socket with no server, so it never starts one.
 `bin/fm-crew-state.sh`'s `pane_readable` uses it for that reason.
