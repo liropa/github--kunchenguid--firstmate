@@ -562,10 +562,22 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+# Reset a window's pause CLASSIFICATION: the absorb flag and the crew-state
+# recheck cadence. The re-surface throttle (.paused-resurfaced-) deliberately
+# survives this reset, because it records when firstmate was last TOLD about a
+# pause and a reset does not un-tell it. Removing it here let one unchanged
+# declared pause re-surface twice inside its own window, reported 2026-08-16 as
+# 3687s and then 4124s against a 3600s window. Any reset of the pause family did
+# it; the regression test drives the cheapest one, a transient busy footer over
+# the idle pane. Keeping the throttle can never mute a recheck that is due,
+# because handle_paused_stale gates on the status file's own age as well, and
+# whenever the throttle predates the current pause line that age gate is the
+# stricter of the two. bin/fm-teardown.sh removes the marker with the rest of the
+# family, so it cannot outlive the task.
 clear_pause_state() {  # <window>
   local win=$1 key
   key=$(fm_state_key_encode "$win")
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
 }
 
 clear_pause_tracking() {  # <window>
