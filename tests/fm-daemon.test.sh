@@ -333,6 +333,35 @@ test_housekeeping_paused_unpaused_cleared() {
   pass "housekeeping clears a paused marker once the crew is no longer declaring the pause"
 }
 
+# The daemon's own pause-tracking reset also deletes the WATCHER's re-surface
+# throttle (.paused-resurfaced-). A captain-held line is the reachable case: the
+# daemon does not read it as a pause, while the watcher does pause-cadence it, so
+# reconciling one there wiped the record that keeps the watcher's recheck to once
+# per window. Clearing the daemon's own family stays correct either way.
+test_reconcile_keeps_the_watcher_pause_resurface_throttle() {
+  local dir state win watcher_key task_key line
+  dir=$(make_supercase reconcile-keeps-throttle)
+  state="$dir/state"
+  win="sess:fm-held-w30"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w30.meta"
+  watcher_key=$(fm_state_key_encode "$win")
+  task_key=$(fm_state_key_encode "held-w30")
+  for line in 'paused: awaiting the upstream release' 'captain-held [key=route]: tracked in the backlog'; do
+    printf '%s\n' "$line" > "$state/held-w30.status"
+    date +%s > "$state/.paused-resurfaced-$watcher_key"
+    : > "$state/.paused-$watcher_key"
+    : > "$state/.subsuper-paused-$task_key"
+    FM_STATE_OVERRIDE="$state" reconcile_pause_tracking "$win" "$state" "$line"
+    [ -e "$state/.paused-resurfaced-$watcher_key" ] \
+      || fail "reconciling [$line] deleted the watcher's declared-pause re-surface throttle"
+  done
+  printf 'working: upstream landed, resuming\n' > "$state/held-w30.status"
+  FM_STATE_OVERRIDE="$state" reconcile_pause_tracking "$win" "$state" 'working: upstream landed, resuming'
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "a resumed crew retained the watcher pause marker"
+  [ ! -e "$state/.subsuper-paused-$task_key" ] || fail "a resumed crew retained the daemon pause marker"
+  pass "daemon pause reconciliation clears pause tracking without deleting the watcher's re-surface throttle"
+}
+
 test_housekeeping_stale_marker_transitions_to_pause() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-to-paused)
@@ -1855,6 +1884,7 @@ test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
+test_reconcile_keeps_the_watcher_pause_resurface_throttle
 test_housekeeping_stale_marker_transitions_to_pause
 test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta

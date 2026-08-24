@@ -486,9 +486,11 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
+  # The watcher's .paused-resurfaced- throttle is deliberately absent from this
+  # list; bin/fm-watch.sh's clear_pause_state owns why.
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
     "$state/.subsuper-run-id-$key" "$state/.subsuper-run-witness-$key" \
-    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
+    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
     "$state/.run-id-$watcher_key" "$state/.run-witness-$watcher_key"
 }

@@ -1152,6 +1152,113 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# --- declared-pause recheck: throttled ACROSS a pause-tracking reset ----------
+# Reported 2026-08-16: one declared pause re-surfaced twice inside its own
+# suppression window - measured at 3687s and again at 4124s, a 437s gap against
+# the 3600s window. The throttle record was written both times, so persistence
+# was never the fault. A pause-tracking reset DELETED the record between the two,
+# and handle_paused_stale then read "never re-surfaced" for a pause whose own
+# status line had not changed. Every reset of the pause family did it; a
+# transient busy footer over the idle pane is the cheapest one to drive.
+test_declared_pause_recheck_throttled_across_pause_tracking_reset() {
+  local dir state fakebin out capture_file statusf window key sig pid back wakes
+  dir=$(make_case paused-resurface-throttle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
+  key=$(fm_state_key_encode "$window")
+  printf '%s' "$(hash_text "idle bare shell after agent exit")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+
+  # Round 1: the recheck is genuinely due and surfaces once.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the declared-pause recheck did not surface when it fell due"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the first surfacing was not the declared-pause recheck"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the first surfacing recorded no throttle"
+
+  # Round 2: the idle pane redraws a busy footer for a capture, resetting pause
+  # tracking. The pause itself is untouched - same status line, same mtime.
+  printf 'idle bare shell after agent exit\nesc to interrupt\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_live "$pid" 25 || true
+  reap "$pid"
+
+  # Round 3: the same idle pane and the same unchanged pause, far inside the
+  # window. Nothing about the pause changed, so nothing may surface again.
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_live "$pid" 25 || true
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "the declared pause re-surfaced $wakes times inside one suppression window"
+  pass "a declared-pause recheck stays throttled across a pause-tracking reset that leaves the pause unchanged"
+}
+
+# The other half of the same throttle: it must expire. Keeping the record across a
+# reset would be worse than the churn it fixes if it ever muted a recheck that was
+# genuinely due, because a due recheck is the only thing that stops a forgotten
+# wait rotting invisibly.
+test_declared_pause_recheck_still_fires_once_its_window_elapses() {
+  local dir state fakebin out capture_file statusf window key sig pid back wakes
+  dir=$(make_case paused-resurface-expiry); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 900 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "held.status")"
+  key=$(fm_state_key_encode "$window")
+  printf '%s' "$(hash_text "idle bare shell after agent exit")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+
+  # A throttle from a surfacing one full window ago, and a pause-tracking reset
+  # on top of it: the pane redrew a busy footer since. Neither may mute the
+  # recheck now that its window has elapsed.
+  back=$(( $(date +%s) - 500 ))
+  date +%s > "$state/.paused-resurfaced-$key"
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.paused-resurfaced-$key"
+  else touch -m -d "@$back" "$state/.paused-resurfaced-$key"; fi
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" "$state/.stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a declared-pause recheck whose window had elapsed was muted"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the elapsed-window surfacing was not the declared-pause recheck"
+  unset FM_FAKE_CREW_STATE
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "the elapsed-window recheck queued $wakes wakes"
+  pass "a declared-pause recheck still fires once its window elapses, throttle record and pause-tracking reset notwithstanding"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1969,6 +2076,8 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_declared_pause_recheck_throttled_across_pause_tracking_reset
+test_declared_pause_recheck_still_fires_once_its_window_elapses
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
