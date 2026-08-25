@@ -1240,6 +1240,99 @@ test_declared_pause_recheck_still_fires_once_its_window_elapses() {
   pass "a declared-pause recheck still fires once its window elapses, throttle record and pause-tracking reset notwithstanding"
 }
 
+run_paused_gate_round() {  # <state> <fakebin> <window> <capture-file> <out> [extra env...]
+  local state=$1 fakebin=$2 window=$3 capture_file=$4 out=$5 pid
+  shift 5
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || reap "$pid"
+}
+
+setup_paused_gate_case() {  # <case-name> <window>; echoes "<dir> <state> <fakebin> <key>"
+  local name=$1 window=$2 dir state fakebin statusf sig key
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  statusf="$state/gate.status"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$(seen_path "$state" "gate.status")"
+  key=$(fm_state_key_encode "$window")
+  printf '%s %s %s %s\n' "$dir" "$state" "$fakebin" "$key"
+}
+
+stale_wakes_for() {  # <state> <window>
+  [ -e "$1/.wake-queue" ] || { printf '0\n'; return; }
+  awk -F '\t' -v w="$2" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$1/.wake-queue"
+}
+
+back_date() {  # <file> <seconds ago>
+  local back
+  back=$(( $(date +%s) - $2 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$1"
+  else touch -m -d "@$back" "$1"; fi
+}
+
+test_live_paused_gate_surface_throttled_across_pane_redraws() {
+  local dir state fakebin key out capture_file window round wakes
+  window="test:fm-gate"
+  read -r dir state fakebin key <<< "$(setup_paused_gate_case live-paused-redraw "$window")"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+
+  # Non-obvious reason - each round redraws to a capture the cycle memory has
+  # never held (an elapsed timer, a token counter), which is what clears the
+  # stale suppressor and returns the next settled poll to the first-sight arm.
+  round=1
+  while [ "$round" -le 5 ]; do
+    printf 'idle external-decision gate\ntokens: %s\n' "$((round * 137))" > "$capture_file"
+    run_paused_gate_round "$state" "$fakebin" "$window" "$capture_file" "$out"
+    round=$((round + 1))
+  done
+
+  wakes=$(stale_wakes_for "$state" "$window")
+  [ "$wakes" -eq 1 ] \
+    || fail "a live declared pause surfaced $wakes times across five pane redraws inside one suppression window"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the live-gate surface recorded no throttle"
+  pass "a live declared-pause gate surfaces once across pane redraws that reset its stale tracking"
+}
+
+test_live_paused_gate_surface_still_fires_when_due() {
+  local dir state fakebin key out capture_file window wakes sig
+  window="test:fm-gate"
+
+  # Told once, then left unchanged past its window: the recheck is due, and it
+  # carries the pause reason rather than a second bare fail-open surface.
+  read -r dir state fakebin key <<< "$(setup_paused_gate_case live-paused-window-elapsed "$window")"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  printf 'idle external-decision gate\n' > "$capture_file"
+  back_date "$state/gate.status" 9000
+  sig=$(seen_sig "$state/gate.status"); printf '%s' "$sig" > "$(seen_path "$state" "gate.status")"
+  date +%s > "$state/.paused-resurfaced-$key"
+  back_date "$state/.paused-resurfaced-$key" 5000
+  run_paused_gate_round "$state" "$fakebin" "$window" "$capture_file" "$out"
+  wakes=$(stale_wakes_for "$state" "$window")
+  [ "$wakes" -eq 1 ] || fail "a live declared pause whose throttle window had elapsed queued $wakes wakes"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "the elapsed-window surfacing was not the declared-pause recheck"
+
+  # A pause re-declared after the last telling is a new thing to report, so the
+  # retained throttle must not mute it even well inside its window.
+  read -r dir state fakebin key <<< "$(setup_paused_gate_case live-paused-redeclared "$window")"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  printf 'idle external-decision gate\n' > "$capture_file"
+  date +%s > "$state/.paused-resurfaced-$key"
+  sleep 1
+  printf 'working: the first wait cleared\npaused: waiting on a second external decision\n' > "$state/gate.status"
+  sig=$(seen_sig "$state/gate.status"); printf '%s' "$sig" > "$(seen_path "$state" "gate.status")"
+  run_paused_gate_round "$state" "$fakebin" "$window" "$capture_file" "$out"
+  wakes=$(stale_wakes_for "$state" "$window")
+  [ "$wakes" -eq 1 ] || fail "a re-declared pause was muted by the previous pause's throttle ($wakes wakes)"
+  pass "a live declared-pause surface still fires once its window elapses and whenever the pause is re-declared"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2059,6 +2152,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_declared_pause_recheck_throttled_across_pause_tracking_reset
 test_declared_pause_recheck_still_fires_once_its_window_elapses
+test_live_paused_gate_surface_throttled_across_pane_redraws
+test_live_paused_gate_surface_still_fires_when_due
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

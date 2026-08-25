@@ -643,14 +643,23 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Non-obvious reason - a pane redraw clears the stale suppressor, so first sight
+# recurs on one unchanged pause; the throttle is what keeps this fail-open surface
+# to the first telling, after which handle_paused_stale owns the recheck cadence.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task statusf last rf
   key=$(fm_state_key_encode "$win")
+  task=$(window_to_task "$win" "$STATE")
+  statusf="$STATE/$task.status"
+  last=$(last_status_line "$statusf")
+  rf="$STATE/.paused-resurfaced-$key"
+  if status_is_paused_or_captain_held "$last" && mtime_after "$rf" "$statusf"; then
+    handle_paused_stale "$win" "$task" "$h"
+    return
+  fi
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
