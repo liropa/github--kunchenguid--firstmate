@@ -1178,6 +1178,7 @@ test_declared_pause_recheck_throttled_across_pause_tracking_reset() {
   grep -F "awaiting external" "$out" >/dev/null || fail "the first surfacing was not the declared-pause recheck"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the first surfacing recorded no throttle"
 
+  # Non-obvious reason - this busy footer is only the cheapest deterministic test reset, not a field trigger; the report named none.
   printf 'idle bare shell after agent exit\nesc to interrupt\n' > "$capture_file"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
