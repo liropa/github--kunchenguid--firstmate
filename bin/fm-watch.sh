@@ -562,7 +562,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
-# External constraint — bin/fm-teardown.sh owns the re-surface throttle lifetime.
+# Non-obvious reason - classification resets retain the throttle; status transitions and teardown remove it.
 clear_pause_state() {  # <window>
   local win=$1 key
   key=$(fm_state_key_encode "$win")
