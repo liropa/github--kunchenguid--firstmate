@@ -221,8 +221,8 @@ Do not raise them as a substitute for green results, retries, or weaker assertio
 When a lane grows into its cap, redistribute the work and record the new measurement, as the serial split above did.
 
 <!-- fm-authority: firstmate-observation 2026-08-16 - the three lint job walls were read from GitHub Actions job timings and cannot be reproduced from inside a checkout -->
-`Lint shell scripts` carries its own 20-minute cap and was observed at 13m58s, 14m08s, and 14m19s in the three most recent `main` runs (31902522552, 31855604632, 31819434635).
-It is trending the same way and will need its own treatment.
+`Lint shell scripts` then had no `timeout-minutes`, inherited GitHub's 360-minute default job timeout, and was observed at 13m58s, 14m08s, and 14m19s in the three most recent `main` runs (31902522552, 31855604632, 31819434635).
+The lint job now carries a 120-minute hang tripwire, with its sizing rationale owned by the comment in `.github/workflows/ci.yml`.
 This document covers the serial behavior lane only; nothing here changes the lint job.
 <!-- /fm-authority -->
 
