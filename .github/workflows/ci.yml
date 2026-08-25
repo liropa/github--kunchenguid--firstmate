@@ -13,6 +13,11 @@ jobs:
   lint:
     name: Lint shell scripts
     runs-on: ubuntu-latest
+    # Worst measured wall is 14.5 min on a +4.55 s/day corpus trend (61 main runs
+    # over 33 days; 95% upper bound +7.11 s/day). Cap is a hang tripwire at ~8x
+    # that wall, not a lint budget: growth would not reach it for 3.8 years at the
+    # measured rate, 2.4 years at the upper bound. Re-measure before changing it.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
