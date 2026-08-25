@@ -333,11 +333,6 @@ test_housekeeping_paused_unpaused_cleared() {
   pass "housekeeping clears a paused marker once the crew is no longer declaring the pause"
 }
 
-# The daemon's own pause-tracking reset also deletes the WATCHER's re-surface
-# throttle (.paused-resurfaced-). A captain-held line is the reachable case: the
-# daemon does not read it as a pause, while the watcher does pause-cadence it, so
-# reconciling one there wiped the record that keeps the watcher's recheck to once
-# per window. Clearing the daemon's own family stays correct either way.
 test_reconcile_keeps_the_watcher_pause_resurface_throttle() {
   local dir state win watcher_key task_key line
   dir=$(make_supercase reconcile-keeps-throttle)
