@@ -75,16 +75,19 @@
 #      not establishable here: a secondmate is never busy-checked at all, and a
 #      not-busy pane equally covers a harness parked at a permission dialog and a
 #      capture that failed. There is deliberately no `idle` state to default to.
-#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, an endpoint this reader cannot read also reports
-#      unknown · none rather than trusting a stale status log. It never reports the
-#      endpoint GONE: no backend check here separates a closed endpoint from a
-#      caller that cannot reach the control plane. The DETAIL names which was seen
-#      - `backend unreachable from here` means an unroutable caller, a reading
-#      that says nothing about the crew, while `backend endpoint unreadable` means
-#      the control plane was reachable-or-unproven and the endpoint did not
-#      answer. Both stay `unknown`, because the crew's state is equally unknown
-#      either way and the state field is not where that difference belongs.
+#   6. Missing meta or torn-down worktree: report unknown · none. It never reports
+#      an unread endpoint GONE: no backend check here separates a closed endpoint
+#      from a caller that cannot reach the control plane, so the DETAIL names which
+#      was seen and the two are handled differently. `backend endpoint unreadable`
+#      means the control plane was reachable-or-unproven and the endpoint did not
+#      answer; with no run attributed that is unknown · none, because standing a
+#      stale log in for a target the control plane could have produced is the
+#      substitution this reader exists to refuse. `backend unreachable from here`
+#      means an unroutable CALLER - a denied socket, an unreadable inventory, the
+#      EPERM class - which says nothing about the crew and therefore disqualifies
+#      nothing but the pane read itself: the status log is a plain file this reader
+#      still reaches, so step 5 continues from it and the emitted detail carries
+#      the qualifier. Only an absent-or-stateless log stays unknown · none there.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -856,8 +859,10 @@ fi
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a target this reader cannot read leaves no current-state
-# source: report unknown rather than trusting a possibly-stale status log.
+# is no run to consult, so an endpoint whose CONTROL PLANE answered and did not
+# produce the target leaves no current-state source: report unknown rather than
+# trusting a possibly-stale status log.
+UNREACHABLE_DETAIL=""
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # Report the read that failed, never a death certificate (header, step 6): a
@@ -867,14 +872,23 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # already-failed path, because a denied sbx probe costs ~10s (bin/fm-backend.sh).
   if fm_backend_transport_reachable "$TASK_BACKEND" "$BACKEND_TARGET"; then
     emit unknown none "backend endpoint unreadable: $BACKEND_TARGET"
-  else
-    emit unknown none "backend unreachable from here: $BACKEND_TARGET"
   fi
+  # An unroutable CALLER is a fact about this process, not about the crew, so it
+  # does not disqualify the one source that is still readable from here: the status
+  # log is a plain file, and a sandboxed reader reaches it when it reaches no
+  # socket. Withholding it produced `unknown - source: none` for crews whose last
+  # event was sitting readable on disk, which is what sent firstmate across the
+  # permission gate for an answer it already had. The endpoint-unreadable arm above
+  # keeps its stricter answer: there the control plane DID answer, so a stale log
+  # standing in for a target that did not is the exact substitution step 6 forbids.
+  UNREACHABLE_DETAIL="backend unreachable from here: $BACKEND_TARGET"
 fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
+# An unreachable transport skips this too: the pane read it needs is the read that
+# already failed.
+if [ -z "$UNREACHABLE_DETAIL" ] && [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
 fi
 
@@ -904,8 +918,15 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    LOG_DETAIL=$(status_line_note "$LOG_LINE")
+    # The degraded read is named in the DETAIL, never in the source field: that
+    # field is a fixed enum bin/fm-fleet-snapshot.sh reads whole, up to the
+    # separator, so a qualifier spliced into it lands in the snapshot's source.
+    if [ -n "$UNREACHABLE_DETAIL" ]; then
+      LOG_DETAIL="$LOG_DETAIL${SEP}$UNREACHABLE_DETAIL"
+    fi
+    emit "$LOG_STATE" status-log "$LOG_DETAIL"
   fi
 fi
 
-emit unknown none "no current-state source available"
+emit unknown none "${UNREACHABLE_DETAIL:-no current-state source available}"
