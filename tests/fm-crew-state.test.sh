@@ -35,7 +35,9 @@
 #       keys must never supply the run's own, in either emission order.
 #   (o) no source is `unknown`, and an unread endpoint is never called GONE: a
 #       trailing decision-only `resolved:` cannot establish idleness, and an
-#       unroutable caller is told apart from an endpoint that did not answer.
+#       unroutable caller is told apart from an endpoint that did not answer -
+#       the unroutable one keeping the status log it can still read, the
+#       endpoint-unreadable one still refusing it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1153,6 +1155,50 @@ test_unroutable_caller_is_not_a_dead_endpoint() {
   pass "an unroutable caller reports its own broken route, not a dead crew"
 }
 
+# An unroutable caller must not throw away the source it CAN still read. The status
+# log is a plain file, so a sandboxed reader reaches it when it reaches no socket;
+# reporting `unknown - source: none` there sent firstmate across the permission gate
+# for an answer already on disk. Reproduced 2026-09-06 from a sandboxed session whose
+# every transport probe is denied at the socket ("Operation not permitted"), against
+# a live secondmate whose status log's last line was readable throughout.
+test_unroutable_caller_falls_back_to_the_status_log() {
+  reset_fakes
+  local d out; d=$(new_case unroutable-status-log)
+  make_repo_on_branch "$d/wt" fm/feat-unroutable
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unroutable.meta" "window=fm:fm-feat-unroutable" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: needs a credential for the release step\n' > "$d/state/feat-unroutable.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_NO_SERVER=1
+  out=$(run_crew_state "$d" feat-unroutable)
+  assert_contains "$out" "state: blocked" "the readable status log answers when only the caller's route failed"
+  assert_contains "$out" "source: status-log" "the source names the log, not none"
+  assert_contains "$out" "needs a credential for the release step" "the log's own note is carried through"
+  assert_contains "$out" "backend unreachable from here" "the degraded read is still declared"
+  assert_not_contains "$out" "source: status-log (" "the source field keeps its bare enum value for fm-fleet-snapshot.sh"
+  pass "an unroutable caller reads the status log it can still reach and says the read was degraded"
+}
+
+# The counterfactual: no log to fall back to leaves the pre-existing answer exactly
+# as it was. Nothing about an unroutable route invents a state.
+test_unroutable_caller_without_a_status_log_is_still_none() {
+  reset_fakes
+  local d out; d=$(new_case unroutable-no-log)
+  make_repo_on_branch "$d/wt" fm/feat-nolog
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nolog.meta" "window=fm:fm-feat-nolog" "worktree=$d/wt" "kind=ship"
+  assert_absent "$d/state/feat-nolog.status" "the case starts with no status log at all"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_NO_SERVER=1
+  out=$(run_crew_state "$d" feat-nolog)
+  assert_contains "$out" "state: unknown" "an absent log leaves no source to fall back to"
+  assert_contains "$out" "source: none" "the source stays none"
+  assert_contains "$out" "backend unreachable from here" "the detail still names the caller's route as what failed"
+  pass "an unroutable caller with no status log keeps reporting unknown and none"
+}
+
 # The reachable arm: the control plane answered and the endpoint did not. That is
 # still not proof of absence on every backend, so the detail says unreadable - but
 # it must never fall through to the status log, which is the guarantee the header's
@@ -2121,6 +2167,8 @@ test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_resolved_event_does_not_imply_idleness
 test_unroutable_caller_is_not_a_dead_endpoint
+test_unroutable_caller_falls_back_to_the_status_log
+test_unroutable_caller_without_a_status_log_is_still_none
 test_unreadable_endpoint_does_not_republish_stale_log
 test_prefix_collision_does_not_republish_stale_log
 test_dead_window_ignores_stale_status_log
