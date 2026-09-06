@@ -215,6 +215,11 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+# No positionals at all - a bare run, or flags with no task id. Answer with the
+# usage `--help` prints instead of reaching ID=${POS[0]} below, where set -u
+# aborted on an unbound POS[0]; the EXIT trap's `return "$status"` then reported
+# that abort as exit 0 on bash 3.2, so a mistyped spawn looked like a success.
+[ "${#POS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }

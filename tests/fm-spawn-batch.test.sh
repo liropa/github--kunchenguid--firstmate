@@ -5,8 +5,8 @@
 # missing-brief check, which is reached before any tmux/treehouse side effect, so
 # the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
 # live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# behaviors asserted on their own are "a multi-pair batch does not stop after the
+# first failure" and "no positionals at all answers with usage".
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -102,6 +102,43 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+# No positionals at all is a misuse, and a misuse must answer with usage. Before
+# this, the run reached `ID=${POS[0]}` and died under set -u on an unbound POS[0];
+# the EXIT trap's `return "$status"` then reported that abort as exit 0 on bash
+# 3.2, so a mistyped spawn printed a shell error and still looked like a success.
+# The usage's first line is read back out of the script so this stays pinned to
+# what `--help` actually prints rather than to a copy of it.
+test_no_positionals_prints_usage_and_help_still_exits_zero() {
+  local out err status first
+  out="$TMP_ROOT/usage.out"
+  err="$TMP_ROOT/usage.err"
+  mkdir -p "$TMP_ROOT"
+  first=$(sed -n '2p' "$SPAWN" | sed 's/^# \{0,1\}//')
+  [ -n "$first" ] || fail "could not read the usage's first line out of $SPAWN"
+
+  # Leg 1: the misuse. Usage on stderr, non-zero exit, no shell abort.
+  FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" >"$out" 2>"$err"
+  status=$?
+  [ "$status" -ne 0 ] || fail "a no-argument run must exit non-zero"
+  grep -F "$first" "$err" >/dev/null || fail "the usage's first line is missing from stderr"
+  if grep -E 'POS\[0\]|unbound variable' "$err" >/dev/null; then
+    fail "the unbound-variable abort is still reachable"
+  fi
+  [ ! -s "$out" ] || fail "a misuse must not print usage on stdout"
+
+  # Leg 2: --help is unchanged - usage on stdout, exit 0.
+  FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" --help >"$out" 2>"$err"
+  status=$?
+  [ "$status" -eq 0 ] || fail "--help must still exit 0"
+  grep -F "$first" "$out" >/dev/null || fail "--help must still print usage on stdout"
+  pass "no positionals prints usage on stderr and exits non-zero; --help is unchanged"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping
+test_no_positionals_prints_usage_and_help_still_exits_zero
