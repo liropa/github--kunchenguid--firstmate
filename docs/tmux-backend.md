@@ -302,7 +302,7 @@ This matters more than closing the gap quickly, because the two errors are not s
 Reporting a gone endpoint as live leaves a stopped worker unattended; reporting a live endpoint as gone makes recovery relaunch a worker that is alive and mid-task, destroying its in-flight work.
 The residual shapes are never recorded by `bin/fm-spawn.sh`, which always writes `window=<session>:fm-<id>`; they reach this probe only through `FM_SUPERVISOR_TARGET` or `bin/fm-send.sh`'s explicit-target escape hatch.
 
-`bin/fm-crew-state.sh`'s `pane_readable` anchors unconditionally and misses a dotted window name the same way, but a miss there only falls back to the status log instead of routing a task into recovery, so it is left unchanged here.
+`bin/fm-crew-state.sh`'s `pane_readable` anchors unconditionally and misses a dotted window name the same way; the script header's step 6 owns how that unreadable endpoint affects current-state reconciliation.
 
 `tests/fm-backend-tmux-smoke.test.sh` covers both directions against a real tmux server: a live pair, a live pane id, a live dotted window name, an absent window, an absent session, an absent pane id, a session prefix that must not match a longer live sibling, and a window that reads gone once killed while its server keeps answering.
 
