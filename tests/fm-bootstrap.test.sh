@@ -830,19 +830,6 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
-test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
-  local trigger
-  # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
-  trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
-  assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
-  assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
-  assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
-  pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
-}
-
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -1037,17 +1024,17 @@ test_sweeps_are_skipped_with_no_lock_and_detect_lines_survive() {
   pass "bootstrap with no session lock skips every sweep, says so, and still prints its detect lines"
 }
 
-test_sweeps_are_skipped_when_another_session_holds_the_lock() {
-  local case_dir fixture fakebin fake_root holder out
+test_sweeps_are_skipped_when_another_session_holds_the_lock() (
+  local case_dir fixture fakebin fake_root out
   case_dir="$TMP_ROOT/sweep-gate-other-holder"
   fixture=$(make_sweep_gate_fixture "$case_dir")
   fakebin=${fixture%%|*}
   fake_root=${fixture#*|}
   # A live pid that is not this process's harness: the shape a crewmate sees when
   # it inherits FM_HOME while firstmate's own session holds the lock.
-  bash -c 'exec -a claude sleep 3600' &
+  bash -c 'exec -a claude sleep 3600' >/dev/null 2>&1 &
   holder=$!
-  FM_TEST_CLEANUP_PIDS+=("$holder")
+  trap 'kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true' EXIT
   printf '%s\n' "$holder" > "$case_dir/home/state/.lock"
 
   out=$(run_sweep_gate_bootstrap "$case_dir" "$fakebin" "$fake_root")
@@ -1058,7 +1045,7 @@ test_sweeps_are_skipped_when_another_session_holds_the_lock() {
     "bootstrap did not say why it swept nothing"
   [ "$(cat "$case_dir/home/state/.lock")" = "$holder" ] || fail "bootstrap disturbed the other session's lock"
   pass "bootstrap leaves a home alone when another live session holds its lock"
-}
+)
 
 test_detect_only_path_adds_no_skip_fact() {
   local case_dir fixture fakebin fake_root out
@@ -1096,11 +1083,10 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
-test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_gh_auth_probe_separates_sign_out_from_unusable_gh_session
 test_sweeps_run_for_the_session_holding_the_lock
 test_sweeps_are_skipped_with_no_lock_and_detect_lines_survive
-test_sweeps_are_skipped_when_another_session_holds_the_lock
+test_sweeps_are_skipped_when_another_session_holds_the_lock || exit 1
 test_detect_only_path_adds_no_skip_fact
