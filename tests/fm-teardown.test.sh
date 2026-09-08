@@ -650,7 +650,7 @@ SH
 
     actual=$(PATH="$case_dir/fakebin:$PATH" bash -c "$done_cmd") \
       || fail "printed done command failed for home $home_name"
-    expected=$(printf '<%s>\n' done task-x1 --pr https://github.com/example/repo/pull/7 --file "$fm_home/data/backlog.md")
+    expected=$(printf '<%s>\n' 'done' task-x1 --pr https://github.com/example/repo/pull/7 --file "$fm_home/data/backlog.md")
     [ "$actual" = "$expected" ] || fail "printed done command changed backlog arguments for home $home_name: $actual"
     actual=$(PATH="$case_dir/fakebin:$PATH" bash -c "$ready_cmd") \
       || fail "printed ready command failed for home $home_name"
