@@ -24,8 +24,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
-  This line means `gh auth status` failed and `bin/fm-bootstrap.sh`'s `gh_auth_diagnostic` did not meet its script-owned downgrade condition.
+  This line means `gh auth status` failed and `bin/fm-bootstrap.sh`'s `gh_auth_diagnostic` did not meet either of its script-owned downgrade conditions, one for an unreadable gh configuration and one for a session whose TLS trust path cannot verify GitHub's certificate.
   If `gh auth login` itself then fails to read or write its own configuration, the blocker is filesystem or keychain access for `gh`, not the sign-in, and re-running the login will not clear it.
+  If the login instead fails on a certificate it cannot verify, the blocker is this session's TLS trust path, so the sign-in is equally beside the point and the captain has to run it outside the sandbox.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
