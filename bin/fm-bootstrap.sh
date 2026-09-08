@@ -8,6 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BOOTSTRAP_INFO: gh cannot read its configuration ..." (verbose only),
+#                 "BOOTSTRAP_INFO: gh cannot verify TLS certificates ..." (verbose only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -685,13 +686,56 @@ gh_auth_config_unreadable() {  # <gh auth status output>
   return 1
 }
 
-# `gh auth status` exits non-zero for two unrelated reasons, and collapsing them
+# Did gh report the account's own token as unusable, rather than failing before
+# it reached a per-host verdict? This is only ever a precondition: gh prints it
+# whether the token was really revoked or gh merely could not complete the
+# check, so on its own it must always keep reporting NEEDS_GH_AUTH.
+gh_auth_token_rejected() {  # <gh auth status output>
+  case "$1" in
+    *'Failed to log in to'*'is invalid.'*) return 0 ;;
+  esac
+  return 1
+}
+
+# Can this session verify GitHub's TLS certificate at all? An OS sandbox that
+# breaks Go's certificate verification fails every gh HTTPS call in transport, so
+# gh's verdict about the token is not a reading of the token. Probed in the same
+# context as the status call, because a wall that exists only inside the sandbox
+# is invisible from anywhere else. It runs solely after gh has already failed, so
+# the healthy path stays as it was, and it is bounded like the status call so a
+# hung request cannot wedge session start. Anything that leaves the question open
+# - a timeout, a kill, a failure with different wording - returns false, so the
+# downgrade never fires on a guess.
+gh_auth_tls_verification_blocked() {
+  local probe rc
+  probe=$(gh_auth_run_bounded 5 gh api user 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] && return 1
+  if [ "$rc" -eq 124 ] || [ "$rc" -ge 128 ]; then
+    return 1
+  fi
+  case "$probe" in
+    *'tls: failed to verify certificate'*|*'x509:'*) return 0 ;;
+  esac
+  return 1
+}
+
+# `gh auth status` exits non-zero for three unrelated reasons, and collapsing them
 # into NEEDS_GH_AUTH made every OS-sandboxed session report a sign-in problem it
-# never had. The two cannot be told apart by exit code, and `gh api user` cannot
-# tell them apart either: the config load happens before any subcommand runs, so
-# it fails identically. They are separated here by gh's own startup-failure
-# wording, and a recognized config-read failure is only ever downgraded when a
-# GitHub credential independently proves the session can still authenticate.
+# never had. None of the three can be told apart by exit code, so each is
+# separated by gh's own wording plus a check that does not go through gh.
+#
+# A config-read failure aborts during startup, before any per-host verdict, and
+# `gh api user` fails identically because the config load happens before any
+# subcommand runs.
+#
+# A broken TLS trust path is the harder case, because gh does reach a verdict and
+# the verdict is wrong: with certificate verification failing in transport, gh
+# reports the token as invalid in exactly the wording a genuinely revoked token
+# produces, and `git credential fill` succeeds either way, so neither the wording
+# nor the credential separates them. The residual is that a token revoked while
+# the wall is up reads as fine until the wall drops, and push is what discovers
+# it.
 #
 # The match is deliberately one-sided. Anything unrecognized - an expired or
 # revoked token, a scope failure, a future gh error - reports NEEDS_GH_AUTH,
@@ -710,6 +754,13 @@ gh_auth_diagnostic() {
   if gh_auth_config_unreadable "$report" && github_credential_resolves; then
     if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: gh cannot read its configuration in this session; GitHub credentials still resolve, so authentication is fine"
+    fi
+    return 0
+  fi
+  if gh_auth_token_rejected "$report" && github_credential_resolves \
+    && gh_auth_tls_verification_blocked; then
+    if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      echo "BOOTSTRAP_INFO: gh cannot verify TLS certificates in this session, so its token verdict is unreliable; GitHub credentials still resolve, so authentication is fine"
     fi
     return 0
   fi

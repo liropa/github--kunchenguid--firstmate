@@ -73,9 +73,29 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
       printf '%s\n' '  X Failed to log in to github.com using token (GH_TOKEN)' >&2
       printf '%s\n' '  - The token in GH_TOKEN is invalid.' >&2
       exit 1 ;;
+    tls-wall|tls-wall-api-hang|revoked-keyring-token)
+      printf '%s\n' 'github.com' >&2
+      printf '%s\n' '  X Failed to log in to github.com account liropa (keyring)' >&2
+      printf '%s\n' '  - The token in keyring is invalid.' >&2
+      exit 1 ;;
     *)
       printf '%s\n' 'some wording no version of firstmate has ever seen' >&2
       exit 1 ;;
+  esac
+fi
+if [ "${1:-}" = api ]; then
+  case "${FM_FAKE_GH_AUTH:-ok}" in
+    tls-wall)
+      printf '%s\n' 'Get "https://api.github.com/user": tls: failed to verify certificate: x509: OSStatus -26276' >&2
+      exit 1 ;;
+    tls-wall-api-hang)
+      exec perl -e 'sleep 300' ;;
+    revoked-keyring-token)
+      printf '%s\n' 'gh: Bad credentials (HTTP 401)' >&2
+      exit 1 ;;
+    *)
+      printf '%s\n' '{"login":"tester"}'
+      exit 0 ;;
   esac
 fi
 exit 0
@@ -875,15 +895,23 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
-# `gh auth status` exits non-zero both when nobody is signed in and when gh cannot
-# read its own configuration, and the two demand opposite responses: the first
-# must block dispatch, the second must not, because signing in again neither fixes
-# nor is needed for an unreadable config. Missing a real sign-in problem is the
+# `gh auth status` exits non-zero when nobody is signed in, when gh cannot read
+# its own configuration, and when a sandbox breaks the TLS trust path so gh
+# cannot check the token it is reporting on. They demand opposite responses: the
+# first must block dispatch, the other two must not, because signing in again
+# neither fixes nor is needed for either. Missing a real sign-in problem is the
 # worse failure, so the rows also pin the cases that must keep reporting: an
 # unreadable config that yields no GitHub credential at all, generic startup and
 # keyring failures, an invalid token (which never says "not logged in"), and
 # wording this probe does not recognise.
-test_gh_auth_probe_separates_sign_out_from_unreadable_config() {
+#
+# The TLS-wall rows carry the wording measured on the captain's macOS host on
+# 2026-09-07: gh rejects the keyring token in words a real revocation also uses,
+# so `revoked-keyring-token` repeats that same rejection and differs only in what
+# the certificate probe finds. Its `gh: Bad credentials (HTTP 401)` reply was read
+# from a live `GH_TOKEN=gho_0000... gh api user` on 2026-09-08; only the absence
+# of a certificate failure in it is what the row pins.
+test_gh_auth_probe_separates_sign_out_from_unusable_gh_session() {
   local label gh_auth cred verbose mode expect notcontains case_dir fakebin out n
   n=0
   while IFS='^' read -r label gh_auth cred verbose mode expect notcontains; do
@@ -926,8 +954,13 @@ a generic root-command failure blocks dispatch^root-command-failure^yes^0^exact^
 a signed-out session blocks dispatch even with a git credential present^logged-out^yes^1^grep^NEEDS_GH_AUTH^
 an invalid token blocks dispatch even with a git credential present^invalid-token^yes^0^exact^NEEDS_GH_AUTH^
 an unrecognised gh failure blocks dispatch rather than passing silently^mystery-failure^yes^0^exact^NEEDS_GH_AUTH^
+a broken TLS trust path is not a sign-out^tls-wall^yes^0^notcontains^NEEDS_GH_AUTH^
+a broken TLS trust path is a no-action fact when asked for facts^tls-wall^yes^1^grep^BOOTSTRAP_INFO: gh cannot verify TLS certificates in this session, so its token verdict is unreliable; GitHub credentials still resolve, so authentication is fine^NEEDS_GH_AUTH
+a broken TLS trust path with no usable credential blocks dispatch^tls-wall^no^0^exact^NEEDS_GH_AUTH^
+a revoked keyring token blocks dispatch despite identical wording^revoked-keyring-token^yes^0^exact^NEEDS_GH_AUTH^
+a hanging certificate probe blocks dispatch^tls-wall-api-hang^yes^0^exact^NEEDS_GH_AUTH^
 ROWS
-  pass "bootstrap separates a GitHub sign-out from unreadable gh configuration"
+  pass "bootstrap separates a GitHub sign-out from an unusable gh session"
 }
 
 test_bootstrap_reporting
@@ -952,4 +985,4 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
-test_gh_auth_probe_separates_sign_out_from_unreadable_config
+test_gh_auth_probe_separates_sign_out_from_unusable_gh_session
