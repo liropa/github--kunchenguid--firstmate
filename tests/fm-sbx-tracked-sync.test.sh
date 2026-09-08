@@ -32,6 +32,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-sbx-tracked-sync)
+fm_test_session_lock_init
 
 # new_sync_world <name>: an origin repo whose history models the real
 # chicken-and-egg shape, a host-side secondmate home clone at the tip, a
@@ -46,6 +47,8 @@ new_sync_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/signals/sm"
   touch "$w/home/state/.last-watcher-beat"
+  # bin/fm-bootstrap.sh's guest sweep runs only for the session holding the lock.
+  fm_test_hold_session_lock "$w/home"
 
   git init -q -b main "$w/origin"
   printf 'projects/\nstate/\ndata/\nconfig/\n.no-mistakes/\n.fm-secondmate-home\n' > "$w/origin/.gitignore"

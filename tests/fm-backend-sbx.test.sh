@@ -44,6 +44,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-sbx)
+fm_test_session_lock_init
 
 # run_adapter <fakebin> <world> <snippet> [env k=v...]: run <snippet> in a bash
 # that sourced fm-backend.sh + the sbx adapter, with the fake sbx first in
@@ -2606,6 +2607,8 @@ new_sweep_world() {
   w=$(new_sbx_world "$name")
   mkdir -p "$w/home/state" "$w/home/config" "$w/home/data"
   touch "$w/home/state/.last-watcher-beat"
+  # The liveness sweep runs only for the session holding this home's lock.
+  fm_test_hold_session_lock "$w/home"
   printf 'codex\n' > "$w/home/config/crew-harness"
   home="$w/sm1"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"

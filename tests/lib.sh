@@ -195,6 +195,59 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# bin/fm-bootstrap.sh runs its five mutating sweeps only for the session holding
+# the home's lock, so a fixture that exercises a sweep has to hold that lock
+# first. Ownership is bin/fm-lock.sh's own decision, and it identifies a session
+# by walking process ancestry for a harness command name - a test runner has
+# none - so these helpers stand up a process that answers that description, then
+# ask the real fm-lock.sh which identity it settles on. Guessing a pid instead
+# would guess wrong whenever the suite runs from inside a real harness session,
+# where the ancestry walk answers first.
+#
+# Two steps, because the answer has to be resolved ONCE in the test file's own
+# shell: fm_test_session_lock_init exports FM_HARNESS_PID for every later child,
+# which is lost if it runs inside a command substitution.
+# fm_test_hold_session_lock only writes a file, so a fixture may call it from
+# anywhere, including a $(...) capture.
+
+FM_TEST_SESSION_LOCK_PID=
+
+# fm_test_session_lock_init: call once, in the test file's own shell, before any
+# fixture that needs a held lock.
+fm_test_session_lock_init() {
+  local scratch
+  [ -z "$FM_TEST_SESSION_LOCK_PID" ] || return 0
+  # A live process fm-lock.sh will accept as a harness: "claude" lands in its
+  # argv, which is half of what that check reads. It watches the pid this shell
+  # had when it started and exits once that is gone, so it needs no cleanup hook
+  # - and must not have one, because fm_test_cleanup also runs when a $(...)
+  # capture of fm_test_tmproot exits, which would kill it mid-suite.
+  bash -c 'p=$PPID; while kill -0 "$p" 2>/dev/null; do sleep 2; done' claude \
+    >/dev/null 2>&1 &
+  export FM_HARNESS_PID=$!
+  scratch=$(fm_test_tmproot fm-session-lock-probe)
+  FM_HOME="$scratch" "$ROOT/bin/fm-lock.sh" >/dev/null \
+    || fail "fixture could not resolve this session's lock identity"
+  FM_TEST_SESSION_LOCK_PID=$(cat "$scratch/state/.lock")
+  # Pin the answer for every later child. A suite whose ancestry really does
+  # reach a harness resolves that pid here, but a case running on a stripped PATH
+  # cannot walk ancestry at all and would otherwise fall back to the seeded pid
+  # and read itself as a non-holder. Naming the resolved pid as the fallback
+  # makes both routes agree.
+  export FM_HARNESS_PID=$FM_TEST_SESSION_LOCK_PID
+}
+
+# fm_test_hold_session_lock <home> [state-dir]: put <home>'s session lock in this
+# test process's name, so bootstrap sweeps run against <home>. Pass <state-dir>
+# for a case that runs under FM_STATE_OVERRIDE, where the lock lives in the
+# effective state dir rather than <home>/state.
+fm_test_hold_session_lock() {
+  local state=${2:-$1/state}
+  [ -n "$FM_TEST_SESSION_LOCK_PID" ] || fail "fm_test_session_lock_init must run in the test file's own shell first"
+  mkdir -p "$state"
+  printf '%s\n' "$FM_TEST_SESSION_LOCK_PID" > "$state/.lock"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

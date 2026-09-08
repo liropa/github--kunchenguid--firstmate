@@ -20,6 +20,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "BOOTSTRAP_INFO: mutating sweeps skipped - this process does not hold the session lock for <home>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -83,16 +84,24 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line above; the TANGLE line switches
-#          to advisory-only wording with no checkout command. Used by
-#          fm-session-start.sh's read-only path when the lock is refused, so no
-#          unverified session race-mutates PR-check artifacts, secondmate homes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          THE FIVE MUTATING SWEEPS (PR-check migration, secondmate_liveness_sweep,
+#          secondmate_sync, x_mode_setup, fleet_sync) RUN ONLY FOR THE SESSION
+#          THAT HOLDS THIS HOME'S SESSION LOCK. Two independent conditions gate
+#          them, and either one alone suppresses all five:
+#            - `fm-lock.sh owner` (this script's own check, always applied).
+#              Every crewmate terminal inherits FM_HOME from the session that
+#              spawned it, so without this check any worker that runs this
+#              script directly would sweep the captain's live home while holding
+#              no lock (measured 2026-09-08). A non-holder gets every read-only
+#              detect line above plus one BOOTSTRAP_INFO fact naming the skip,
+#              and touches nothing.
+#            - FM_BOOTSTRAP_DETECT_ONLY=1, fm-session-start.sh's read-only path
+#              when the lock is refused. It also switches the TANGLE line to
+#              advisory-only wording with no checkout command, and prints no
+#              extra skip fact because that path already prints its own
+#              read-only banner.
 #          Marker-key migration is session-start-only and is not owned by this
-#          standalone command. Unset/0 (the default) runs all five sweeps.
+#          standalone command.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -1014,10 +1023,25 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+# Resolve the mutating-sweep gate ONCE, before the first sweep runs, so every
+# sweep below answers to the same verdict. fm-lock.sh owns session identity and
+# holds the only definition of "this session holds the lock"; asking it here
+# adds no second lock. The running interpreter runs it, because the detect path
+# above is expected to work on a PATH too stripped for a `#!/usr/bin/env bash`
+# shebang to resolve, and an unstartable probe would read as a non-holder.
+SWEEPS=1
+SWEEPS_SKIPPED_UNLOCKED=0
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  SWEEPS=0
+elif ! FM_HOME="$FM_HOME" "${BASH:-bash}" "$SCRIPT_DIR/fm-lock.sh" owner >/dev/null 2>&1; then
+  SWEEPS=0
+  SWEEPS_SKIPPED_UNLOCKED=1
+fi
+
 # The PR-check migration pauses an identity-matched watcher, holds its lock, and
 # neutralizes legacy checks before later bootstrap mutation can leave old
-# artifacts runnable. Detect-only sessions never touch state.
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+# artifacts runnable.
+if [ "$SWEEPS" -eq 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
@@ -1071,10 +1095,16 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "$SWEEPS" -eq 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
   fleet_sync
+fi
+# Prints unconditionally, not behind FM_BOOTSTRAP_VERBOSE_FACTS: a reader who
+# expected the sweeps to run needs to see why nothing happened, and this is the
+# only output the skip produces.
+if [ "$SWEEPS_SKIPPED_UNLOCKED" -eq 1 ]; then
+  echo "BOOTSTRAP_INFO: mutating sweeps skipped - this process does not hold the session lock for $FM_HOME"
 fi
 exit 0

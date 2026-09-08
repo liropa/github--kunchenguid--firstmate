@@ -13,6 +13,13 @@
 #          exit 1: another live firstmate session holds the lock
 #          exit 2: cannot identify this session's own harness process
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh owner     silent ownership probe for a caller that must not
+#          mutate this home unless its own session already holds the lock.
+#          exit 0: the lock exists and records this session's harness process
+#          exit 1: every other case - no lock file, another holder, or this
+#          session's harness process could not be identified. Reads only, never
+#          acquires, and prints nothing, so a caller can gate on it without
+#          disturbing its own output.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +75,15 @@ harness_pid() {
   return 1
 }
 
+# The lock file's recorded pid, read with a builtin: callers reach this script
+# through bootstrap's detect path, which is expected to work on a stripped PATH
+# with no external `cat` (tests/fm-x-mode.test.sh runs exactly that).
+lock_holder() {
+  local pid=
+  read -r pid < "$LOCK" 2>/dev/null || true
+  printf '%s' "$pid"
+}
+
 holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1
   pid_exists "$pid" || return 1
@@ -77,9 +93,18 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   printf '%s' "$(basename "$(ps -o comm= -p "$pid" 2>/dev/null)") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
 }
 
+if [ "${1:-}" = "owner" ]; then
+  # Fails closed on every uncertainty: an unidentifiable session cannot prove it
+  # is the holder, so it is treated as a non-holder.
+  [ -f "$LOCK" ] || exit 1
+  me=$(harness_pid) || exit 1
+  [ "$(lock_holder)" = "$me" ] || exit 1
+  exit 0
+fi
+
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
-  old=$(cat "$LOCK")
+  old=$(lock_holder)
   if holder_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
@@ -91,7 +116,7 @@ me=$(harness_pid) || {
 
 mkdir -p "$STATE"
 if [ -f "$LOCK" ]; then
-  old=$(cat "$LOCK")
+  old=$(lock_holder)
   if [ "$old" != "$me" ] && holder_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1

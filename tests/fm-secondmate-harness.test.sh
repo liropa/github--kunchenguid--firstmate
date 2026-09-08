@@ -46,6 +46,7 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
+fm_test_session_lock_init
 export FM_BACKEND=tmux
 
 # ===========================================================================
@@ -701,6 +702,8 @@ new_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
+  # bin/fm-bootstrap.sh's secondmate sweep runs only for the lock holder.
+  fm_test_hold_session_lock "$w/home"
   git init -q -b main "$w/main"
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'

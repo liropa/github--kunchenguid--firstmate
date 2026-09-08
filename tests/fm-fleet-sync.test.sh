@@ -29,6 +29,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-fleet-sync-tests)
+fm_test_session_lock_init
 HOME_N=0
 
 # --- fixtures ---------------------------------------------------------------
@@ -461,8 +462,10 @@ test_bootstrap_relays_recovered_and_stuck() {
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
 
-  # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
+  # Full bootstrap: fleet sync runs only for the session holding this home's
+  # lock; no secondmate meta -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
+  fm_test_hold_session_lock "$home"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
