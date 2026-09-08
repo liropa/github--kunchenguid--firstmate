@@ -627,6 +627,39 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
+test_teardown_reminder_commands_preserve_backlog_path() {
+  local home_name case_dir fm_home out reminder done_cmd ready_cmd actual expected
+  for home_name in plain 'home one' "home one's \$cash;[backlog]"; do
+    case_dir=$(make_case "tasks-axi-quoted-$home_name")
+    fm_home="$case_dir/$home_name"
+    mkdir -p "$fm_home/data"
+    write_meta "$case_dir" no-mistakes ship
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+    add_compatible_tasks_axi "$case_dir"
+
+    out=$(FM_HOME="$fm_home" run_teardown "$case_dir") || fail "teardown failed for home $home_name"
+    reminder=$(printf '%s\n' "$out" | grep '^Backlog:') || fail "teardown omitted backlog reminder"
+    done_cmd=${reminder#*Run }
+    done_cmd=${done_cmd%%, then run *}
+    ready_cmd=${reminder#*, then run }
+    ready_cmd=${ready_cmd%% for dependency-cleared candidates*}
+    cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@"
+SH
+
+    actual=$(PATH="$case_dir/fakebin:$PATH" bash -c "$done_cmd") \
+      || fail "printed done command failed for home $home_name"
+    expected=$(printf '<%s>\n' done task-x1 --pr https://github.com/example/repo/pull/7 --file "$fm_home/data/backlog.md")
+    [ "$actual" = "$expected" ] || fail "printed done command changed backlog arguments for home $home_name: $actual"
+    actual=$(PATH="$case_dir/fakebin:$PATH" bash -c "$ready_cmd") \
+      || fail "printed ready command failed for home $home_name"
+    expected=$(printf '<%s>\n' ready --file "$fm_home/data/backlog.md")
+    [ "$actual" = "$expected" ] || fail "printed ready command changed backlog arguments for home $home_name: $actual"
+  done
+  pass "teardown reminder commands preserve backlog paths with spaces and shell punctuation"
+}
+
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -1830,6 +1863,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_reminder_commands_preserve_backlog_path
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

@@ -514,7 +514,7 @@ backlog_refresh_reminder() {
   local pr done_cmd report_path backlog_file
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
-    backlog_file="$DATA/backlog.md"
+    printf -v backlog_file '%q' "$DATA/backlog.md"
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
