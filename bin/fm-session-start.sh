@@ -178,7 +178,7 @@ print_backlog_manual_compact() {
 print_backlog_tasks_axi_compact() {
   local path=$1 out rc
   printf 'compact backlog listing (tasks-axi; max %s item(s); task bodies omitted)\n' "$BACKLOG_LIMIT"
-  out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
+  out=$(fm_tasks_axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '%s\n' "$out"

@@ -254,9 +254,9 @@ Orca provides both the task worktree and terminal endpoint (see "Runtime backend
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
-An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
-An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
+`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, but bootstrap only detects them: their version is a fleet pin owned outside firstmate, so both report `MISSING_MANUAL` pointing at agent-dotfiles' `setup.sh` `check_axi_tool_pin`, and `bin/fm-bootstrap.sh install` refuses them.
+An absent or incompatible `tasks-axi` reports `MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until the captain has installed the pinned version.
+An absent `quota-axi` reports the same line for `quota-axi`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In lock-refused read-only mode, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.

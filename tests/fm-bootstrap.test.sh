@@ -4,8 +4,10 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# 'MISSING_MANUAL: tasks-axi (instructions: ...)', the same line for quota-axi,
+# and 'BOOTSTRAP_INFO: ...', so those contracts are pinned verbatim. tasks-axi
+# and quota-axi are MANUAL because agent-dotfiles owns their version pin, so
+# bootstrap must report them without offering to install either one. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
@@ -364,12 +366,12 @@ test_bootstrap_reporting() {
 treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.1.1^1^-^empty^^
-missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing tasks-axi is required by default^1^-^1^-^exact^MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
+incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
+tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
+tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
+missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING_MANUAL: quota-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
+manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING_MANUAL: tasks-axi (instructions: agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"

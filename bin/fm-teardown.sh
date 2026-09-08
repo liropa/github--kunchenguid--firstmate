@@ -506,29 +506,34 @@ work_is_landed() {
   content_in_default
 }
 
+# The printed commands carry --file for the same reason bin/fm-tasks-axi-lib.sh
+# refuses a call without it: these are the commands firstmate then types, so a
+# pathless hint would reintroduce the config-supplied backlog path the wrapper
+# exists to remove.
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path backlog_file
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
+    backlog_file="$DATA/backlog.md"
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        done_cmd="tasks-axi done $ID --report $report_path --file $backlog_file"
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          done_cmd="tasks-axi done $ID --note \"local main\" --file $backlog_file"
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
+            done_cmd="tasks-axi done $ID --pr $pr --file $backlog_file"
           else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
+            done_cmd="tasks-axi done $ID --pr PR_URL --file $backlog_file"
           fi
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready --file $backlog_file for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi

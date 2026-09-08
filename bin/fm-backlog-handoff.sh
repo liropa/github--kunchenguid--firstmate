@@ -364,7 +364,7 @@ if [ -n "$SBX_SIGNALS_DIR" ]; then
   # tasks-axi mv (batch file -> the guest's own backlog.md) expects it.
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$BATCH_FILE"
 
-  if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$BATCH_FILE" 2>&1); then
+  if ! MV_OUT=$(fm_tasks_axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$BATCH_FILE" 2>&1); then
     rm -f "$BATCH_FILE"
     if [ -n "$MV_OUT" ]; then
       printf '%s\n' "$MV_OUT" >&2
@@ -422,7 +422,7 @@ fi
 # together and, on any failure, neither backlog's content changes - the only
 # cleanup is a scaffold we just created. tasks-axi writes both its success and
 # error output to stdout, so capture it and surface it only on failure.
-if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" 2>&1); then
+if ! MV_OUT=$(fm_tasks_axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" 2>&1); then
   if [ "$SUB_CREATED" -eq 1 ]; then
     rm -f "$SUB_BACKLOG"
   fi
