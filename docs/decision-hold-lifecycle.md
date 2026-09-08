@@ -6,11 +6,12 @@ This document records the deterministic mechanism, structured surfaces, and priv
 ## Mechanism
 
 `bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
-The command runs tasks-axi in the active `FM_HOME` and names that home's `data/backlog.md` explicitly, so the existing backlog remains the only durable work database, a secondmate-owned decision stays in the secondmate home, and no discovered config can redirect the write.
+The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
+[`bin/fm-tasks-axi-lib.sh`'s header](../bin/fm-tasks-axi-lib.sh) owns the explicit backlog-path rule.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
-It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
+It creates a kind `captain` backlog item when absent and reapplies the hold on every retry; [`bin/fm-decision-hold.sh`](../bin/fm-decision-hold.sh) owns the tasks-axi call.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.

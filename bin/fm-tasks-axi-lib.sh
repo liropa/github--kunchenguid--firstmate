@@ -1,22 +1,14 @@
 # shellcheck shell=bash
-# Shared tasks-axi backend selection and compatibility probe for bootstrap,
-# teardown, and secondmate backlog handoff.
+# Shared tasks-axi backend selection, compatibility probes, and backlog calls.
 # Usage: . bin/fm-tasks-axi-lib.sh
-# Compatible means tasks-axi --version reports 0.1.1 or newer,
-# `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
-# and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs (introduced in tasks-axi 0.2.2).
-# `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
-# backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
-# Absent or any other value keeps the default tasks-axi backend path, falling
-# back to manual mutation when the tool is not compatible.
+# docs/configuration.md ("Backlog backend") owns compatibility and backend selection.
 #
 # fm_tasks_axi is the single owner of the explicit-backlog-path rule, and every
-# fleet call that reads or writes a backlog goes through it. It refuses a call
-# that does not name its file, because tasks-axi otherwise takes the path from a
-# discovered .tasks.toml, and that config can point at a file outside the tree
-# the caller believes it is working in. Naming the file at the call site removes
-# the config's say in which backlog a fleet command touches.
+# fleet script call that reads or writes a backlog goes through it. It refuses
+# a call without a non-empty --file <path> or --file=<path>, because tasks-axi
+# otherwise takes the path from a discovered .tasks.toml, which can point
+# outside the tree the caller believes it is working in. Naming the file at the
+# call site removes the config's say in which backlog a fleet command touches.
 # Version and capability probes stay outside the wrapper: `--version` and
 # `<command> --help` return before tasks-axi resolves any backlog.
 
