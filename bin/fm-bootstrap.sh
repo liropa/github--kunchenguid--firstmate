@@ -657,12 +657,9 @@ gh_auth_run_bounded() {  # <seconds> <command...>
   fi
 }
 
-# Does a GitHub credential resolve independently of gh? git keeps its own
-# credential, and that is what actually authorizes fetch and push, so a usable
-# one proves this session is authenticated even when gh cannot read its config.
-# Local only, never a network call, and bounded because a credential helper
-# waiting on a locked keychain would otherwise wedge session start. The
-# credential itself is only matched, never printed.
+# A resolved credential does not prove GitHub accepts it; see gh_auth_diagnostic.
+# Bound lookup because a helper can wait on a locked keychain, and never print
+# the credential value.
 github_credential_resolves() {
   local credential_output rc
   credential_output=$(
@@ -686,10 +683,7 @@ gh_auth_config_unreadable() {  # <gh auth status output>
   return 1
 }
 
-# Did gh report the account's own token as unusable, rather than failing before
-# it reached a per-host verdict? This is only ever a precondition: gh prints it
-# whether the token was really revoked or gh merely could not complete the
-# check, so on its own it must always keep reporting NEEDS_GH_AUTH.
+# Token rejection alone never permits a downgrade; see gh_auth_diagnostic.
 gh_auth_token_rejected() {  # <gh auth status output>
   case "$1" in
     *'Failed to log in to'*'is invalid.'*) return 0 ;;
@@ -697,15 +691,6 @@ gh_auth_token_rejected() {  # <gh auth status output>
   return 1
 }
 
-# Can this session verify GitHub's TLS certificate at all? An OS sandbox that
-# breaks Go's certificate verification fails every gh HTTPS call in transport, so
-# gh's verdict about the token is not a reading of the token. Probed in the same
-# context as the status call, because a wall that exists only inside the sandbox
-# is invisible from anywhere else. It runs solely after gh has already failed, so
-# the healthy path stays as it was, and it is bounded like the status call so a
-# hung request cannot wedge session start. Anything that leaves the question open
-# - a timeout, a kill, a failure with different wording - returns false, so the
-# downgrade never fires on a guess.
 gh_auth_tls_verification_blocked() {
   local probe rc
   probe=$(gh_auth_run_bounded 5 gh api user 2>&1)
@@ -720,28 +705,30 @@ gh_auth_tls_verification_blocked() {
   return 1
 }
 
-# `gh auth status` exits non-zero for three unrelated reasons, and collapsing them
-# into NEEDS_GH_AUTH made every OS-sandboxed session report a sign-in problem it
-# never had. None of the three can be told apart by exit code, so each is
-# separated by gh's own wording plus a check that does not go through gh.
+# Exit status cannot distinguish sign-in failures from unreadable configuration
+# or sandbox TLS verification failures, so a downgrade needs a recognized
+# signature and an independently resolved GitHub credential.
 #
 # A config-read failure aborts during startup, before any per-host verdict, and
 # `gh api user` fails identically because the config load happens before any
 # subcommand runs.
 #
-# A broken TLS trust path is the harder case, because gh does reach a verdict and
-# the verdict is wrong: with certificate verification failing in transport, gh
-# reports the token as invalid in exactly the wording a genuinely revoked token
-# produces, and `git credential fill` succeeds either way, so neither the wording
-# nor the credential separates them. The residual is that a token revoked while
-# the wall is up reads as fine until the wall drops, and push is what discovers
-# it.
+# Go's TLS certificate verification can fail inside an OS sandbox and make gh
+# report the same invalid-token wording as a revoked token.
+# `git credential fill` can succeed in both cases, so neither result
+# distinguishes them. The bounded `gh api user` probe must run in the same
+# sandboxed context as `gh auth status`: a check outside it cannot establish
+# this session's TLS failure. Only `tls: failed to verify certificate` or `x509:`
+# establishes that failure. Token rejection and a resolved credential are only
+# preconditions, so the extra network call runs only after both and leaves the
+# healthy path unchanged. The bound prevents a hung request from blocking startup.
 #
-# The match is deliberately one-sided. Anything unrecognized - an expired or
-# revoked token, a scope failure, a future gh error - reports NEEDS_GH_AUTH,
-# because a missed sign-in problem would let firstmate dispatch work that cannot
-# push, while a false alarm only costs a check. That keeps a wording change in a
-# future gh version degrading toward the noisy side rather than the unsafe one.
+# The accepted residual is that a token revoked while TLS verification is blocked
+# can remain undetected until the block clears or a push discovers it.
+#
+# The match is deliberately one-sided. Missing credentials, timeouts, signals,
+# and unrecognized failures report NEEDS_GH_AUTH: a missed sign-in problem would
+# allow work that cannot push, while a false alarm only costs a check.
 gh_auth_diagnostic() {
   local report rc
   report=$(gh_auth_run_bounded 5 gh auth status 2>&1)
