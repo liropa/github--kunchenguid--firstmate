@@ -25,6 +25,7 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
+fm_test_session_lock_init
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
 # config/backend; the dev shell's ambient runtime markers ($TMUX inside tmux,
@@ -37,8 +38,14 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# Every case in this file runs bootstrap against <dir>/home, and bootstrap runs
+# its mutating sweeps only for the session holding that home's lock, so this
+# also puts the case's home under this process's lock - the ordinary session
+# shape these cases are written against.
 make_fake_toolchain() {
   local dir=$1 fakebin
+  mkdir -p "$dir/home"
+  fm_test_hold_session_lock "$dir/home"
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
@@ -965,6 +972,111 @@ ROWS
   pass "bootstrap separates a GitHub sign-out from an unusable gh session"
 }
 
+# Every crewmate terminal inherits FM_HOME from the session that spawned it, so
+# without an ownership check a worker running this script directly aims all five
+# mutating sweeps at the captain's live home while holding no lock. These cases
+# watch fleet_sync, the last of the five and the one an ordinary home reports on,
+# and pin the fact that explains the silence when the gate closes.
+
+# make_sweep_gate_fixture <case-dir>: a case home under this process's lock, with
+# fleet sync replaced by a stub that records the fact it ran. Echoes
+# "<fakebin>|<fake-root>".
+make_sweep_gate_fixture() {
+  local case_dir=$1 fakebin fake_root
+  fakebin=$(make_fake_toolchain "$case_dir")
+  mkdir -p "$case_dir/home/projects"
+  fake_root="$case_dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<SH
+#!/usr/bin/env bash
+: > '$case_dir/fleet-sync-ran'
+printf '%s\n' 'alpha: recovered: fast-forwarded'
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  printf '%s|%s\n' "$fakebin" "$fake_root"
+}
+
+run_sweep_gate_bootstrap() {
+  local case_dir=$1 fakebin=$2 fake_root=$3
+  shift 3
+  env "$@" PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+}
+
+test_sweeps_run_for_the_session_holding_the_lock() {
+  local case_dir fixture fakebin fake_root out
+  case_dir="$TMP_ROOT/sweep-gate-holder"
+  fixture=$(make_sweep_gate_fixture "$case_dir")
+  fakebin=${fixture%%|*}
+  fake_root=${fixture#*|}
+
+  out=$(run_sweep_gate_bootstrap "$case_dir" "$fakebin" "$fake_root")
+
+  assert_present "$case_dir/fleet-sync-ran" "the lock holder's bootstrap did not run the fleet-sync sweep"
+  assert_contains "$out" "FLEET_SYNC: alpha: recovered: fast-forwarded" "the lock holder's bootstrap did not report the sweep"
+  assert_not_contains "$out" "mutating sweeps skipped" "the lock holder was told its sweeps were skipped"
+  pass "bootstrap runs the mutating sweeps for the session holding the home's lock"
+}
+
+test_sweeps_are_skipped_with_no_lock_and_detect_lines_survive() {
+  local case_dir fixture fakebin fake_root out
+  case_dir="$TMP_ROOT/sweep-gate-unlocked"
+  fixture=$(make_sweep_gate_fixture "$case_dir")
+  fakebin=${fixture%%|*}
+  fake_root=${fixture#*|}
+  rm -f "$case_dir/home/state/.lock"
+
+  out=$(run_sweep_gate_bootstrap "$case_dir" "$fakebin" "$fake_root" FM_FAKE_GH_AUTH=logged-out)
+
+  assert_absent "$case_dir/fleet-sync-ran" "an unlocked bootstrap ran the fleet-sync sweep"
+  assert_contains "$out" \
+    "BOOTSTRAP_INFO: mutating sweeps skipped - this process does not hold the session lock for $case_dir/home" \
+    "an unlocked bootstrap did not say why it swept nothing"
+  assert_contains "$out" "NEEDS_GH_AUTH" "the read-only detect lines stopped running when the sweeps were skipped"
+  pass "bootstrap with no session lock skips every sweep, says so, and still prints its detect lines"
+}
+
+test_sweeps_are_skipped_when_another_session_holds_the_lock() {
+  local case_dir fixture fakebin fake_root holder out
+  case_dir="$TMP_ROOT/sweep-gate-other-holder"
+  fixture=$(make_sweep_gate_fixture "$case_dir")
+  fakebin=${fixture%%|*}
+  fake_root=${fixture#*|}
+  # A live pid that is not this process's harness: the shape a crewmate sees when
+  # it inherits FM_HOME while firstmate's own session holds the lock.
+  bash -c 'exec -a claude sleep 3600' &
+  holder=$!
+  FM_TEST_CLEANUP_PIDS+=("$holder")
+  printf '%s\n' "$holder" > "$case_dir/home/state/.lock"
+
+  out=$(run_sweep_gate_bootstrap "$case_dir" "$fakebin" "$fake_root")
+
+  assert_absent "$case_dir/fleet-sync-ran" "bootstrap swept a home whose lock another session holds"
+  assert_contains "$out" \
+    "BOOTSTRAP_INFO: mutating sweeps skipped - this process does not hold the session lock for $case_dir/home" \
+    "bootstrap did not say why it swept nothing"
+  [ "$(cat "$case_dir/home/state/.lock")" = "$holder" ] || fail "bootstrap disturbed the other session's lock"
+  pass "bootstrap leaves a home alone when another live session holds its lock"
+}
+
+test_detect_only_path_adds_no_skip_fact() {
+  local case_dir fixture fakebin fake_root out
+  case_dir="$TMP_ROOT/sweep-gate-detect-only"
+  fixture=$(make_sweep_gate_fixture "$case_dir")
+  fakebin=${fixture%%|*}
+  fake_root=${fixture#*|}
+  rm -f "$case_dir/home/state/.lock"
+
+  out=$(run_sweep_gate_bootstrap "$case_dir" "$fakebin" "$fake_root" FM_BOOTSTRAP_DETECT_ONLY=1)
+
+  assert_absent "$case_dir/fleet-sync-ran" "the detect-only path ran the fleet-sync sweep"
+  # fm-session-start.sh's read-only path already prints its own banner naming
+  # every skipped step, so a second explanation here would change that digest.
+  assert_not_contains "$out" "mutating sweeps skipped" "the detect-only path gained an extra skip fact"
+  pass "the detect-only path skips the sweeps without adding a second explanation"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
@@ -988,3 +1100,7 @@ test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_gh_auth_probe_separates_sign_out_from_unusable_gh_session
+test_sweeps_run_for_the_session_holding_the_lock
+test_sweeps_are_skipped_with_no_lock_and_detect_lines_survive
+test_sweeps_are_skipped_when_another_session_holds_the_lock
+test_detect_only_path_adds_no_skip_fact

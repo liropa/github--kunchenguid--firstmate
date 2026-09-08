@@ -45,6 +45,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
+fm_test_session_lock_init
 
 # --- unit level: fm_backend_tmux_agent_alive --------------------------------
 
@@ -253,6 +254,8 @@ new_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
+  # The liveness sweep runs only for the session holding this home's lock.
+  fm_test_hold_session_lock "$w/home"
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf '%s\n' "$w"
 }

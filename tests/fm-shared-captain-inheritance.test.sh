@@ -13,6 +13,7 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-shared-captain)
+fm_test_session_lock_init
 
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -289,6 +290,8 @@ EOF
   fakebin=$(make_fake_spawn_toolchain "$w")
   fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse no-mistakes tasks-axi quota-axi
 
+  # The secondmate sweep runs only for the session holding this home's lock.
+  fm_test_hold_session_lock "$home"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_DATA_OVERRIDE="$data_override" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)

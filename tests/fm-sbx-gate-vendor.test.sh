@@ -35,6 +35,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-sbx-gate-vendor)
+fm_test_session_lock_init
 
 # new_gate_world <name> [vm-state]: an sbx world with a fake sbx, a fake
 # no-mistakes, a guest-user $HOME carrying a gate root, and a secondmate home.
@@ -310,6 +311,10 @@ test_bootstrap_sweep_classifies() {
   bootstrap_root="$w/firstmate"
   git clone -q "$ROOT" "$bootstrap_root"
   cp "$ROOT/bin/fm-bootstrap.sh" "$bootstrap_root/bin/fm-bootstrap.sh"
+  # fm-bootstrap.sh asks fm-lock.sh whether this session owns the home, so the
+  # clone needs the working tree's copy of both or the sweep answers to an older
+  # contract than the one under test.
+  cp "$ROOT/bin/fm-lock.sh" "$bootstrap_root/bin/fm-lock.sh"
   # CI checks out the PR at detached HEAD, which a local clone preserves.
   # Create the fixture branch explicitly instead of trying to rename a branch
   # that may not exist.
@@ -317,6 +322,7 @@ test_bootstrap_sweep_classifies() {
   git -C "$bootstrap_root" remote remove origin
   mkdir -p "$w/home/state" "$w/home/data" "$w/signals/x"
   touch "$w/home/state/.last-watcher-beat"
+  fm_test_hold_session_lock "$w/home"
   git init -q -b main "$w/sm"
   printf 'v1\n' > "$w/sm/AGENTS.md"
   mkdir -p "$w/sm/bin"

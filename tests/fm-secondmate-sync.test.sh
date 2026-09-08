@@ -38,6 +38,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+fm_test_session_lock_init
 export FM_BACKEND=tmux
 
 # --- world builders --------------------------------------------------------
@@ -51,6 +52,8 @@ new_world() {
   mkdir -p "$w/home/state" "$w/home/data"
   # Fresh watcher beacon keeps fm-guard quiet for the spawn path.
   touch "$w/home/state/.last-watcher-beat"
+  # bin/fm-bootstrap.sh's secondmate sweep runs only for the lock holder.
+  fm_test_hold_session_lock "$w/home"
 
   git init -q -b main "$w/main"
   # Mirror the real repo: the gitignored operational dirs never dirty a worktree,
@@ -418,6 +421,8 @@ test_bootstrap_nudge_send_uses_state_override() {
   mkdir -p "$override_state"
   mv "$w/home/state/sm-instr.meta" "$override_state/sm-instr.meta"
   touch "$override_state/.last-watcher-beat"
+  # Under FM_STATE_OVERRIDE the session lock lives in the effective state dir too.
+  fm_test_hold_session_lock "$w/home" "$override_state"
   fakebin=$(make_fake_toolchain "$w")
   log="$w/tmux.log"
 
