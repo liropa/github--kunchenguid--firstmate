@@ -10,6 +10,15 @@
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
+#
+# fm_tasks_axi is the single owner of the explicit-backlog-path rule, and every
+# fleet call that reads or writes a backlog goes through it. It refuses a call
+# that does not name its file, because tasks-axi otherwise takes the path from a
+# discovered .tasks.toml, and that config can point at a file outside the tree
+# the caller believes it is working in. Naming the file at the call site removes
+# the config's say in which backlog a fleet command touches.
+# Version and capability probes stay outside the wrapper: `--version` and
+# `<command> --help` return before tasks-axi resolves any backlog.
 
 fm_tasks_axi_version_parts() {
   local output
@@ -73,4 +82,26 @@ fm_tasks_axi_backend_available() {
   local config_dir=$1
   fm_backlog_backend_manual "$config_dir" && return 1
   fm_tasks_axi_compatible
+}
+
+fm_tasks_axi() {
+  local arg want_value=0 have_file=0
+  for arg in "$@"; do
+    if [ "$want_value" -eq 1 ]; then
+      if [ -n "$arg" ]; then
+        have_file=1
+      fi
+      want_value=0
+      continue
+    fi
+    case "$arg" in
+      --file) want_value=1 ;;
+      --file=?*) have_file=1 ;;
+    esac
+  done
+  if [ "$have_file" -ne 1 ]; then
+    echo "error: fm_tasks_axi refuses 'tasks-axi ${1:-}' without an explicit --file <backlog path>" >&2
+    return 2
+  fi
+  tasks-axi "$@"
 }

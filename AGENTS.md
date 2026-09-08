@@ -424,6 +424,10 @@ Re-evaluate queued work after every teardown and heartbeat, dispatching items on
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
+<!-- fm-authority: captain-decision 2026-09-07 - the waiver rule the captain accepted as an audit trail rather than an authentication; its support is that dated decision file, not this diff -->
+Type `tasks-axi public-followup waive --approved-by captain` only after a captain instruction recorded in a dated decision file, and cite that file in the waiver's backlog note.
+The flag records who approved but cannot verify them, so that dated file is what makes the record checkable afterwards.
+<!-- /fm-authority -->
 `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff safety.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.

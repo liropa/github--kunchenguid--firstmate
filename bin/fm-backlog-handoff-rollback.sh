@@ -92,7 +92,7 @@ if ! fm_tasks_axi_compatible; then
   exit 1
 fi
 
-if ! MV_OUT=$(tasks-axi mv "${KEYS[@]}" --file "$BATCH_FILE" --to "$MAIN_BACKLOG" 2>&1); then
+if ! MV_OUT=$(fm_tasks_axi mv "${KEYS[@]}" --file "$BATCH_FILE" --to "$MAIN_BACKLOG" 2>&1); then
   if [ -n "$MV_OUT" ]; then
     printf '%s\n' "$MV_OUT" >&2
   fi

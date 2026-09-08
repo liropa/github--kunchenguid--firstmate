@@ -96,8 +96,11 @@ hold_id() {  # <origin-id> <decision-key>
   printf '%s-decision-%s\n' "$1" "$2"
 }
 
+# The cd keeps the active FM_HOME's own .tasks.toml (and its relative archive
+# path) in play; --file is what stops that config deciding WHICH backlog a
+# decision hold lands in.
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  (cd "$FM_HOME" && fm_tasks_axi "$@" --file "$DATA/backlog.md")
 }
 
 require_tasks_axi() {

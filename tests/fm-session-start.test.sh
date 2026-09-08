@@ -429,7 +429,7 @@ EOF
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
   # deterministically regardless of what is installed on the test host).
-  assert_contains "$out" "MISSING: tasks-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
+  assert_contains "$out" "MISSING_MANUAL: tasks-axi (instructions:" "detect-only bootstrap diagnostics did not run on the read-only path"
 
   # The mutating secondmate sweep must NOT have run: no SECONDMATE_SYNC/
   # NUDGE_SECONDMATES line, and the sowed secondmate meta's target dir is

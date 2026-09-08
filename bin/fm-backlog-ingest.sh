@@ -127,7 +127,7 @@ for batch in "${BATCHES[@]}"; do
     OWN_CREATED=1
   fi
 
-  if MV_OUT=$(tasks-axi mv "${TO_MERGE[@]}" --file "$batch" --to "$OWN_BACKLOG" 2>&1); then
+  if MV_OUT=$(fm_tasks_axi mv "${TO_MERGE[@]}" --file "$batch" --to "$OWN_BACKLOG" 2>&1); then
     mv -f "$batch" "$INGESTED_DIR/$base"
     MERGED_TOTAL=$((MERGED_TOTAL + ${#TO_MERGE[@]}))
     echo "ingested $base: ${TO_MERGE[*]}"

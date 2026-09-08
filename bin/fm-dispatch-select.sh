@@ -9,7 +9,9 @@
 #
 # quota-balanced is deterministic, and this header is the single owner of its
 # contract:
-#   - It runs quota-axi --json (or the --quota-json fixture).
+#   - It runs quota-axi --no-credential-refresh --json (or the --quota-json
+#     fixture), and never --full: a bare quota read must not spawn a vendor
+#     CLI of its own, which credential refresh does by default.
 #   - Per candidate vendor it takes the minimum percentRemaining across that
 #     vendor's GENERAL windows only - Claude five_hour and seven_day, Codex
 #     five_hour and weekly - ignoring model-scoped windows such as model:fable
@@ -25,8 +27,11 @@
 #   - If quota-axi is missing, exits non-zero, returns unparseable JSON, or no
 #     candidate is usable, the reason is logged to stderr and the first array
 #     element is printed - quota trouble never blocks dispatch.
+#   - A quota-axi too old to know --no-credential-refresh rejects the flag and
+#     exits non-zero, so it degrades down that same first-profile path. The
+#     read is never retried without the flag, because that is the spawn this
+#     contract exists to prevent.
 #
-# quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
 set -u
@@ -148,10 +153,10 @@ else
     first_profile
     exit 0
   fi
-  quota_json=$("$quota_cmd" --json 2>/dev/null)
+  quota_json=$("$quota_cmd" --no-credential-refresh --json 2>/dev/null)
   quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
-    log "quota-axi exited $quota_status; using first profile"
+    log "quota-axi --no-credential-refresh --json exited $quota_status; using first profile"
     first_profile
     exit 0
   fi

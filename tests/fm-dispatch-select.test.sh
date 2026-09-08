@@ -87,8 +87,75 @@ SH
   expect_code 0 "$status" "quota-axi error should not fail dispatch"
   [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
     || fail "quota-axi error should fall back to first, got: $out"
-  assert_contains "$err" "quota-axi exited 42" "quota-axi error fallback should be logged"
+  assert_contains "$err" "quota-axi --no-credential-refresh --json exited 42" "quota-axi error fallback should be logged"
   pass "quota-axi non-zero exit falls back to the first profile and logs"
+}
+
+test_quota_read_disables_credential_refresh() {
+  local fakebin argfile out
+  fakebin=$(fm_fakebin "$TMP_ROOT/no-refresh")
+  argfile="$TMP_ROOT/no-refresh.args"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > '$argfile'
+cat <<'JSON'
+{
+  "providers": [
+    {
+      "provider": "claude",
+      "state": { "status": "fresh" },
+      "windows": [
+        { "id": "five_hour", "kind": "session", "percentRemaining": 30 },
+        { "id": "seven_day", "kind": "weekly", "percentRemaining": 30 }
+      ]
+    },
+    {
+      "provider": "codex",
+      "state": { "status": "fresh" },
+      "windows": [
+        { "id": "five_hour", "kind": "session", "percentRemaining": 70 },
+        { "id": "weekly", "kind": "weekly", "percentRemaining": 70 }
+      ]
+    }
+  ]
+}
+JSON
+SH
+  chmod +x "$fakebin/quota-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  assert_contains "$(cat "$argfile")" "--no-credential-refresh" \
+    "quota read must disable credential refresh so it cannot spawn a vendor CLI"
+  case "$(cat "$argfile")" in
+    *--full*) fail "quota read must never pass --full" ;;
+  esac
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "accepted flag should still select on quota, got: $out"
+  pass "quota-balanced reads quota with credential refresh disabled and never --full"
+}
+
+test_quota_axi_rejecting_the_flag_falls_back_to_first() {
+  local fakebin out err status
+  fakebin=$(fm_fakebin "$TMP_ROOT/old-quota")
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = --no-credential-refresh ]; then
+    echo "error: unknown option --no-credential-refresh" >&2
+    exit 2
+  fi
+done
+echo '{"providers":[]}'
+SH
+  chmod +x "$fakebin/quota-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles" 2>"$TMP_ROOT/old-quota.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/old-quota.err")
+  expect_code 0 "$status" "a quota-axi rejecting the flag must not fail dispatch"
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "rejected flag should fall back to first, got: $out"
+  assert_contains "$err" "--no-credential-refresh" \
+    "the fallback log line should name the flag the installed quota-axi rejected"
+  pass "a quota-axi rejecting --no-credential-refresh degrades to the first profile and logs"
 }
 
 test_bad_quota_json_falls_back_to_first() {
@@ -178,6 +245,8 @@ test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
 test_quota_error_falls_back_to_first
+test_quota_read_disables_credential_refresh
+test_quota_axi_rejecting_the_flag_falls_back_to_first
 test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively

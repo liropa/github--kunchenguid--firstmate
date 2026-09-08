@@ -6,7 +6,7 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <where>)", "NEEDS_GH_AUTH",
 #                 "BOOTSTRAP_INFO: gh cannot read its configuration ..." (verbose only),
 #                 "BOOTSTRAP_INFO: gh cannot verify TLS certificates ..." (verbose only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
@@ -60,10 +60,13 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
+#          tasks-axi and quota-axi are required bootstrap tools, but bootstrap
+#          only DETECTS them: both report MISSING_MANUAL pointing at
+#          agent-dotfiles' setup.sh host pin check, which owns their version, so
+#          `fm-bootstrap.sh install` refuses them rather than pulling whatever
+#          npm serves today. tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
-#          incompatible build reports MISSING like no-mistakes. A compatible
+#          incompatible build reports MISSING_MANUAL the same way. A compatible
 #          tasks-axi default backend is silent. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
 #          degrades at runtime when quota data is unavailable.
@@ -578,22 +581,27 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
 
-manual_install_url() {
+# Instructions for a tool bootstrap must NOT install itself. herdr and sbx have
+# no scriptable installer; tasks-axi and quota-axi have one, but installing them
+# from here is what let a host drift onto a floating version of two tools that
+# read credentials and steer dispatch, so agent-dotfiles owns both their guest
+# pin and the host check that names the version (captain decision 5, 2026-09-07).
+manual_install_instructions() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     sbx) echo "https://docs.docker.com/ai/sandboxes/" ;;
+    tasks-axi|quota-axi) echo "agent-dotfiles setup.sh check_axi_tool_pin, which names the fleet-pinned version to install" ;;
     *) return 1 ;;
   esac
 }
 
 missing_tool_diagnostic() {
   local tool=$1 instructions
-  if instructions=$(manual_install_url "$tool"); then
+  if instructions=$(manual_install_instructions "$tool"); then
     echo "MISSING_MANUAL: $tool (instructions: $instructions)"
     return 0
   fi
@@ -998,7 +1006,7 @@ if [ "${1:-}" = "install" ]; then
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
     if ! cmd=$(install_cmd "$t"); then
-      instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+      instructions=$(manual_install_instructions "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
       echo "error: $t requires manual installation (instructions: $instructions)" >&2
       exit 1
     fi
@@ -1037,7 +1045,7 @@ if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
-  echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+  missing_tool_diagnostic tasks-axi
 fi
 gh_auth_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
