@@ -61,15 +61,16 @@
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools, but bootstrap
-#          only DETECTS them: both report MISSING_MANUAL pointing at
-#          agent-dotfiles' setup.sh host pin check, which owns their version, so
-#          `fm-bootstrap.sh install` refuses them rather than pulling whatever
-#          npm serves today. tasks-axi is also version and feature gated (0.1.1+
-#          with update --archive-body and mv [<id>...]); an installed but
-#          incompatible build reports MISSING_MANUAL the same way. A compatible
-#          tasks-axi default backend is silent. quota-axi is required because
-#          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
-#          degrades at runtime when quota data is unavailable.
+#          only detects them and `fm-bootstrap.sh install` refuses them.
+#          When absent, they report MISSING_MANUAL pointing at agent-dotfiles'
+#          setup.sh check_axi_tool_pin, which owns the fleet-pinned version.
+#          The pin prevents unreviewed upgrades of tools that read credentials
+#          and steer dispatch (captain decision 5, 2026-09-07).
+#          An installed tasks-axi that fails the compatibility contract in
+#          docs/configuration.md ("Backlog backend") reports the same line.
+#          A compatible tasks-axi default backend is silent unless
+#          FM_BOOTSTRAP_VERBOSE_FACTS=1 requests the availability fact.
+#          fm-dispatch-select.sh owns quota-balanced runtime behavior.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -585,11 +586,7 @@ install_cmd() {
   esac
 }
 
-# Instructions for a tool bootstrap must NOT install itself. herdr and sbx have
-# no scriptable installer; tasks-axi and quota-axi have one, but installing them
-# from here is what let a host drift onto a floating version of two tools that
-# read credentials and steer dispatch, so agent-dotfiles owns both their guest
-# pin and the host check that names the version (captain decision 5, 2026-09-07).
+# Keep manual instructions out of install_cmd: install mode evaluates its output.
 manual_install_instructions() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
