@@ -80,7 +80,7 @@ harness_pid() {
 # with no external `cat` (tests/fm-x-mode.test.sh runs exactly that).
 lock_holder() {
   local pid=
-  read -r pid < "$LOCK" 2>/dev/null || true
+  read -r pid 2>/dev/null < "$LOCK" || true
   printf '%s' "$pid"
 }
 

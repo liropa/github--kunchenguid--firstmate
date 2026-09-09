@@ -493,6 +493,43 @@ EOF
   pass "ownership refuses a worker without session IDs when ps cannot run"
 }
 
+test_lock_owner_unreadable_lock_fails_silently() {
+  local rec root home fakebin status
+  rec=$(new_world lock-owner-unreadable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cp "$home/state/.lock" "$home/lock-before"
+
+  env -u CLAUDE_PID -u FM_STATE_OVERRIDE FM_HARNESS_PID="$$" FM_HOME="$home" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" owner \
+    > "$home/stdout" 2> "$home/stderr" \
+    || fail "the primary session could not prove ownership of its readable lock"
+  [ ! -s "$home/stdout" ] && [ ! -s "$home/stderr" ] \
+    || fail "the successful ownership probe printed output"
+
+  chmod 000 "$home/state/.lock"
+  if [ -r "$home/state/.lock" ]; then
+    chmod 600 "$home/state/.lock"
+    printf '%s\n' 'skip: unreadable lock test requires enforced file permissions'
+    return
+  fi
+  status=0
+  env -u CLAUDE_PID -u FM_STATE_OVERRIDE FM_HARNESS_PID="$$" FM_HOME="$home" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" owner \
+    > "$home/stdout" 2> "$home/stderr" || status=$?
+
+  [ ! -r "$home/state/.lock" ] || fail "the ownership probe changed lock permissions"
+  chmod 600 "$home/state/.lock"
+  expect_code 1 "$status" "an unreadable lock must refuse ownership"
+  [ ! -s "$home/stdout" ] && [ ! -s "$home/stderr" ] \
+    || fail "the unreadable-lock ownership probe printed output"
+  cmp -s "$home/lock-before" "$home/state/.lock" || fail "the ownership probe changed the lock"
+  pass "ownership refuses an unreadable lock without output or mutation"
+}
+
 test_lock_identify_failure_is_distinct_from_contention() {
   local rec root home fakebin dead_pid out status
   rec=$(new_world lock-identify-fail)
@@ -1191,6 +1228,7 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_env_pid_fallback_when_ps_unavailable
 test_lock_owner_refuses_worker_without_session_ids
+test_lock_owner_unreadable_lock_fails_silently
 test_lock_identify_failure_is_distinct_from_contention
 test_lock_identify_failure_rejects_zero_pid
 test_lock_holder_not_stolen_when_ps_unavailable
