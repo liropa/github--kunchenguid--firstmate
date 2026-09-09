@@ -34,12 +34,7 @@ The lease is durable, so it is taken once per task: a respawn reuses the worktre
 Each backend's own "run this command line" primitive carries it (herdr's `pane run`, tmux's `send-keys <text> Enter`), so there is no separate Enter to lose.
 
 **Delivery is confirmed before the task is recorded as started.**
-The line is one `&&` chain:
-
-```
-test ! -s <sentinel> && printf %s <nonce> > <sentinel>
-  && ( cd <worktree> && export GOTMPDIR=... && <launch> )
-```
+The line is one `&&` chain; `LAUNCH_LINE` in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns its exact form.
 
 - *Mangled input*: a prompt that swallows leading characters leaves a mangled first word, which exits non-zero and short-circuits the chain - no nonce, and nothing after it ran.
 - *Repeated input*: `test ! -s` makes the chain idempotent, so a pane that buffered a retry and replays it later cannot start a second agent.

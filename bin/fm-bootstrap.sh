@@ -88,7 +88,7 @@
 #          secondmate_sync, x_mode_setup, fleet_sync) RUN ONLY FOR THE SESSION
 #          THAT HOLDS THIS HOME'S SESSION LOCK. Two independent conditions gate
 #          them, and either one alone suppresses all five:
-#            - `fm-lock.sh owner` (this script's own check, always applied).
+#            - A nonzero `fm-lock.sh owner` result outside detect-only mode.
 #              Every crewmate terminal inherits FM_HOME from the session that
 #              spawned it, so without this check any worker that runs this
 #              script directly would sweep the captain's live home while holding
