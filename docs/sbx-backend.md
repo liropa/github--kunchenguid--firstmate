@@ -24,7 +24,7 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
 - Auto-stop (and `sbx stop`) kill the guest **process tree**: the agent, its tmux server, and any in-guest daemons die; only disk survives.
   Empirical corroboration from agent-dotfiles: the in-guest no-mistakes daemon does not come back on VM restart, which is why resurrection restores it ("Guest no-mistakes daemon restore" below).
 - `sbx rm` requires `--force` non-interactively (the confirmation prompt dies on "stdin is not a terminal").
-  `sbx rm --force` destroys the VM **including its disk** - the in-guest home clone's private `data/` and any unlanded work, which is why teardown probes the guest first (see "Teardown" below).
+  `sbx rm --force` destroys the VM **including its disk** - the in-guest home clone's private `data/` and any unlanded work, which is why teardown probes the guest and exports its private records first (see "Teardown" below).
 - `sbx exec` against an absent name fails rc 1 with `ERROR: no sandbox named '...'`.
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
@@ -1155,7 +1155,95 @@ Retiring an sbx secondmate is a `sbx rm --force`, which destroys the VM disk (ab
 - **Safe (proceed)** only for a clean tree whose every commit is on a remote (a fork counts), OR a confirmed-**absent** sandbox (already gone, nothing to lose).
 - **Refuse (preserve the VM and home)** on uncommitted changes, on commits that live nowhere but the VM disk, OR on any *unverifiable* reading - an unreadable sandbox state or an in-guest `git` failure is never treated as clean (fail-safe, mirroring the host check's posture).
 - A **stopped** VM is inspected too (its disk holds the work); `sbx exec` auto-starts it, acceptable because retire is an explicit one-shot act, not routine triage.
-- No PR-merged / content-in-default fallback like the host ship check: a secondmate lands by pushing, and reproducing gh/PR resolution inside the VM is out of scope. `--force` is the captain's explicit discard authority and skips the probe entirely (a squash-merged-but-unpushed guest is confirmed that way).
+- No PR-merged / content-in-default fallback like the host ship check: a secondmate lands by pushing, and reproducing gh/PR resolution inside the VM is out of scope. `--force` is the captain's explicit discard authority and skips *this* probe entirely (a squash-merged-but-unpushed guest is confirmed that way). It does not skip the private-record export below, which git cannot see and `--force` was never authority over.
+
+### Private-record export (`fm_backend_sbx_export_private`)
+
+The landed-work probe above asks git, and git is told to ignore the guest home's `data/` and `state/`.
+Those directories are the secondmate's durable records - its backlog, its charter, its own task metadata - and clone mode never carried them to the host, so they exist **only on the VM disk** that `sbx rm --force` destroys.
+A guest can therefore be provably clean and fully pushed and still be carrying everything the secondmate knows.
+
+<!-- fm-authority: firstmate-observation 2026-09-09 - the incident this section exists to close, observed on the captain's host and outside any checkout this diff can show -->
+This is what happened on 2026-09-09 at 10:28 EDT.
+The agent-dotfiles secondmate's VM was recreated on a new template with `sbx rm --force`, in the belief that its records lived on the host.
+They did not.
+The rule was already written in this document (the clone-mode line under "Empirical CLI facts"), in this home's learnings twice (2026-07-26 and 2026-08-31), and in a manual rescue on the bridge from 2026-08-30 (`rescue-guesthome-20260830/guest-home-data-state.tar.gz`).
+Nothing in the code path enforced it, so the safety lived in an agent's memory and failed the way memory fails.
+The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts were lost for good.
+<!-- /fm-authority -->
+
+`bin/fm-teardown.sh` now exports those records before any `kind=secondmate` removal, on the `--force` path too, and refuses the removal when the host cannot verify the archive:
+
+- The archive lands on the **signal bridge**, at `<signals-dir>/backup-<UTC stamp>/home-private.tgz`.
+  The bridge is the one directory that is host-visible, writable from both sides, and never removed by teardown, so the archive outlives the machine it came from.
+  A same-second second export gets a `.1` suffix rather than overwriting the first.
+- The guest runs one `sh -c` pass: it archives whichever of `data/` and `state/` exist under the recorded `home=`, and reports which of `data/backlog.md` and `data/charter.md` it holds.
+  A guest that has neither directory at all is **refused**, not waved through.
+  "The export failed" and "there was nothing to export" look identical from outside, and only one of them is safe.
+- **Verification is host-side.**
+  The host reads the finished archive itself: it must exist, be non-empty, list through `tar -tzf`, and contain every expected file the guest reported holding.
+  The guest's report only decides what to look for; it is matched against those two fixed paths and nothing else, and never interpolated into a command ("Security posture" below).
+  A guest that exits 0 having written nothing cannot pass.
+- The **sha256 sidecar** written beside the archive is the verification mark.
+  It is the host's own digest of the bytes on the bridge, in `shasum -a 256 -c` format, so the archive can be rechecked later with a stock tool.
+  **An archive with no `<archive>.sha256` next to it was never verified and is not a backup.**
+- Every failure refuses the removal: an unreadable sandbox state, a failed guest command, a missing or empty archive, contents that disagree with what the guest reported, or a digest that could not be computed.
+  A confirmed-**absent** sandbox is the one clean pass, because its disk is already gone and there is nothing left to rescue.
+- Like the landed-work probe, this inspects a **stopped** VM and accepts that `sbx exec` auto-starts it.
+  A retire or a recreate is an explicit one-shot act, and the machine is about to be destroyed either way.
+- `--force` does **not** waive this.
+  `--force` is authority over unlanded code; it says nothing about durable records, and conflating the two is exactly what cost the 2026-09-09 artifacts.
+  `--discard-private` is the separate authority, applies only together with `--force`, still attempts the export first, and prints exactly what it is destroying when the export cannot be verified.
+
+## Recreating a secondmate's VM
+
+Replacing an sbx secondmate's machine - a new `FM_SBX_TEMPLATE`, a wedged guest, a template rebuild - destroys the guest's private records unless they are carried across by hand.
+The export above makes the archive; **restoring it is a separate step this procedure owns**, and it must happen before the replacement agent's first turn, because that agent's session start reads `data/` and would otherwise run, and write, against an empty home.
+
+Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.meta` first; `<name>` is `fm-<id>`.
+
+1. **Export and verify.**
+   Teardown does this for you and refuses if it cannot, so the ordinary path is `bin/fm-teardown.sh <id>` (add `--force` only for its usual reason, unlanded child work).
+   To rescue a machine you are keeping, call the adapter directly:
+
+   ```sh
+   . bin/fm-backend.sh && fm_backend_source sbx
+   fm_backend_sbx_export_private "sbx:fm-<id>" "<home>" "<signals-dir>"
+   ```
+
+   It prints the archive path and its sha256, or it refuses.
+   Confirm the archive from the host before going further:
+
+   ```sh
+   ARCHIVE=<signals-dir>/backup-<stamp>/home-private.tgz
+   tar -tzf "$ARCHIVE" | head            # data/backlog.md, data/charter.md, state/...
+   ( cd "$(dirname "$ARCHIVE")" && shasum -a 256 -c home-private.tgz.sha256 )
+   ```
+
+2. **Remove the machine.** `sbx rm --force fm-<id>`, or let teardown do it.
+
+3. **Spawn the replacement** on the template you want.
+   `FM_SBX_TEMPLATE` selects it, and the spawn re-runs guest-home provisioning ("Guest-home provisioning" above):
+
+   ```sh
+   FM_SBX_TEMPLATE=<template> bin/fm-spawn.sh <id> --secondmate
+   ```
+
+4. **Restore into the new guest BEFORE its first turn.**
+   The tarball's members are relative to the home, so it unpacks straight into it:
+
+   ```sh
+   sbx exec fm-<id> -- mkdir -p "<home>"
+   sbx exec -i fm-<id> -- sh -c 'cat > /tmp/home-private.tgz' < "$ARCHIVE"
+   sbx exec fm-<id> -- tar -C "<home>" -xzf /tmp/home-private.tgz
+   sbx exec fm-<id> -- ls "<home>/data"        # confirm backlog.md and charter.md are back
+   sbx exec fm-<id> -- rm -f /tmp/home-private.tgz
+   ```
+
+   The signal bridge is the same absolute path in the guest, so `sbx exec fm-<id> -- tar -C "<home>" -xzf "$ARCHIVE"` also works once the mount is up; the stdin route above does not depend on the mount having been re-established.
+
+5. **Then let the agent take its first turn.**
+   Restoring after it has started means its session start already read an empty home and may have written over what you are restoring.
 
 ## Backlog handoff (signal-bridge batches)
 
