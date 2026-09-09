@@ -150,20 +150,35 @@ case "$cmd" in
     fi
     exit 0
     ;;
-  rm|stop)
+  rm)
+    exit 0
+    ;;
+  stop)
+    stop_count=$(cat "$fake_state.stop-count" 2>/dev/null || echo 0)
+    stop_count=$((stop_count + 1))
+    printf '%s\n' "$stop_count" > "$fake_state.stop-count"
+    [ "$stop_count" != "${FM_FAKE_SBX_STOP_FAIL_ON:-0}" ] || exit 1
+    [ "$stop_count" != "${FM_FAKE_SBX_STOP_SILENT_ON:-0}" ] || exit 0
+    inventory=$(jq --arg name "$1" '.sandboxes |= map(if .name == $name then .status = "stopped" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+    printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
+    touch "$fake_state.stopped-$1"
+    [ -z "${FM_FAKE_SBX_WRITER_ACTIVE:-}" ] || rm -f "$FM_FAKE_SBX_WRITER_ACTIVE"
     exit 0
     ;;
   exec)
     interactive=0
+    sandbox=
     # Consume exec flags and the sandbox name; everything after -- is the
     # guest command line.
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -i) interactive=1; shift ;;
         --) shift; break ;;
-        *) shift ;;
+        *) sandbox=$1; shift ;;
       esac
     done
+    inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+    printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
     # No element of a guest command may be empty. This is firstmate's own
     # invariant on every vector it builds, and it is enforced HERE - once, for
     # every suite - because `$*` joins the arguments and so cannot show an
@@ -189,7 +204,12 @@ case "$cmd" in
         exit $?
         ;;
       "tmux has-session"*)
+        [ ! -e "$fake_state.stopped-$sandbox" ] || exit 1
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
+        ;;
+      "tmux new-session"*)
+        rm -f "$fake_state.stopped-$sandbox"
+        exit 0
         ;;
       "tmux capture-pane"*)
         if [ -n "${FM_FAKE_SBX_CAPTURE_FAIL_ONCE:-}" ]; then
@@ -312,7 +332,11 @@ case "$cmd" in
           set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
         fi
         sh -c "$script" "$@"
-        exit $?
+        export_rc=$?
+        if [ -n "${FM_FAKE_SBX_WRITER_ACTIVE:-}" ] && [ -e "$FM_FAKE_SBX_WRITER_ACTIVE" ]; then
+          printf 'record written after tar\n' >> "$2/data/backlog.md"
+        fi
+        exit "$export_rc"
         ;;
       "sh -c "*"ln -sfn "*)
         # The guest-home provisioning pass (fm_backend_sbx_provision_guest_home).

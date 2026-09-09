@@ -58,9 +58,6 @@
 #   (aa) terminal failure (unmanaged / destroying / lease)    -> ABORT, zero retries
 #   (ab) non-lock failure that never clears                   -> ABORT after the budget
 #
-# And the flag parsing in front of all of it, because --discard-private waives the
-# private-record export gate every secondmate removal now passes through:
-#   (ac) --discard-private with no --force                    -> REFUSE (rc 2)
 #   (ad) a misspelled flag                                    -> REFUSE (rc 2)
 #   (ae) an empty positional argument                         -> still no flags
 set -u
@@ -1868,27 +1865,23 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
-# --discard-private waives the private-record export gate that stands in front
-# of every secondmate removal (bin/backends/sbx.sh's fm_backend_sbx_export_private;
-# docs/sbx-backend.md "Private-record export"). It destroys records that exist
-# nowhere else, so it is not a standalone authority and an unrecognised flag is
-# never quietly ignored - a typo that reads as "no flags" is how a destructive
-# option ends up armed by accident.
+test_discard_private_is_refused_with_or_without_force() {
+  local case_dir rc force
+  for force in '' --force; do
+    case_dir=$(make_case "discard-refused${force}")
+    write_meta "$case_dir" local-only ship
 
-test_discard_private_requires_force() {
-  local case_dir rc
-  case_dir=$(make_case discard-needs-force)
-  write_meta "$case_dir" local-only ship
+    set +e
+    run_teardown "$case_dir" "$force" --discard-private > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
 
-  set +e
-  run_teardown "$case_dir" --discard-private > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 2 "$rc" "discard-needs-force: --discard-private alone must be refused"
-  assert_grep "--force" "$case_dir/stderr" \
-    "the refusal must say which authority --discard-private only widens"
-  pass "--discard-private without --force is refused as an incomplete authority"
+    expect_code 2 "$rc" "--discard-private must not permit unverified removal"
+    assert_grep "unknown teardown flag '--discard-private'" "$case_dir/stderr" \
+      "the removed discard flag must be refused"
+    assert_present "$case_dir/state/task-x1.meta" "a refused discard must preserve task metadata"
+    pass "--discard-private $force is refused before fleet operations"
+  done
 }
 
 test_unknown_teardown_flag_is_refused() {
@@ -1944,8 +1937,9 @@ SH
     fi
     assert_contains "$out" 'Usage: fm-teardown.sh' 'help must expose usage'
     assert_contains "$out" 'private-record export' 'help must explain the export requirement'
-    assert_contains "$out" '--discard-private' 'help must expose the separate discard flag'
-    assert_contains "$out" 'only with --force' 'help must state the required force flag'
+    assert_contains "$out" 'An export failure leaves the VM stopped' 'help must explain the stopped state after failure'
+    assert_contains "$out" 'next fm-send steer' 'help must name the recovery command'
+    assert_not_contains "$out" '--discard-private' 'help must not offer an export bypass'
     assert_absent "$case_dir/guard-called" 'help must stop before fleet operations'
     assert_absent "$case_dir/state" 'help must not create fleet state'
     pass "teardown: $form help describes private-record authority without fleet operations"
@@ -2000,6 +1994,6 @@ test_terminal_phrase_in_commit_subject_is_retried
 test_terminal_return_failure_aborts_without_retrying
 test_persistent_non_lock_return_failure_aborts_after_retries
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
-test_discard_private_requires_force
+test_discard_private_is_refused_with_or_without_force
 test_unknown_teardown_flag_is_refused
 test_empty_positional_argument_still_means_no_flags
