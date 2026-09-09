@@ -1925,6 +1925,38 @@ test_empty_positional_argument_still_means_no_flags() {
   pass "an empty positional argument is still no flags, as callers have always passed it"
 }
 
+test_help_explains_private_record_authority_without_fleet_operations() {
+  local case_dir out form
+  case_dir="$TMP_ROOT/help"
+  mkdir -p "$case_dir/bin"
+  cat > "$case_dir/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/guard-called"
+SH
+  chmod +x "$case_dir/bin/fm-guard.sh"
+  for form in standalone task; do
+    if [ "$form" = standalone ]; then
+      out=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$case_dir" "$TEARDOWN" --help) \
+        || fail 'standalone --help must succeed without a task'
+    else
+      out=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$case_dir" "$TEARDOWN" task-x1 --force --help) \
+        || fail 'task --help must succeed without starting cleanup'
+    fi
+    assert_contains "$out" 'Usage: fm-teardown.sh' 'help must expose usage'
+    assert_contains "$out" 'private-record export' 'help must explain the export requirement'
+    assert_contains "$out" '--discard-private' 'help must expose the separate discard flag'
+    assert_contains "$out" 'only with --force' 'help must state the required force flag'
+    assert_absent "$case_dir/guard-called" 'help must stop before fleet operations'
+    assert_absent "$case_dir/state" 'help must not create fleet state'
+    pass "teardown: $form help describes private-record authority without fleet operations"
+  done
+}
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
+test_help_explains_private_record_authority_without_fleet_operations
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_reminder_commands_preserve_backlog_path

@@ -67,6 +67,7 @@
 # fm_backend_sbx_export_private owns the archive path, the host-side
 # verification, and the sha256 sidecar that marks an archive as verified.
 # Usage: fm-teardown.sh <task-id> [--force] [--discard-private]
+#        fm-teardown.sh [<task-id>] --help
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work. It does NOT waive
@@ -120,6 +121,15 @@
 # safety checks before any destructive return. Teardown output notes every wait, retry,
 # and removal so the operator can see what happened.
 set -eu
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+      exit 0
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"

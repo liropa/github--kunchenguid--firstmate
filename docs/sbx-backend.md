@@ -1198,53 +1198,72 @@ The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts 
 
 ## Recreating a secondmate's VM
 
-Replacing an sbx secondmate's machine - a new `FM_SBX_TEMPLATE`, a wedged guest, a template rebuild - destroys the guest's private records unless they are carried across by hand.
-The export above makes the archive; **restoring it is a separate step this procedure owns**, and it must happen before the replacement agent's first turn, because that agent's session start reads `data/` and would otherwise run, and write, against an empty home.
+Replacing an sbx secondmate's VM destroys its private records unless they are exported and restored.
+Keep the registered host home and the parent home's metadata through this procedure.
+Run these commands from the firstmate repository root.
+Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.meta` before step 1.
 
-Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.meta` first; `<name>` is `fm-<id>`.
-
-1. **Export and verify.**
-   Teardown does this for you and refuses if it cannot, so the ordinary path is `bin/fm-teardown.sh <id>` (add `--force` only for its usual reason, unlanded child work).
-   To rescue a machine you are keeping, call the adapter directly:
+1. **Export the guest records.**
+   Run the adapter in Bash, including when the surrounding diagnostic shell is zsh:
 
    ```sh
-   . bin/fm-backend.sh && fm_backend_source sbx
+   bash -e <<'BASH'
+   . bin/fm-backend.sh
+   fm_backend_source sbx
    fm_backend_sbx_export_private "sbx:fm-<id>" "<home>" "<signals-dir>"
+   BASH
    ```
 
-   It prints the archive path and its sha256, or it refuses.
-   Confirm the archive from the host before going further:
+   Stop if the export fails.
+   Copy the printed archive path into `archive` below.
+
+2. **Verify, remove the old VM, and spawn with restoration enabled.**
+   Fill in the parent home, task ID, archive path, and new template.
+   This block preserves the recorded harness, agent flavor, model, effort, and signal bridge.
+   It stops on any failure.
 
    ```sh
-   ARCHIVE=<signals-dir>/backup-<stamp>/home-private.tgz
-   tar -tzf "$ARCHIVE" | head            # data/backlog.md, data/charter.md, state/...
-   ( cd "$(dirname "$ARCHIVE")" && shasum -a 256 -c home-private.tgz.sha256 )
+   bash <<'BASH'
+   set -euo pipefail
+   export FM_HOME='<parent-home>'
+   task_id='<id>'
+   archive='<signals-dir>/backup-<stamp>/home-private.tgz'
+   new_template='<template>'
+
+   . bin/fm-backend.sh
+   fm_backend_source sbx
+   meta="$FM_HOME/state/$task_id.meta"
+   test "$(fm_meta_get "$meta" kind)" = secondmate
+   test "$(fm_backend_of_meta "$meta")" = sbx
+   home_path=$(fm_meta_get "$meta" home)
+   signals=$(fm_meta_get "$meta" sbx_signals_dir)
+   harness=$(fm_meta_get "$meta" harness)
+   agent=$(fm_meta_get "$meta" sbx_agent)
+   test -d "$home_path"
+   test -n "$signals"
+   test -n "$harness"
+   test -n "$agent"
+   test "${signals##*/}" = "$task_id"
+   profile=(--harness "$harness")
+   model=$(fm_meta_get "$meta" model)
+   effort=$(fm_meta_get "$meta" effort)
+   case "$model" in ''|default) ;; *) profile+=(--model "$model") ;; esac
+   case "$effort" in ''|default) ;; *) profile+=(--effort "$effort") ;; esac
+
+   test -s "$archive"
+   tar -tzf "$archive"
+   (cd "$(dirname "$archive")" && shasum -a 256 -c home-private.tgz.sha256)
+   sbx rm --force "fm-$task_id"
+   FM_SBX_TEMPLATE="$new_template" FM_SBX_AGENT="$agent" \
+     FM_SBX_SIGNALS_ROOT="${signals%/*}" FM_SBX_RESTORE_PRIVATE="$archive" \
+     bin/fm-spawn.sh "$task_id" "$home_path" --secondmate --backend sbx \
+       "${profile[@]}"
+   BASH
    ```
 
-2. **Remove the machine.** `sbx rm --force fm-<id>`, or let teardown do it.
-
-3. **Spawn the replacement** on the template you want.
-   `FM_SBX_TEMPLATE` selects it, and the spawn re-runs guest-home provisioning ("Guest-home provisioning" above):
-
-   ```sh
-   FM_SBX_TEMPLATE=<template> bin/fm-spawn.sh <id> --secondmate
-   ```
-
-4. **Restore into the new guest BEFORE its first turn.**
-   The tarball's members are relative to the home, so it unpacks straight into it:
-
-   ```sh
-   sbx exec fm-<id> -- mkdir -p "<home>"
-   sbx exec -i fm-<id> -- sh -c 'cat > /tmp/home-private.tgz' < "$ARCHIVE"
-   sbx exec fm-<id> -- tar -C "<home>" -xzf /tmp/home-private.tgz
-   sbx exec fm-<id> -- ls "<home>/data"        # confirm backlog.md and charter.md are back
-   sbx exec fm-<id> -- rm -f /tmp/home-private.tgz
-   ```
-
-   The signal bridge is the same absolute path in the guest, so `sbx exec fm-<id> -- tar -C "<home>" -xzf "$ARCHIVE"` also works once the mount is up; the stdin route above does not depend on the mount having been re-established.
-
-5. **Then let the agent take its first turn.**
-   Restoring after it has started means its session start already read an empty home and may have written over what you are restoring.
+   `FM_SBX_RESTORE_PRIVATE` makes spawn verify the bridge archive again, create the VM on the selected template, and restore `data/` and `state/` into the guest before its first launch is submitted.
+   The agent therefore reads the restored records on its first turn.
+   The script header and `bin/fm-spawn.sh --help` own the restore input and failure contract.
 
 ## Backlog handoff (signal-bridge batches)
 

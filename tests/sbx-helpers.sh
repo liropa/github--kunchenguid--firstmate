@@ -184,6 +184,10 @@ case "$cmd" in
     fi
     guest="$*"
     case "$guest" in
+      "tar -C "*" -xzf "*)
+        tar -C "${FM_FAKE_SBX_GUEST_HOME:?}" "${@:4}"
+        exit $?
+        ;;
       "tmux has-session"*)
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
         ;;
