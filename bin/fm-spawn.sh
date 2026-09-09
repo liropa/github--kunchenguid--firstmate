@@ -139,6 +139,8 @@
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
+unset FM_HARNESS_PID CLAUDE_PID
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -1739,6 +1741,7 @@ LAUNCH_LINE="test ! -s $(shell_quote "$LAUNCH_SENTINEL")"
 LAUNCH_LINE="$LAUNCH_LINE && printf %s $(shell_quote "$LAUNCH_NONCE") > $(shell_quote "$LAUNCH_SENTINEL")"
 LAUNCH_LINE="$LAUNCH_LINE && ( cd $(shell_quote "$WT")"
 LAUNCH_LINE="$LAUNCH_LINE && export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
+LAUNCH_LINE="$LAUNCH_LINE && unset FM_HARNESS_PID CLAUDE_PID"
 LAUNCH_LINE="$LAUNCH_LINE && $LAUNCH )"
 
 # Seconds to wait for the nonce after each submission, and how many submissions

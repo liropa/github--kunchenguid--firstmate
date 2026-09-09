@@ -469,6 +469,30 @@ EOF
   pass "fm-lock.sh falls back to a live launcher-provided pid when ps cannot run"
 }
 
+test_lock_owner_refuses_worker_without_session_ids() {
+  local rec root home fakebin out status
+  rec=$(new_world lock-owner-no-session-ids)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_broken "$fakebin"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cp "$home/state/.lock" "$home/lock-before"
+
+  out=$(FM_HARNESS_PID="$$" CLAUDE_PID="$$" FM_HOME="$home" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" owner 2>&1) \
+    || fail "the primary session could not prove ownership without ps"
+  [ -z "$out" ] || fail "the successful ownership probe printed output: $out"
+  status=0
+  out=$(env -u FM_HARNESS_PID -u CLAUDE_PID FM_HOME="$home" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" owner 2>&1) || status=$?
+
+  expect_code 1 "$status" "a worker without session IDs was accepted as the primary lock holder"
+  [ -z "$out" ] || fail "the refused ownership probe printed output: $out"
+  cmp -s "$home/lock-before" "$home/state/.lock" || fail "the ownership probe changed the primary session lock"
+  pass "ownership refuses a worker without session IDs when ps cannot run"
+}
+
 test_lock_identify_failure_is_distinct_from_contention() {
   local rec root home fakebin dead_pid out status
   rec=$(new_world lock-identify-fail)
@@ -1166,6 +1190,7 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_env_pid_fallback_when_ps_unavailable
+test_lock_owner_refuses_worker_without_session_ids
 test_lock_identify_failure_is_distinct_from_contention
 test_lock_identify_failure_rejects_zero_pid
 test_lock_holder_not_stolen_when_ps_unavailable

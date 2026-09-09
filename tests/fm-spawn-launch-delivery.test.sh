@@ -80,7 +80,13 @@ exec_line() {  # <line>
   local cwd
   printf '%s\n' "$1" >> "$LINES"
   cwd=$(cat "$CWDF")
-  ( cd "$cwd" 2>/dev/null || cd /; bash -c "$1" ) >> "${FM_FAKE_SHELL_LOG:-/dev/null}" 2>&1
+  (
+    cd "$cwd" 2>/dev/null || cd /
+    if [ -n "${FM_FAKE_PANE_PARENT_PID:-}" ]; then
+      export FM_HARNESS_PID="$FM_FAKE_PANE_PARENT_PID" CLAUDE_PID="$FM_FAKE_PANE_PARENT_PID"
+    fi
+    bash -c "$1"
+  ) >> "${FM_FAKE_SHELL_LOG:-/dev/null}" 2>&1
 }
 
 run_line() {
@@ -128,6 +134,12 @@ case "$*" in
 esac
 
 case "${1:-}" in
+  has-session) [ "${FM_FAKE_NEW_SESSION:-0}" != 1 ]; exit $? ;;
+  new-session)
+    printf 'fm_harness_pid=%s claude_pid=%s\n' \
+      "${FM_HARNESS_PID-unset}" "${CLAUDE_PID-unset}" > "$LINES.server-env"
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   send-keys)
     shift
@@ -189,7 +201,8 @@ SH
 #!/usr/bin/env bash
 set -u
 {
-  printf 'launch cwd=%s gotmpdir=%s\n' "$PWD" "${GOTMPDIR:-}"
+  printf 'launch cwd=%s gotmpdir=%s fm_harness_pid=%s claude_pid=%s\n' \
+    "$PWD" "${GOTMPDIR:-}" "${FM_HARNESS_PID-unset}" "${CLAUDE_PID-unset}"
 } >> "${FM_FAKE_LAUNCH_MARKER:?FM_FAKE_LAUNCH_MARKER unset}"
 printf 'codex\n' > "${FM_FAKE_FG:?FM_FAKE_FG unset}"
 exit 0
@@ -238,7 +251,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 TMUX="${FM_FAKE_TMUX_SESSION-fake,1,0}" \
     FM_FAKE_WT="$WT_DIR" FM_FAKE_BUF="$CASE_DIR/buf" \
     FM_FAKE_PANE_CWD_FILE="$CASE_DIR/pane-cwd" FM_FAKE_FG="$CASE_DIR/fg" \
     FM_FAKE_EAT_COUNT="$CASE_DIR/eaten" FM_FAKE_EAT_LINES="$EAT_LINES" \
@@ -416,6 +429,30 @@ test_buffered_pane_runs_every_retry_but_launches_once() {
   pass "a pane that replays every buffered retry still launches exactly one agent"
 }
 
+test_launch_does_not_inherit_primary_session_ids() {
+  local rec id out status pane_parent_pid mode
+  for mode in fresh inherited; do
+    id="launch-session-ids-$mode"
+    rec=$(make_case "session-ids-$mode" "$id" 0)
+    read_case "$rec"
+    pane_parent_pid=
+    [ "$mode" != inherited ] || pane_parent_pid=$$
+
+    status=0
+    out=$(FM_BACKEND=tmux FM_HARNESS_PID="$$" CLAUDE_PID="$$" \
+      FM_FAKE_TMUX_SESSION='' FM_FAKE_NEW_SESSION=1 \
+      FM_FAKE_PANE_PARENT_PID="$pane_parent_pid" run_spawn "$id") || status=$?
+
+    expect_code 0 "$status" "spawn failed for $mode pane: $out"
+    assert_grep 'fm_harness_pid=unset claude_pid=unset' "$CASE_DIR/lines.server-env" \
+      "the new tmux server inherited the primary session IDs"
+    assert_grep 'fm_harness_pid=unset claude_pid=unset' "$CASE_DIR/launched-marker" \
+      "the launched worker inherited the primary session IDs from the $mode pane"
+  done
+  pass "new servers and launched workers do not inherit primary session IDs"
+}
+
+test_launch_does_not_inherit_primary_session_ids
 test_prompt_eating_first_line_still_launches
 test_unclearable_prompt_fails_loudly
 test_buffered_pane_runs_every_retry_but_launches_once
