@@ -24,10 +24,14 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
+The routed `resolve` shape requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
+
+`--no-work` is the resolve shape for a captain answer that routes to no work at all.
+It is refused together with `--routed-to`, still requires the decision file, and records `routed: none (no work)` where routed identities would go.
+One predicate recognizes both resolution shapes, so `verify` and the shared completion gate accept a no-work record as durably resolved.
 
 ## Structured read surfaces
 
@@ -84,4 +88,38 @@ $ git diff --check
 
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
+```
+
+### No-work resolution outcome
+
+Verification date: 2026-09-08.
+
+The gap was measured on the agent-dotfiles secondmate home.
+A captain decision answered as moot routed to no live work, so `resolve` refused it as `routed task is already done` and the hold was closed by hand instead.
+The added regression registers two holds on one synthetic origin, closes the first through `--no-work`, and keeps the second on the routed path as an unchanged control.
+It covers the refusal of `--no-work` beside `--routed-to`, of a no-work resolve with no decision file, and of a decision file that does not exist, and asserts the hold stays queued and held after each refusal.
+It then closes the hold, reads back the recorded `routed: none (no work)` and captain decision text, retries the same resolve for idempotency, and confirms `complete` and `verify` accept that record as durably resolved.
+Run against the pre-change script the same case fails, so it reproduces the gap rather than only describing it.
+
+The commands and their exact outputs follow.
+Five neighbouring suites were re-run in the same pass and all exited 0 with no failing case: `tests/fm-teardown.test.sh` (43 ok), `tests/fm-fleet-snapshot-view.test.sh` (14 ok), `tests/fm-bearings-snapshot.test.sh` (39 ok), `tests/fm-brief.test.sh` (16 ok), and `tests/fm-instruction-owners.test.sh` (9 ok).
+
+```text
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - non-forced scout teardown always requires durable inventory verification
+ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - completion and verification validate origins before constructing paths
+ok - ended visual review follows the same decision-hold completion owner
+ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
+ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a decision that routes to no work closes durably and the routed shape is unchanged
+
+$ bin/fm-lint.sh bin/fm-decision-hold.sh tests/fm-decision-hold-lifecycle.test.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ git diff --check
+(no output)
 ```

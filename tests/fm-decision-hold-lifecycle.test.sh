@@ -550,6 +550,88 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+test_no_work_resolution_closes_a_decision_that_routes_nowhere() {
+  local home origin moot_hold routed_hold show
+  home=$(make_home no-work-resolution)
+  origin=sample-moot-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review a moot sample hazard" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the moot-review origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  cat > "$home/data/$origin/report.md" <<'EOF'
+# Moot sample review
+
+One choice routes to no work at all and one routes to a dependent change.
+EOF
+  moot_hold=$(run_decisions "$home" hold "$origin" bump-moot \
+    --title "Choose whether the sample bump ships" --reason "captain bump choice pending" --repo sample) \
+    || fail "could not register the no-work hold"
+  routed_hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the routed control hold"
+  printf 'The hazard did not occur; the sample bump is moot and nothing is to be built.\n' \
+    > "$home/moot-decision.txt"
+
+  if run_decisions "$home" resolve "$origin" bump-moot --decision-file "$home/moot-decision.txt" \
+    --no-work --routed-to sample-route-implementation \
+    > "$home/both-shapes.out" 2> "$home/both-shapes.err"; then
+    fail "resolve accepted --no-work together with --routed-to"
+  fi
+  assert_grep "cannot be combined" "$home/both-shapes.err" \
+    "the mutually exclusive resolve shapes must be refused explicitly"
+
+  if run_decisions "$home" resolve "$origin" bump-moot --no-work \
+    > "$home/no-file.out" 2> "$home/no-file.err"; then
+    fail "no-work resolve closed a hold with no captain decision file"
+  fi
+  assert_grep "decision-file is required" "$home/no-file.err" \
+    "a missing decision file must be refused explicitly"
+  if run_decisions "$home" resolve "$origin" bump-moot --no-work \
+    --decision-file "$home/absent-decision.txt" \
+    > "$home/absent-file.out" 2> "$home/absent-file.err"; then
+    fail "no-work resolve accepted a decision file that does not exist"
+  fi
+  show=$(tasks_in "$home" show "$moot_hold" --full)
+  assert_contains "$show" "state: queued" "a refused no-work resolve closed the hold"
+  assert_contains "$show" "held: yes" "a refused no-work resolve released the hold"
+
+  run_decisions "$home" resolve "$origin" bump-moot --decision-file "$home/moot-decision.txt" --no-work \
+    >/dev/null || fail "no-work resolve could not close a decision that routes to no work"
+  show=$(tasks_in "$home" show "$moot_hold" --full)
+  assert_contains "$show" "state: done" "no-work resolve did not close the hold"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "no-work close lost the captain decision reference"
+  assert_contains "$show" "routed: none (no work)" "no-work close lost its explicit no-work record"
+  assert_contains "$show" "nothing is to be built" "no-work close lost the captain decision text"
+  assert_not_contains "$show" "Routed work:" "no-work close claimed routed work"
+  run_decisions "$home" resolve "$origin" bump-moot --decision-file "$home/moot-decision.txt" --no-work \
+    >/dev/null || fail "an identical no-work resolve retry was not idempotent"
+  run_decisions "$home" complete "$origin" bump-moot route >/dev/null \
+    || fail "completion rejected the no-work resolution as durable"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification rejected the no-work resolution as durable"
+
+  tasks_in "$home" add sample-route-implementation "Apply the selected sample route" \
+    --kind ship --repo sample --blocked-by "$routed_hold" >/dev/null \
+    || fail "could not create the routed control work"
+  printf 'Use route north for the sample system.\n' > "$home/route-decision.txt"
+  if run_decisions "$home" resolve "$origin" route --decision-file "$home/route-decision.txt" \
+    > "$home/no-shape.out" 2> "$home/no-shape.err"; then
+    fail "resolve closed a hold with neither --routed-to nor --no-work"
+  fi
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation >/dev/null \
+    || fail "the existing routed resolve shape stopped working"
+  show=$(tasks_in "$home" show "$routed_hold" --full)
+  assert_contains "$show" "state: done" "routed resolve did not close the hold"
+  assert_contains "$show" "Routed work:" "routed resolve lost its routed-work record"
+  assert_not_contains "$show" "none (no work)" "routed resolve recorded the no-work sentinel"
+  show=$(tasks_in "$home" show sample-route-implementation --full)
+  assert_contains "$show" "blocked: no" "routed resolve did not release dependent work"
+  pass "a decision that routes to no work closes durably and the routed shape is unchanged"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +642,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_no_work_resolution_closes_a_decision_that_routes_nowhere
