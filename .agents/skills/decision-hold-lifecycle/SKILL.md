@@ -32,10 +32,10 @@ Bearings reads the resulting structured state and must never compensate by scrap
 3. For each choice, choose a stable key and use the script's `hold` command with a concise title, reason, and repository.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
-6. After the captain decides, record dependent work with normal tasks-axi commands and block it by the hold identity.
+6. If the captain's answer requires work, record dependent work with normal tasks-axi commands and block it by the hold identity.
 7. Put the captain's exact durable decision in a file and use the script's `resolve` command with every routed task.
    When the captain's answer routes to no work at all, close the hold with the script's no-work resolve outcome rather than inventing a dependent task to satisfy the command.
-8. Confirm Bearings no longer shows the closed hold and that routed work remains in structured backlog state.
+8. Confirm Bearings no longer shows the closed hold and that any routed work remains in structured backlog state.
 
 `bin/fm-decision-hold.sh --help` owns command syntax, identity construction, completion attestation, retry behavior, and close ordering.
 `docs/decision-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.

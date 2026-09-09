@@ -6,9 +6,8 @@
 # visual-review, chat, or terminal prose to guess whether a decision exists.
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
 # routes dependent work. This script supplies deterministic identities, creates
-# and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# and verifies structured tasks-axi captain holds, and records completion
+# attestation in the originating task's metadata.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -35,7 +34,7 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
-# `resolve` requires every --routed-to task to exist and to be blocked by the hold.
+# The routed `resolve` shape requires every task to exist and be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
