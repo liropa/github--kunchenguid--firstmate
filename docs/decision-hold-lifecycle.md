@@ -29,9 +29,7 @@ It records the decision digest and routed task identities as a retry identity in
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
 
-`--no-work` is the resolve shape for a captain answer that routes to no work at all.
-It is refused together with `--routed-to`, still requires the decision file, and records `routed: none (no work)` where routed identities would go.
-One predicate recognizes both resolution shapes, so `verify` and the shared completion gate accept a no-work record as durably resolved.
+The header and `--help` output of [`bin/fm-decision-hold.sh`](../bin/fm-decision-hold.sh) own the mechanics for the no-work resolve outcome.
 
 ## Structured read surfaces
 
