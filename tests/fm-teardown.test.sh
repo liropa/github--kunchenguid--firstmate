@@ -1865,23 +1865,22 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
-test_discard_private_is_refused_with_or_without_force() {
-  local case_dir rc force
-  for force in '' --force; do
-    case_dir=$(make_case "discard-refused${force}")
-    write_meta "$case_dir" local-only ship
+test_discard_private_requires_force() {
+  local case_dir rc
+  case_dir=$(make_case discard-needs-force)
+  write_meta "$case_dir" local-only ship
 
-    set +e
-    run_teardown "$case_dir" "$force" --discard-private > "$case_dir/stdout" 2> "$case_dir/stderr"
-    rc=$?
-    set -e
+  set +e
+  run_teardown "$case_dir" --discard-private > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
 
-    expect_code 2 "$rc" "--discard-private must not permit unverified removal"
-    assert_grep "unknown teardown flag '--discard-private'" "$case_dir/stderr" \
-      "the removed discard flag must be refused"
-    assert_present "$case_dir/state/task-x1.meta" "a refused discard must preserve task metadata"
-    pass "--discard-private $force is refused before fleet operations"
-  done
+  expect_code 2 "$rc" "--discard-private without --force must be refused"
+  assert_grep "only applies with --force" "$case_dir/stderr" \
+    "the refusal must identify the required force flag"
+  assert_present "$case_dir/state/task-x1.meta" "a refused discard must preserve task metadata"
+  assert_present "$case_dir/wt" "a refused discard must preserve the worktree"
+  pass "--discard-private without --force is refused before fleet operations"
 }
 
 test_unknown_teardown_flag_is_refused() {
@@ -1937,9 +1936,11 @@ SH
     fi
     assert_contains "$out" 'Usage: fm-teardown.sh' 'help must expose usage'
     assert_contains "$out" 'private-record export' 'help must explain the export requirement'
-    assert_contains "$out" 'An export failure leaves the VM stopped' 'help must explain the stopped state after failure'
+    assert_contains "$out" 'Without discard authority, an export failure leaves the VM stopped' 'help must explain the stopped state after failure'
     assert_contains "$out" 'next fm-send steer' 'help must name the recovery command'
-    assert_not_contains "$out" '--discard-private' 'help must not offer an export bypass'
+    assert_contains "$out" '--discard-private is the sole exception' 'help must identify the explicit discard exception'
+    assert_contains "$out" 'only with --force' 'help must limit the discard exception to force teardown'
+    assert_contains "$out" 'export is still attempted first' 'help must preserve the export attempt under discard authority'
     assert_absent "$case_dir/guard-called" 'help must stop before fleet operations'
     assert_absent "$case_dir/state" 'help must not create fleet state'
     pass "teardown: $form help describes private-record authority without fleet operations"
@@ -1994,6 +1995,6 @@ test_terminal_phrase_in_commit_subject_is_retried
 test_terminal_return_failure_aborts_without_retrying
 test_persistent_non_lock_return_failure_aborts_after_retries
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
-test_discard_private_is_refused_with_or_without_force
+test_discard_private_requires_force
 test_unknown_teardown_flag_is_refused
 test_empty_positional_argument_still_means_no_flags
