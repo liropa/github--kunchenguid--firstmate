@@ -396,6 +396,204 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
   return 0
 }
 
+# --- private-record rescue before removal (fm_backend_sbx_export_private) ----
+#
+# The guest home's data/ and state/ are gitignored, so clone mode never carried
+# them and the RO source mount never held them: they exist ONLY on the VM disk,
+# and `sbx rm --force` destroys them with the machine. fm_backend_sbx_unlanded_work
+# above cannot see them either - it asks git, and git is told to ignore them.
+# So a guest can be provably clean and fully pushed, and still be carrying the
+# secondmate's whole backlog, charter and durable records.
+#
+# The destination is the signal bridge: the one directory that is host-visible,
+# writable from both sides, and NOT removed by teardown (fm-teardown.sh removes
+# the home and the VM, never the bridge), so the archive outlives the machine it
+# came from.
+#
+# Where the archive lands, named once so the export, its host-side verification,
+# and docs/sbx-backend.md's recreate procedure cannot drift apart.
+FM_SBX_BACKUP_DIR_PREFIX='backup-'
+FM_SBX_BACKUP_ARCHIVE='home-private.tgz'
+
+# The guest-private directories to rescue, and the files whose presence in the
+# finished archive is checked from the host. A guest that legitimately has
+# neither directory yet (a freshly provisioned home whose own session start has
+# not run) is not an error; a guest that has them and produces an archive
+# without them is.
+FM_SBX_PRIVATE_DIRS="data state"
+FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
+
+# fm_backend_sbx_export_private: copy <target>'s guest-private records onto the
+# signal bridge and PROVE the copy from the host, before any caller destroys the
+# VM. Prints one line - the archive path on success, the reason on failure - and
+# returns:
+#   0  the archive is on the bridge and verified, OR the sandbox is confirmed
+#      ABSENT (the disk is already gone; there is nothing left to rescue).
+#   1  anything else. Every failure mode is a refusal: an unreadable sandbox
+#      state, a failed guest tar, a missing or empty archive, an archive whose
+#      listing does not carry what the guest reported it has, or a digest that
+#      could not be computed. The caller's removal must not proceed on any of
+#      them, because "the export failed" and "there was nothing to export" are
+#      indistinguishable from the outside and only one of them is safe.
+#
+# Verification is deliberately HOST-side. The guest reports which expected files
+# it holds, but that report is only used to decide WHAT to look for; the host
+# then reads the finished archive itself. A guest that wrote a truncated or
+# empty tarball, or wrote nowhere at all, cannot talk its way past that read.
+# The guest's report is parsed for the exact fixed paths in FM_SBX_PRIVATE_EXPECT
+# and nothing else, and is never interpolated into a command (docs/sbx-backend.md
+# "Security posture").
+#
+# The sha256 sidecar written beside the archive is also the verification MARK: an
+# archive with no <archive>.sha256 next to it was never verified from the host and
+# must not be trusted as a backup.
+#
+# Like the landed-work probe, this inspects a STOPPED VM too (its disk holds the
+# records) and accepts that `sbx exec` auto-starts it: a retire or a recreate is
+# an explicit one-shot act, not routine triage, and the machine is about to be
+# destroyed either way.
+fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
+  local target=$1 home=${2-} signals=${3-}
+  local name id state stamp dir archive listing digest guest_out rc=0 n want
+  local -a guest_args private_dirs
+  name=$(fm_backend_sbx_name_of_target "$target")
+  if [ -z "$home" ]; then
+    printf 'cannot export the in-guest records of %s: no home path recorded in meta' "$name"
+    return 1
+  fi
+  if [ -z "$signals" ]; then
+    if ! id=$(fm_backend_sbx_task_of_target "$target"); then
+      printf 'cannot export the in-guest records of %s: no signal-bridge directory recorded and the sandbox name carries no task id' "$name"
+      return 1
+    fi
+    signals="$FM_SBX_SIGNALS_ROOT/$id"
+  fi
+  state=$(fm_backend_sbx_state "$name")
+  case "$state" in
+    absent)
+      printf 'sandbox %s is already absent: its disk is gone, so there are no in-guest records left to export' "$name"
+      return 0
+      ;;
+    running|stopped) ;;
+    *)
+      printf 'cannot export the in-guest records of %s: sandbox state is unreadable (%s)' "$name" "$state"
+      return 1
+      ;;
+  esac
+  if [ ! -d "$signals" ]; then
+    printf 'cannot export the in-guest records of %s: the signal bridge %s is not a directory on this host' "$name" "$signals"
+    return 1
+  fi
+  if ! stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null) || [ -z "$stamp" ]; then
+    printf 'cannot export the in-guest records of %s: could not read a UTC timestamp for the archive directory' "$name"
+    return 1
+  fi
+  # A second export within the same second must not land in the first one's
+  # directory, where it would overwrite an already-verified archive.
+  dir="$signals/$FM_SBX_BACKUP_DIR_PREFIX$stamp"
+  n=0
+  while [ -e "$dir" ] || [ -L "$dir" ]; do
+    n=$((n + 1))
+    dir="$signals/$FM_SBX_BACKUP_DIR_PREFIX$stamp.$n"
+  done
+  archive="$dir/$FM_SBX_BACKUP_ARCHIVE"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    printf 'cannot export the in-guest records of %s: could not create %s on the signal bridge' "$name" "$dir"
+    return 1
+  fi
+  # The bridge is the same absolute path on both sides, so the guest writes to
+  # the path the host just created and the host reads back the same bytes.
+  # Counted positionals rather than a fixed layout: the two declared lists can
+  # grow without the guest and the host disagreeing about where one ends.
+  # shellcheck disable=SC2206  # deliberate word split: a declared space-separated list whose items never contain whitespace
+  private_dirs=($FM_SBX_PRIVATE_DIRS)
+  guest_args=(_ "$home" "$archive" "${#private_dirs[@]}" "${private_dirs[@]}")
+  # shellcheck disable=SC2206  # same declared-list split, for the expected-file names
+  guest_args+=($FM_SBX_PRIVATE_EXPECT)
+  fm_backend_sbx_guest_args_ok "$name" "private-record export" "${guest_args[@]}" || return 1
+  # Guest stderr is deliberately NOT suppressed, unlike the landed-work probe
+  # above: this refusal blocks a removal the operator wants, so tar's own
+  # complaint is worth more than a tidy log.
+  # shellcheck disable=SC2016  # single quotes deliberate: the positionals expand in the guest sh, not here
+  guest_out=$(sbx exec "$name" -- sh -c '
+    # fm-sbx-export-private
+    home=$1 out=$2 ndirs=$3; shift 3
+    cd "$home" || exit 5
+    dirs=
+    while [ "$ndirs" -gt 0 ]; do
+      [ -d "$1" ] && dirs="$dirs $1"
+      shift
+      ndirs=$((ndirs - 1))
+    done
+    # Nothing private on disk at all. Reported as its own code so the host can
+    # say so instead of blaming tar.
+    [ -n "$dirs" ] || exit 6
+    for f; do
+      [ -f "$f" ] && printf "have %s\n" "$f"
+    done
+    # Word splitting on $dirs is the point: the list this script just built
+    # from the directory names that exist.
+    tar -C "$home" -czf "$out" $dirs || exit 7
+    exit 0
+  ' "${guest_args[@]}") || rc=$?
+  case "$rc" in
+    0) ;;
+    5)
+      printf 'cannot export the in-guest records of %s: %s is not readable inside the sandbox' "$name" "$home"
+      return 1
+      ;;
+    6)
+      printf 'cannot export the in-guest records of %s: neither %s exists under %s inside the sandbox' \
+        "$name" "$FM_SBX_PRIVATE_DIRS" "$home"
+      return 1
+      ;;
+    7)
+      printf 'cannot export the in-guest records of %s: the in-guest archive of %s under %s failed' \
+        "$name" "$FM_SBX_PRIVATE_DIRS" "$home"
+      return 1
+      ;;
+    *)
+      printf 'cannot export the in-guest records of %s: the export command failed inside the sandbox (rc %s)' "$name" "$rc"
+      return 1
+      ;;
+  esac
+  # From here on the host trusts nothing but its own reads of the file.
+  if [ ! -f "$archive" ]; then
+    printf 'cannot verify the exported records of %s: %s is not a file on this host' "$name" "$archive"
+    return 1
+  fi
+  if [ ! -s "$archive" ]; then
+    printf 'cannot verify the exported records of %s: %s is empty' "$name" "$archive"
+    return 1
+  fi
+  if ! listing=$(tar -tzf "$archive" 2>/dev/null); then
+    printf 'cannot verify the exported records of %s: %s does not read back as a gzip archive' "$name" "$archive"
+    return 1
+  fi
+  for want in $FM_SBX_PRIVATE_EXPECT; do
+    # Only a report naming exactly this expected path counts; anything else the
+    # guest wrote on that stream is ignored rather than acted on.
+    printf '%s\n' "$guest_out" | grep -Fxq "have $want" || continue
+    if ! printf '%s\n' "$listing" | grep -Fxq "$want"; then
+      printf 'cannot verify the exported records of %s: the sandbox holds %s but %s does not contain it' \
+        "$name" "$want" "$archive"
+      return 1
+    fi
+  done
+  if ! digest=$(fm_inherit_sha256 "$archive") || [ -z "$digest" ]; then
+    printf 'cannot verify the exported records of %s: no sha256 could be computed for %s' "$name" "$archive"
+    return 1
+  fi
+  # `shasum -a 256 -c` / `sha256sum -c` format, so the archive can be rechecked
+  # later with a stock tool and no firstmate involvement.
+  if ! printf '%s  %s\n' "$digest" "$FM_SBX_BACKUP_ARCHIVE" > "$archive.sha256" 2>/dev/null; then
+    printf 'cannot verify the exported records of %s: could not record the sha256 beside %s' "$name" "$archive"
+    return 1
+  fi
+  printf 'exported the in-guest records of %s to %s (sha256 %s)' "$name" "$archive" "$digest"
+  return 0
+}
+
 # --- agent flavor vs driver harness -----------------------------------------
 #
 # `sbx create <agent>` picks the sandbox's credential wiring, not the CLI

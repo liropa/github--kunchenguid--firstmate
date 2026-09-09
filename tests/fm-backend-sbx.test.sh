@@ -2810,6 +2810,207 @@ test_unlanded_work_dispatcher_routes() {
   pass "fm_backend_unlanded_work: routes sbx to the adapter, non-sbx answers safe"
 }
 
+# --- teardown: private-record export (fm_backend_sbx_export_private) ---------
+#
+# The guest home's data/ and state/ are gitignored, so the landed-work probe
+# above is blind to them by construction and the host holds no copy: they exist
+# only on the VM disk `sbx rm --force` destroys. The export puts them on the
+# signal bridge - the one directory teardown never removes - and PROVES the
+# archive from the host, so a guest that answers "done" and writes nothing
+# cannot pass.
+
+# seed_guest_private_home <dir> [with-state]: a guest home clone carrying the
+# private surface clone mode never delivers. Both expected files are present,
+# because a fixture without them would pass the host-side content check for the
+# wrong reason (nothing to look for).
+seed_guest_private_home() {  # <dir> [with-state]
+  local h=$1 with_state=${2:-with-state}
+  mkdir -p "$h/data"
+  printf '# backlog\n- [ ] keep-me\n' > "$h/data/backlog.md"
+  printf '# charter\nthe durable one\n' > "$h/data/charter.md"
+  if [ "$with_state" = with-state ]; then
+    mkdir -p "$h/state"
+    # A status file, deliberately not a .meta: teardown's host in-flight check
+    # refuses on any state/*.meta in a secondmate home, and this fixture is
+    # about the records the export rescues, not about in-flight work.
+    printf 'done: landed\n' > "$h/state/worker.status"
+  fi
+}
+
+# exported_archive <signals-dir-for-id>: the single archive path an export
+# produced, or empty. Globbed rather than reconstructed, so the test cannot
+# silently agree with a wrong timestamp format.
+exported_archive() {  # <signals-dir>
+  local a
+  for a in "$1"/backup-*/home-private.tgz; do
+    [ -e "$a" ] && printf '%s\n' "$a" && return 0
+  done
+  return 1
+}
+
+test_export_private_writes_a_host_verified_archive() {
+  local w fb out archive listing recorded computed
+  w=$(new_sbx_world export-verified); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  seed_guest_private_home "$w/guest"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+    FM_FAKE_SBX_GUEST_HOME="$w/guest") \
+    || fail "a running guest with private records must export cleanly (rc 0): $out"
+  archive=$(exported_archive "$w/signals/x") \
+    || fail "the export must leave an archive under $w/signals/x/backup-<UTC stamp>/"
+  [ -s "$archive" ] || fail "the exported archive must not be empty"
+  assert_contains "$out" "$archive" "the one printed line must name the archive it just verified"
+  listing=$(tar -tzf "$archive")
+  assert_contains "$listing" "data/backlog.md" "the archive must carry the guest's backlog"
+  assert_contains "$listing" "data/charter.md" "the archive must carry the guest's charter"
+  assert_contains "$listing" "state/worker.status" "the archive must carry the guest's state/"
+  # The sidecar is the verification MARK, so it has to be the host's own digest
+  # of the bytes on the bridge, not anything the guest reported.
+  assert_present "$archive.sha256" "a verified export must record its sha256 beside the archive"
+  recorded=$(awk '{print $1}' < "$archive.sha256")
+  computed=$(shasum -a 256 "$archive" 2>/dev/null | awk '{print $1}') \
+    || computed=$(sha256sum "$archive" | awk '{print $1}')
+  [ "$recorded" = "$computed" ] \
+    || fail "the recorded sha256 ($recorded) must be the host's own digest of the archive ($computed)"
+  assert_contains "$out" "$recorded" "the printed line must carry the digest it recorded"
+  pass "export_private: a running guest's data/ and state/ reach the bridge with a host-computed sha256"
+}
+
+test_export_private_tolerates_a_guest_with_no_state_dir() {
+  local w fb out archive listing
+  w=$(new_sbx_world export-nostate); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  # A freshly provisioned guest whose own session start has not run yet has
+  # data/ but no state/. That is not a failure, and refusing it would strand
+  # every young secondmate behind a gate it can never clear.
+  seed_guest_private_home "$w/guest" no-state
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+    FM_FAKE_SBX_GUEST_HOME="$w/guest") \
+    || fail "a guest with data/ but no state/ must still export (rc 0): $out"
+  archive=$(exported_archive "$w/signals/x") || fail "the export must still leave an archive"
+  listing=$(tar -tzf "$archive")
+  assert_contains "$listing" "data/backlog.md" "the directory that DOES exist must still be archived"
+  assert_not_contains "$listing" "state/" "a missing state/ must simply be absent, not faked"
+  pass "export_private: a guest with no state/ yet exports what it has, and is not refused"
+}
+
+test_export_private_refuses_a_guest_with_nothing_private() {
+  local w fb out
+  w=$(new_sbx_world export-empty); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x" "$w/guest"
+  # Neither directory exists at all. The home is not the one this task thinks it
+  # is, so "nothing to export" is a reading to stop on, not to act on.
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_GUEST_HOME="$w/guest"); then
+    fail "a guest home with neither data/ nor state/ must be refused (rc 1)"
+  fi
+  assert_contains "$out" "neither data state exists" \
+    "the refusal must name the directories it looked for"
+  pass "export_private: a guest home with no private surface at all -> unsafe (rc 1)"
+}
+
+test_export_private_catches_a_guest_that_wrote_nothing() {
+  local w fb out
+  w=$(new_sbx_world export-silent); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  # The guest exits 0 and the bridge stays empty. Nothing the guest SAID can
+  # separate this from a real export; only the host's own read of the bridge can.
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_EXPORT_SILENT=1); then
+    fail "a guest that reported success but wrote no archive must be refused (rc 1)"
+  fi
+  assert_contains "$out" "is not a file on this host" \
+    "the refusal must say the host could not find the archive it was promised"
+  exported_archive "$w/signals/x" >/dev/null \
+    && fail "no archive should exist for a guest that wrote none"
+  ls "$w/signals/x"/backup-*/*.sha256 >/dev/null 2>&1 \
+    && fail "an unverified export must leave no sha256 sidecar, since the sidecar IS the verification mark"
+  pass "export_private: a successful-looking guest that wrote nothing is caught host-side (rc 1)"
+}
+
+test_export_private_guest_command_failure_refuses() {
+  local w fb out
+  w=$(new_sbx_world export-execfail); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_EXPORT_RC=1 2>/dev/null); then
+    fail "an export command that failed inside the sandbox must be refused (rc 1)"
+  fi
+  assert_contains "$out" "failed inside the sandbox" \
+    "the refusal must name the in-sandbox failure"
+  pass "export_private: a failed guest export command -> unsafe (rc 1)"
+}
+
+test_export_private_absent_sandbox_is_safe() {
+  local w fb out
+  w=$(new_sbx_world export-absent); fb=$(make_fake_sbx "$w")
+  printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  : > "$w/sbx.log"
+  # The disk is already gone. There is nothing left to rescue, and execing a
+  # confirmed-absent name would only produce a CLI error to misread.
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home') \
+    || fail "a confirmed-absent sandbox has no records left to export -> safe (rc 0)"
+  assert_contains "$out" "already absent" "the line must say why nothing was exported"
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "an absent sandbox must not be exec'd"
+  pass "export_private: confirmed-absent sandbox -> safe, no guest exec"
+}
+
+test_export_private_unreadable_state_refuses() {
+  local w fb out
+  w=$(new_sbx_world export-errstate); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/signals/x"
+  : > "$w/sbx.log"
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+      FM_FAKE_SBX_LS_RC=1); then
+    fail "an unreadable sandbox state must be refused, never read as nothing-to-export (rc 1)"
+  fi
+  assert_contains "$out" "unreadable" "the refusal must flag the unverifiable state"
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "an unreadable state must be refused WITHOUT execing a sandbox whose liveness is unknown"
+  pass "export_private: unreadable state -> unsafe (rc 1, fail-safe), no guest exec"
+}
+
+test_export_private_missing_bridge_refuses() {
+  local w fb out
+  w=$(new_sbx_world export-nobridge); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # No signals/x directory: there is nowhere host-visible to put the archive, so
+  # a removal here would destroy the records with nothing catching them.
+  if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home'); then
+    fail "an absent signal bridge must be refused (rc 1)"
+  fi
+  assert_contains "$out" "is not a directory on this host" \
+    "the refusal must name the missing bridge directory"
+  pass "export_private: no signal bridge to export to -> unsafe (rc 1)"
+}
+
+test_export_private_dispatcher_routes() {
+  local w fb out
+  w=$(new_sbx_world export-dispatch); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  mkdir -p "$w/signals/x"
+  seed_guest_private_home "$w/guest"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_export_private sbx sbx:fm-x /guest/home '"$w"'/signals/x' \
+    FM_FAKE_SBX_GUEST_HOME="$w/guest") \
+    || fail "the dispatcher must route sbx to the adapter export: $out"
+  exported_archive "$w/signals/x" >/dev/null || fail "the routed export must produce the archive"
+  # A host-worktree backend keeps nothing teardown cannot already see.
+  : > "$w/sbx.log"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_export_private tmux fm-x /guest/home '"$w"'/signals/x') \
+    || fail "a host-worktree backend has nothing hidden to rescue -> safe (rc 0)"
+  [ -z "$out" ] || fail "a non-sbx backend must print no export line, got '$out'"
+  assert_not_contains "$(cat "$w/sbx.log")" "exec" \
+    "a non-sbx backend must never exec a guest (it has none)"
+  pass "fm_backend_export_private: routes sbx to the adapter, non-sbx answers nothing-to-rescue"
+}
+
 # --- teardown integration: real fm-teardown.sh over an sbx secondmate --------
 
 # new_teardown_world <name> [id]: a parent firstmate home with one sbx secondmate
@@ -2820,7 +3021,7 @@ new_teardown_world() {  # <name> [id]
   local name=$1 id=${2:-domain} w home subhome
   w=$(new_sbx_world "$name")
   home="$w/home"; subhome="$w/subhome"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$w/signals/$id"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
   printf -- '- %s - design domain (home: %s; scope: design domain; projects: alpha; added 2026-06-22)\n' "$id" "$subhome" \
@@ -2834,15 +3035,20 @@ new_teardown_world() {  # <name> [id]
 }
 
 # run_teardown_sbx <world> <fakebin> <extra-args> [env k=v...]: run the real
-# fm-teardown.sh over the world's secondmate, fake sbx first in PATH.
+# fm-teardown.sh over the world's secondmate, fake sbx first in PATH. <extra> is
+# a space-separated flag string ("" for none, "--force --discard-private" for
+# both), split here so a suite can exercise the flag pairs teardown now parses.
 run_teardown_sbx() {  # <world> <fakebin> <extra> [env k=v...]
   local w=$1 fb=$2 extra=$3 id
+  local -a flags
   id=$(cat "$w/teardown-id")
   shift 3
+  # shellcheck disable=SC2206  # deliberate split: <extra> is a caller-written flag string
+  flags=($extra)
   PATH="$fb:$PATH" FM_HOME="$w/home" \
     FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
     FM_SBX_SIGNALS_ROOT="$w/signals" \
-    env "$@" "$ROOT/bin/fm-teardown.sh" "$id" "$extra" 2>&1
+    env "$@" "$ROOT/bin/fm-teardown.sh" "$id" ${flags+"${flags[@]}"} 2>&1
 }
 
 test_teardown_refuses_unlanded_guest() {
@@ -2879,6 +3085,126 @@ test_teardown_allows_clean_guest() {
   [ ! -d "$w/subhome" ] || fail "teardown should remove the retired secondmate home"
   [ ! -e "$w/home/state/domain.meta" ] || fail "teardown should clear the parent meta"
   pass "teardown: sbx secondmate with a clean, pushed guest is torn down (VM removed, home retired)"
+}
+
+# --- teardown integration: the private-record export gate --------------------
+#
+# Retiring or recreating an sbx secondmate destroys the VM disk, and the guest's
+# data/ and state/ live nowhere else. Teardown therefore exports them to the
+# signal bridge FIRST and refuses the removal when the host cannot verify the
+# archive - on the --force path too, because --force is authority over unlanded
+# code and says nothing about durable records. --discard-private is that
+# separate authority, and it still tries the export before discarding.
+
+test_teardown_exports_private_records_before_the_kill() {
+  local w fb out rc log archive
+  w=$(new_teardown_world teardown-export); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # Seed the RECORDED home: clone mode puts the guest clone at that same
+  # absolute path, and leaving the fake's git route on its canned clean output
+  # keeps the landed-work probe (which passes) separate from the export gate
+  # (which is what this test is about).
+  seed_guest_private_home "$w/subhome"
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a clean guest whose records export cleanly should tear down: $out"
+  archive=$(exported_archive "$w/signals/domain") \
+    || fail "teardown must leave the guest's private records on the signal bridge: $out"
+  assert_present "$archive.sha256" "the exported archive must carry its host-computed sha256"
+  assert_contains "$(tar -tzf "$archive")" "data/charter.md" \
+    "the archive teardown accepted must actually carry the guest's records"
+  assert_contains "$out" "$archive" "teardown must tell the operator where the records went"
+  # Order is the whole point: an export after the kill would archive nothing.
+  log=$(cat "$w/sbx.log")
+  case "$log" in
+    *fm-sbx-export-private*rm\ --force*) : ;;
+    *) fail "the export must run BEFORE 'sbx rm --force', got:"$'\n'"$log" ;;
+  esac
+  # Teardown removes the home and the VM; the bridge is what outlives both.
+  [ ! -d "$w/subhome" ] || fail "teardown should still remove the retired secondmate home"
+  pass "teardown: an sbx secondmate's private records are exported and verified before the VM is destroyed"
+}
+
+test_teardown_refuses_when_the_export_cannot_be_verified() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-export-refuse); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  # A clean, fully-pushed guest: the landed-work probe says go. Only the export
+  # gate stands between this VM and the loss of its records.
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "" FM_FAKE_SBX_EXPORT_SILENT=1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown must refuse when the private-record export cannot be verified: $out"
+  assert_contains "$out" "private records could not be exported" \
+    "the refusal must name what could not be saved"
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "a refused teardown must NEVER destroy the VM"
+  [ -d "$w/subhome" ] || fail "a refused teardown must preserve the secondmate home"
+  [ -e "$w/home/state/domain.meta" ] || fail "a refused teardown must preserve the parent record"
+  pass "teardown: an unverifiable private-record export refuses the removal, VM and home preserved"
+}
+
+test_teardown_force_alone_does_not_waive_the_export() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-export-force); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "--force" FM_FAKE_SBX_EXPORT_SILENT=1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force alone must not waive the private-record export: $out"
+  assert_contains "$out" "--discard-private" \
+    "the refusal must name the flag that would authorize the loss"
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "a refused --force teardown must still not destroy the VM"
+  [ -d "$w/subhome" ] || fail "a refused --force teardown must preserve the secondmate home"
+  pass "teardown: --force alone still refuses when the private records cannot be exported"
+}
+
+test_teardown_discard_private_proceeds_and_names_the_loss() {
+  local w fb out rc
+  w=$(new_teardown_world teardown-export-discard); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "--force --discard-private" FM_FAKE_SBX_EXPORT_SILENT=1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--force --discard-private must proceed past an unverifiable export: $out"
+  assert_contains "$out" "DISCARDING" "the discard must be stated, not silent"
+  assert_contains "$out" "$w/subhome" "the discard notice must name the home whose records are lost"
+  assert_contains "$out" "data/ and state/" "the discard notice must name what is being destroyed"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-domain" \
+    "an authorized discard destroys the VM"
+  [ ! -d "$w/subhome" ] || fail "an authorized discard should still retire the secondmate home"
+  pass "teardown: --force --discard-private proceeds and prints exactly what it destroys"
+}
+
+test_teardown_discard_private_still_prefers_a_working_export() {
+  local w fb out rc archive
+  w=$(new_teardown_world teardown-export-discard-ok); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  : > "$w/sbx.log"
+  seed_guest_private_home "$w/subhome"
+  # The flag authorizes a loss; it does not ask for one. A rescued record beats
+  # an authorized one, so the export is still attempted first.
+  set +e
+  out=$(run_teardown_sbx "$w" "$fb" "--force --discard-private")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--force --discard-private with a working export should succeed: $out"
+  archive=$(exported_archive "$w/signals/domain") \
+    || fail "--discard-private must still export when the export works: $out"
+  assert_present "$archive.sha256" "the exported archive must still be verified"
+  assert_not_contains "$out" "DISCARDING" \
+    "nothing was discarded, so nothing should claim it was"
+  pass "teardown: --discard-private still exports and verifies when the guest can be read"
 }
 
 test_teardown_clears_beacon_markers() {
@@ -3067,7 +3393,21 @@ test_unlanded_work_error_state_refuses
 test_unlanded_work_git_failure_refuses
 test_unlanded_work_stopped_guest_is_inspected
 test_unlanded_work_dispatcher_routes
+test_export_private_writes_a_host_verified_archive
+test_export_private_tolerates_a_guest_with_no_state_dir
+test_export_private_refuses_a_guest_with_nothing_private
+test_export_private_catches_a_guest_that_wrote_nothing
+test_export_private_guest_command_failure_refuses
+test_export_private_absent_sandbox_is_safe
+test_export_private_unreadable_state_refuses
+test_export_private_missing_bridge_refuses
+test_export_private_dispatcher_routes
 test_teardown_refuses_unlanded_guest
+test_teardown_exports_private_records_before_the_kill
+test_teardown_refuses_when_the_export_cannot_be_verified
+test_teardown_force_alone_does_not_waive_the_export
+test_teardown_discard_private_proceeds_and_names_the_loss
+test_teardown_discard_private_still_prefers_a_working_export
 test_teardown_allows_clean_guest
 test_teardown_clears_beacon_markers
 test_teardown_preserves_cross_scheme_marker

@@ -53,6 +53,14 @@
 #                            (empty = every commit already on a remote)
 #   FM_FAKE_SBX_GIT_RC       non-zero makes the guest `git` calls fail (the
 #                            unverifiable-guest case)
+#   FM_FAKE_SBX_EXPORT_RC    non-zero fails the private-record export exec (the
+#                            `sh -c` pass carrying `fm-sbx-export-private`)
+#                            instead of executing it
+#   FM_FAKE_SBX_EXPORT_SILENT
+#                            when set, that exec RETURNS 0 without running the
+#                            script, so the guest claims success and the signal
+#                            bridge gets no archive - the case only the
+#                            HOST-side verification can catch
 #   FM_FAKE_SBX_SOURCE_RC    exit code for the spawn-time source-mount probe
 #                            (`exec ... test -r <mount>/AGENTS.md`; default 0 =
 #                            the clone-mode RO mount is where sbx puts it)
@@ -281,6 +289,26 @@ case "$cmd" in
           printf '%s\n' "$FM_FAKE_SBX_KEEPALIVE_OUT"
         fi
         exit "${FM_FAKE_SBX_KEEPALIVE_RC:-0}"
+        ;;
+      "sh -c "*"fm-sbx-export-private"*)
+        # The private-record export (fm_backend_sbx_export_private). Executed
+        # for real, with the home argument remapped onto the guest-clone
+        # fixture the same way the provisioning route does it: clone mode puts
+        # the guest home at the same absolute path on a different disk, and the
+        # archive path is on the signal bridge, which IS the same directory on
+        # both sides and so is never remapped. Suites therefore assert a real
+        # tarball on the bridge rather than grepping script text.
+        [ "${FM_FAKE_SBX_EXPORT_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_EXPORT_RC}"
+        # A guest that answers "done" and writes nothing. Only the host's own
+        # read of the bridge separates this from a real export.
+        [ -z "${FM_FAKE_SBX_EXPORT_SILENT:-}" ] || exit 0
+        script=$3
+        shift 3
+        if [ -n "${FM_FAKE_SBX_GUEST_HOME:-}" ]; then
+          set -- "$1" "$FM_FAKE_SBX_GUEST_HOME" "${@:3}"
+        fi
+        sh -c "$script" "$@"
+        exit $?
         ;;
       "sh -c "*"ln -sfn "*)
         # The guest-home provisioning pass (fm_backend_sbx_provision_guest_home).

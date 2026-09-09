@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
+# Tests for bin/fm-teardown.sh's landed-work safety, stale-lock recovery, and
+# destructive-flag parsing.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
@@ -56,6 +57,12 @@
 #   (z)  observed non-lock transient failure, clears on retry -> retry ALLOW
 #   (aa) terminal failure (unmanaged / destroying / lease)    -> ABORT, zero retries
 #   (ab) non-lock failure that never clears                   -> ABORT after the budget
+#
+# And the flag parsing in front of all of it, because --discard-private waives the
+# private-record export gate every secondmate removal now passes through:
+#   (ac) --discard-private with no --force                    -> REFUSE (rc 2)
+#   (ad) a misspelled flag                                    -> REFUSE (rc 2)
+#   (ae) an empty positional argument                         -> still no flags
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1861,6 +1868,63 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# --discard-private waives the private-record export gate that stands in front
+# of every secondmate removal (bin/backends/sbx.sh's fm_backend_sbx_export_private;
+# docs/sbx-backend.md "Private-record export"). It destroys records that exist
+# nowhere else, so it is not a standalone authority and an unrecognised flag is
+# never quietly ignored - a typo that reads as "no flags" is how a destructive
+# option ends up armed by accident.
+
+test_discard_private_requires_force() {
+  local case_dir rc
+  case_dir=$(make_case discard-needs-force)
+  write_meta "$case_dir" local-only ship
+
+  set +e
+  run_teardown "$case_dir" --discard-private > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "discard-needs-force: --discard-private alone must be refused"
+  assert_grep "--force" "$case_dir/stderr" \
+    "the refusal must say which authority --discard-private only widens"
+  pass "--discard-private without --force is refused as an incomplete authority"
+}
+
+test_unknown_teardown_flag_is_refused() {
+  local case_dir rc
+  case_dir=$(make_case unknown-flag)
+  write_meta "$case_dir" local-only ship
+
+  set +e
+  run_teardown "$case_dir" --discard-privates > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "unknown-flag: a misspelled flag must be refused, not ignored"
+  assert_grep "unknown teardown flag" "$case_dir/stderr" \
+    "the refusal must name the flag it did not recognise"
+  pass "an unrecognised teardown flag is refused rather than silently dropped"
+}
+
+test_empty_positional_argument_still_means_no_flags() {
+  local case_dir rc
+  case_dir=$(make_case empty-arg)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  # Callers have always passed an unset "$2" through positionally, so an empty
+  # argument has to keep meaning "no flags" rather than becoming an unknown one.
+  set +e
+  run_teardown "$case_dir" "" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-arg: an empty flag argument must behave as no flags"
+  pass "an empty positional argument is still no flags, as callers have always passed it"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_reminder_commands_preserve_backlog_path
@@ -1904,3 +1968,6 @@ test_terminal_phrase_in_commit_subject_is_retried
 test_terminal_return_failure_aborts_without_retrying
 test_persistent_non_lock_return_failure_aborts_after_retries
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_discard_private_requires_force
+test_unknown_teardown_flag_is_refused
+test_empty_positional_argument_still_means_no_flags
