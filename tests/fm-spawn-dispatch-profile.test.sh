@@ -105,7 +105,7 @@ EOF
 # still compare the launch command itself, byte for byte.
 launch_command() {  # <delivered-line>
   local line=$1
-  line=${line#test ! -s * && printf %s * && ( cd * && export GOTMPDIR=* && }
+  line=${line#test ! -s * && printf %s * && ( cd * && export GOTMPDIR=* && unset FM_HARNESS_PID CLAUDE_PID && }
   printf '%s' "${line% )}"
 }
 
