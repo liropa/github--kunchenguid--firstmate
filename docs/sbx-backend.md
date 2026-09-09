@@ -1190,11 +1190,13 @@ The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts 
   **An archive with no `<archive>.sha256` next to it was never verified and is not a backup.**
 - Every failure refuses the removal: an unreadable sandbox state, a failed guest command, a missing or empty archive, contents that disagree with what the guest reported, or a digest that could not be computed.
   A confirmed-**absent** sandbox is the one clean pass, because its disk is already gone and there is nothing left to rescue.
-- Like the landed-work probe, this inspects a **stopped** VM and accepts that `sbx exec` auto-starts it.
-  A retire or a recreate is an explicit one-shot act, and the machine is about to be destroyed either way.
+- The export **stops the VM first** to terminate guest writers, including the agent and its child processes.
+  `sbx exec` then starts the VM only to run the archive command; it does not rebuild the agent session or its daemons.
+  The export stops the VM again before host verification and leaves it stopped through removal.
+  Both stops must be confirmed from the host inventory; a failed or unconfirmed stop refuses verification and removal.
 - `--force` does **not** waive this.
   `--force` is authority over unlanded code; it says nothing about durable records, and conflating the two is exactly what cost the 2026-09-09 artifacts.
-  `--discard-private` is the separate authority, applies only together with `--force`, still attempts the export first, and prints exactly what it is destroying when the export cannot be verified.
+  No flag permits removal after an export failure.
 
 ## Recreating a secondmate's VM
 
@@ -1203,7 +1205,7 @@ Keep the registered host home and the parent home's metadata through this proced
 Run these commands from the firstmate repository root.
 Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.meta` before step 1.
 
-1. **Export the guest records.**
+1. **Stop guest writers and export the guest records.**
    Run the adapter in Bash, including when the surrounding diagnostic shell is zsh:
 
    ```sh
@@ -1214,7 +1216,18 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
    BASH
    ```
 
-   Stop if the export fails.
+   A failed export must never proceed to removal. It leaves the guest stopped, with its disk and saved agent session intact.
+   If stopping itself fails, the command reports that it could not confirm the stopped state; removal is still refused.
+   To bring the guest back after an export failure, send the next steer:
+
+   ```sh
+   FM_HOME='<parent-home>' bin/fm-send.sh '<id>' --notice 'VM replacement was cancelled. Resume from your saved session.'
+   ```
+
+   `fm-send` rebuilds the guest session and resumes the agent from its saved session before it delivers the steer.
+   Repeat step 1 before any later removal, because a resumed guest can write new records.
+
+   After a successful export, keep the VM stopped until removal: do not steer it or run guest commands.
    Copy the printed archive path into `archive` below.
 
 2. **Verify, remove the old VM, and spawn with restoration enabled.**
@@ -1253,6 +1266,7 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
    test -s "$archive"
    tar -tzf "$archive"
    (cd "$(dirname "$archive")" && shasum -a 256 -c home-private.tgz.sha256)
+   test "$(fm_backend_sbx_state "fm-$task_id")" = stopped
    sbx rm --force "fm-$task_id"
    FM_SBX_TEMPLATE="$new_template" FM_SBX_AGENT="$agent" \
      FM_SBX_SIGNALS_ROOT="${signals%/*}" FM_SBX_RESTORE_PRIVATE="$archive" \

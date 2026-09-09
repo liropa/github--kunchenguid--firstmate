@@ -448,26 +448,15 @@ FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
 # archive with no <archive>.sha256 next to it was never verified from the host and
 # must not be trusted as a backup.
 #
-# Like the landed-work probe, this inspects a STOPPED VM too (its disk holds the
-# records) and accepts that `sbx exec` auto-starts it: a retire or a recreate is
-# an explicit one-shot act, not routine triage, and the machine is about to be
-# destroyed either way.
+# Stops guest writers before export. `sbx exec` starts the VM for tar without
+# rebuilding the agent session; the VM is stopped again before host verification.
+# Success or export failure leaves it stopped. A stop failure refuses verification.
+# The next fm-send steer rebuilds the guest session and resumes the saved session.
 fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
   local target=$1 home=${2-} signals=${3-}
   local name id state stamp dir host_signals archive listing digest guest_out rc=0 n want
   local -a guest_args private_dirs
   name=$(fm_backend_sbx_name_of_target "$target")
-  if [ -z "$home" ]; then
-    printf 'cannot export the in-guest records of %s: no home path recorded in meta' "$name"
-    return 1
-  fi
-  if [ -z "$signals" ]; then
-    if ! id=$(fm_backend_sbx_task_of_target "$target"); then
-      printf 'cannot export the in-guest records of %s: no signal-bridge directory recorded and the sandbox name carries no task id' "$name"
-      return 1
-    fi
-    signals="$FM_SBX_SIGNALS_ROOT/$id"
-  fi
   state=$(fm_backend_sbx_state "$name")
   case "$state" in
     absent)
@@ -480,6 +469,23 @@ fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
       return 1
       ;;
   esac
+  if [ "$state" = running ]; then
+    if ! sbx stop "$name" >&2 || [ "$(fm_backend_sbx_state "$name")" != stopped ]; then
+      printf 'cannot export the in-guest records of %s: could not confirm guest writers stopped before export' "$name"
+      return 1
+    fi
+  fi
+  if [ -z "$home" ]; then
+    printf 'cannot export the in-guest records of %s: no home path recorded in meta' "$name"
+    return 1
+  fi
+  if [ -z "$signals" ]; then
+    if ! id=$(fm_backend_sbx_task_of_target "$target"); then
+      printf 'cannot export the in-guest records of %s: no signal-bridge directory recorded and the sandbox name carries no task id' "$name"
+      return 1
+    fi
+    signals="$FM_SBX_SIGNALS_ROOT/$id"
+  fi
   if [ ! -d "$signals" ]; then
     printf 'cannot export the in-guest records of %s: the signal bridge %s is not a directory on this host' "$name" "$signals"
     return 1
@@ -540,6 +546,10 @@ fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
     tar -C "$home" -czf "$out" $dirs || exit 7
     exit 0
   ' "${guest_args[@]}") || rc=$?
+  if ! sbx stop "$name" >&2 || [ "$(fm_backend_sbx_state "$name")" != stopped ]; then
+    printf 'cannot verify the exported records of %s: could not confirm the sandbox stopped after export' "$name"
+    return 1
+  fi
   case "$rc" in
     0) ;;
     5)

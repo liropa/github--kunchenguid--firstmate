@@ -66,16 +66,16 @@
 # bridge, which teardown never removes. bin/backends/sbx.sh's
 # fm_backend_sbx_export_private owns the archive path, the host-side
 # verification, and the sha256 sidecar that marks an archive as verified.
-# Usage: fm-teardown.sh <task-id> [--force] [--discard-private]
+# The sbx export stops guest writers before tar and leaves the VM stopped through
+# host verification and removal. An export failure leaves the VM stopped; the
+# next fm-send steer rebuilds the guest session and resumes its saved session.
+# Usage: fm-teardown.sh <task-id> [--force]
 #        fm-teardown.sh [<task-id>] --help
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work. It does NOT waive
 #   the private-record export: --force is authority over unlanded code, not over
 #   durable records.
-#   --discard-private is that separate authority, and applies only with --force.
-#   The export is still attempted first; only when it cannot be verified does
-#   teardown print exactly what it is destroying and proceed.
 #
 # Transient worktree return recovery (teardown-lock-race): `treehouse return --force`
 # SIGKILLs the processes living in the worktree and then immediately runs
@@ -163,22 +163,14 @@ shift
 # Flags are order-independent, and an EMPTY argument is tolerated because
 # callers have always passed an unset "$2" through positionally.
 FORCE=
-DISCARD_PRIVATE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     '') ;;
     --force) FORCE=--force ;;
-    --discard-private) DISCARD_PRIVATE=1 ;;
-    *) echo "error: unknown teardown flag '$1' (usage: fm-teardown.sh <task-id> [--force] [--discard-private])" >&2; exit 2 ;;
+    *) echo "error: unknown teardown flag '$1' (usage: fm-teardown.sh <task-id> [--force])" >&2; exit 2 ;;
   esac
   shift
 done
-# --discard-private destroys records that exist nowhere else, so it is not a
-# standalone authority: it only widens what --force already authorizes.
-if [ "$DISCARD_PRIVATE" = 1 ] && [ "$FORCE" != "--force" ]; then
-  echo "error: --discard-private only applies with --force; it authorizes destroying the secondmate's private records when they cannot be exported, not an ordinary teardown" >&2
-  exit 2
-fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1267,10 +1259,6 @@ fi
 #
 # This runs on the --force path TOO, deliberately. --force is authority to
 # discard unlanded CODE; it says nothing about the durable records.
-# --discard-private is the separate, explicit authority for the records; even
-# then the export is attempted first, because a rescued record beats an
-# authorized one. Non-sbx backends have no hidden VM and answer with nothing
-# to rescue.
 if [ "$KIND" = secondmate ]; then
   # `if` around every optional echo, not `[ -n ... ] && echo`: under set -e an
   # AND-list whose test fails ends the script, and a backend with nothing to
@@ -1279,19 +1267,13 @@ if [ "$KIND" = secondmate ]; then
     if [ -n "$EXPORT_LINE" ]; then
       echo "$EXPORT_LINE"
     fi
-  elif [ "$DISCARD_PRIVATE" = 1 ]; then
-    echo "DISCARDING secondmate $ID's private records: data/ and state/ under $HOME_PATH inside the sandbox, destroyed with the VM and held nowhere else." >&2
-    if [ -n "$EXPORT_LINE" ]; then
-      echo "$EXPORT_LINE" >&2
-    fi
-    echo "--discard-private authorized this." >&2
   else
     echo "REFUSED: secondmate $ID's private records could not be exported, and teardown would destroy them." >&2
     if [ -n "$EXPORT_LINE" ]; then
       echo "$EXPORT_LINE" >&2
     fi
     echo "Those records are gitignored, so the landed-work check cannot see them and the host holds no copy." >&2
-    echo "Fix the export and re-run, or - only with the captain's explicit OK to lose them - add --discard-private to --force." >&2
+    echo "Fix the export and re-run. See docs/sbx-backend.md for the stopped-guest recovery procedure." >&2
     exit 1
   fi
 fi
