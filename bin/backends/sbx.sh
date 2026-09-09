@@ -454,7 +454,7 @@ FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
 # destroyed either way.
 fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
   local target=$1 home=${2-} signals=${3-}
-  local name id state stamp dir archive listing digest guest_out rc=0 n want
+  local name id state stamp dir host_signals archive listing digest guest_out rc=0 n want
   local -a guest_args private_dirs
   name=$(fm_backend_sbx_name_of_target "$target")
   if [ -z "$home" ]; then
@@ -482,6 +482,10 @@ fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
   esac
   if [ ! -d "$signals" ]; then
     printf 'cannot export the in-guest records of %s: the signal bridge %s is not a directory on this host' "$name" "$signals"
+    return 1
+  fi
+  if ! host_signals=$(cd "$signals" && pwd -P); then
+    printf 'cannot export the in-guest records of %s: could not resolve the signal bridge %s on this host' "$name" "$signals"
     return 1
   fi
   if ! stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null) || [ -z "$stamp" ]; then
@@ -586,7 +590,21 @@ fm_backend_sbx_export_private() {  # <target> <home> [signals-dir]
   fi
   # `shasum -a 256 -c` / `sha256sum -c` format, so the archive can be rechecked
   # later with a stock tool and no firstmate involvement.
-  if ! printf '%s  %s\n' "$digest" "$FM_SBX_BACKUP_ARCHIVE" > "$archive.sha256" 2>/dev/null; then
+  if ! perl -MFcntl=:DEFAULT -MFile::Temp=tempfile -e '
+    my ($dir, $archive, $digest) = @ARGV;
+    chdir "/" or die "$!\n";
+    for my $part (split m{/+}, $dir) {
+      next unless length $part;
+      sysopen(my $parent, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "$!\n";
+      chdir $parent or die "$!\n";
+    }
+    my ($file, $tmp) = tempfile(".sha256-XXXXXX", DIR => ".");
+    my $written = printf {$file} "%s  %s\n", $digest, $archive;
+    $written = close($file) && $written;
+    my $published = $written && link $tmp, "$archive.sha256";
+    unlink $tmp or die "$!\n";
+    exit($published ? 0 : 1);
+  ' "$host_signals/${dir##*/}" "$FM_SBX_BACKUP_ARCHIVE" "$digest" 2>/dev/null; then
     printf 'cannot verify the exported records of %s: could not record the sha256 beside %s' "$name" "$archive"
     return 1
   fi

@@ -1186,6 +1186,7 @@ The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts 
   A guest that exits 0 having written nothing cannot pass.
 - The **sha256 sidecar** written beside the archive is the verification mark.
   It is the host's own digest of the bytes on the bridge, in `shasum -a 256 -c` format, so the archive can be rechecked later with a stock tool.
+  Publication refuses links in the destination directory path and any existing sidecar, so a guest cannot redirect the host checksum write into host records.
   **An archive with no `<archive>.sha256` next to it was never verified and is not a backup.**
 - Every failure refuses the removal: an unreadable sandbox state, a failed guest command, a missing or empty archive, contents that disagree with what the guest reported, or a digest that could not be computed.
   A confirmed-**absent** sandbox is the one clean pass, because its disk is already gone and there is nothing left to rescue.
