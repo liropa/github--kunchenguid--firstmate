@@ -30,6 +30,10 @@
 #   state/<id>.turn-ended become host symlinks onto it); supported harnesses
 #   are claude and codex, and ship/scout sbx spawns are refused
 #   (docs/sbx-backend.md).
+#   FM_SBX_RESTORE_PRIVATE names a verified home-private.tgz on this secondmate's
+#   signal bridge. An sbx spawn checks its host-side sha256 sidecar before VM
+#   creation, then restores data/ and state/ into the new guest before provisioning
+#   and launch. A verification or extraction failure stops the spawn.
 #   A claude sbx spawn fail-soft reconciles ~/.claude.json to firstmate's
 #   intended workspace-trust shape (revoke the guest-wide grant sbx's own
 #   claude-flavor create writes, grant the roots a guest launches under);
@@ -1277,6 +1281,26 @@ EOF
       exit 1
     fi
     SIG_DIR="$FM_SBX_SIGNALS_ROOT/$ID"
+    SBX_RESTORE_ARCHIVE=
+    if [ -n "${FM_SBX_RESTORE_PRIVATE:-}" ]; then
+      sbx_restore_dir=$(cd "$(dirname "$FM_SBX_RESTORE_PRIVATE")" && pwd -P) || exit 1
+      sbx_signals_real=$(cd "$SIG_DIR" && pwd -P) || exit 1
+      case "$sbx_restore_dir" in
+        "$sbx_signals_real"/*) ;;
+        *) echo "error: private-record restore archive must be on $SIG_DIR" >&2; exit 1 ;;
+      esac
+      if [ "${FM_SBX_RESTORE_PRIVATE##*/}" != "$FM_SBX_BACKUP_ARCHIVE" ]; then
+        echo "error: private-record restore requires $FM_SBX_BACKUP_ARCHIVE" >&2
+        exit 1
+      fi
+      SBX_RESTORE_ARCHIVE="$SIG_DIR/${sbx_restore_dir#"$sbx_signals_real"/}/$FM_SBX_BACKUP_ARCHIVE"
+      sbx_restore_digest=$(fm_inherit_sha256 "$SBX_RESTORE_ARCHIVE") || exit 1
+      sbx_restore_mark=$(cat "$SBX_RESTORE_ARCHIVE.sha256" 2>/dev/null) || sbx_restore_mark=
+      if [ -z "$sbx_restore_digest" ] || [ "$sbx_restore_mark" != "$sbx_restore_digest  $FM_SBX_BACKUP_ARCHIVE" ]; then
+        echo "error: private-record restore archive has no matching host verification: $SBX_RESTORE_ARCHIVE" >&2
+        exit 1
+      fi
+    fi
     fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR" || exit 1
     T="sbx:$W"
     # Seed the tracked-file sync's staleness cache from the guest's OWN
@@ -1637,6 +1661,12 @@ if [ "$BACKEND" = sbx ]; then
   # re-assert (bin/backends/sbx.sh). It rebuilds the inherited read path and
   # markers owned by docs/sbx-backend.md "Guest-home provisioning", and also
   # plants the shell-profile env snippet owned by "Guest shell-profile env".
+  if [ -n "$SBX_RESTORE_ARCHIVE" ]; then
+    sbx exec "$W" -- tar -C "$PROJ_ABS" -xzf "$SBX_RESTORE_ARCHIVE" || {
+      echo "error: failed to restore private records in sandbox $W; agent launch refused" >&2
+      exit 1
+    }
+  fi
   fm_backend_sbx_provision_guest_home "$W" "$PROJ_ABS" "$ID" "$SIG_DIR" || {
     echo "error: failed to provision the guest home's private surface in sandbox $W" >&2
     exit 1

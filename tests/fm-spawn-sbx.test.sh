@@ -827,6 +827,99 @@ test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
   pass "spawn: a failed gate-trust reconcile warns and launches anyway"
 }
 
+seed_private_restore() {
+  local w=$1 archive="$1/signals/smx/backup-fixture/home-private.tgz"
+  mkdir -p "$w/snapshot/data" "$w/snapshot/state" "${archive%/*}" "$w/guest" "$w/guest-writes"
+  printf 'guest backlog\n' > "$w/snapshot/data/backlog.md"
+  printf 'guest charter\n' > "$w/snapshot/data/charter.md"
+  printf 'done: guest record\n' > "$w/snapshot/state/worker.status"
+  tar -C "$w/snapshot" -czf "$archive" data state
+  (cd "${archive%/*}" && shasum -a 256 home-private.tgz > home-private.tgz.sha256)
+}
+
+test_private_restore_precedes_first_launch() {
+  local w fb out archive
+  w=$(new_world restore-before-launch); fb=$(make_fake_sbx "$w")
+  seed_private_restore "$w"
+  archive="$w/signals/smx/backup-fixture/home-private.tgz"
+  cat > "$w/capture-launch" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    'test ! -s '*' && printf %s '*' && ( cd '*)
+      cp -R "$FM_FAKE_SBX_GUEST_HOME/data" "$FM_RESTORE_LAUNCH_SNAPSHOT/data"
+      cp -R "$FM_FAKE_SBX_GUEST_HOME/state" "$FM_RESTORE_LAUNCH_SNAPSHOT/state"
+      break
+      ;;
+  esac
+done
+"$FM_RESTORE_LAUNCH_ACK" "$@"
+SH
+  chmod +x "$w/capture-launch"
+  mkdir "$w/at-launch"
+
+  out=$(FM_SBX_TEMPLATE=restore-template FM_SBX_AGENT=codex FM_SBX_RESTORE_PRIVATE="$archive" \
+    FM_FAKE_SBX_GUEST_HOME="$w/guest" FM_TEST_LAUNCH_ACK="$w/capture-launch" \
+    FM_RESTORE_LAUNCH_SNAPSHOT="$w/at-launch" FM_RESTORE_LAUNCH_ACK="$ROOT/tests/fake-launch-ack.sh" \
+    run_spawn "$w" "$fb" smx "$w/sm" --backend sbx --harness claude --secondmate) \
+    || fail "a verified private archive must restore and launch: $out"
+
+  cmp "$w/snapshot/data/backlog.md" "$w/at-launch/data/backlog.md" \
+    || fail "the guest backlog must be restored before launch submission"
+  cmp "$w/snapshot/data/charter.md" "$w/at-launch/data/charter.md" \
+    || fail "the guest charter must be restored before launch submission"
+  cmp "$w/snapshot/state/worker.status" "$w/at-launch/state/worker.status" \
+    || fail "the guest state must be restored before launch submission"
+  assert_contains "$(cat "$w/home/state/smx.meta")" 'sbx_agent=codex' 'the recorded flavor must survive recreation'
+  assert_contains "$(cat "$w/home/state/smx.meta")" 'sbx_template=restore-template' 'recreation must select the requested template'
+  assert_contains "$(cat "$w/home/state/smx.meta")" 'backend=sbx' 'recreation must use sbx'
+  assert_absent "$w/sm/data/backlog.md" 'restore must not write the guest backlog into the host home'
+  pass "spawn: verified private records reach the guest before first launch"
+}
+
+test_private_restore_refuses_invalid_archive() {
+  local w fb out archive kind
+  for kind in no-marker changed off-bridge corrupt; do
+    w=$(new_world "restore-invalid-$kind"); fb=$(make_fake_sbx "$w")
+    seed_private_restore "$w"
+    archive="$w/signals/smx/backup-fixture/home-private.tgz"
+    case "$kind" in
+      no-marker) mv "$archive.sha256" "$archive.unverified" ;;
+      changed) printf 'changed bytes\n' >> "$archive" ;;
+      off-bridge)
+        cp "$archive" "$w/home-private.tgz"
+        cp "$archive.sha256" "$w/home-private.tgz.sha256"
+        archive="$w/home-private.tgz"
+        ;;
+      corrupt)
+        printf 'not a tarball\n' > "$archive"
+        (cd "${archive%/*}" && shasum -a 256 home-private.tgz > home-private.tgz.sha256)
+        ;;
+    esac
+
+    if out=$(FM_SBX_RESTORE_PRIVATE="$archive" FM_FAKE_SBX_GUEST_HOME="$w/guest" \
+        run_spawn "$w" "$fb" smx "$w/sm" --backend sbx --harness claude --secondmate); then
+      fail "a $kind restore archive must refuse launch: $out"
+    fi
+
+    assert_absent "$w/signals/smx/smx.launched" 'failed restore must not submit an agent launch'
+    assert_present "$w/sm/data/charter.md" 'failed restore must preserve the host home'
+    assert_present "$archive" 'failed restore must preserve the archive'
+    if [ "$kind" != corrupt ]; then
+      assert_not_contains "$(cat "$w/sbx.log")" 'create --clone' 'invalid host verification must refuse before creation'
+    else
+      assert_contains "$out" 'agent launch refused' 'a guest extraction failure must explain the refusal'
+    fi
+    pass "spawn: $kind private archive refuses launch and preserves records"
+  done
+}
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
+test_private_restore_precedes_first_launch
+test_private_restore_refuses_invalid_archive
 test_refuses_non_secondmate_spawn
 test_refuses_unverified_harness
 test_claude_gate_trust_seed_creates_missing_config_for_worktree_root_only
