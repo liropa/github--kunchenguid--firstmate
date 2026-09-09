@@ -24,6 +24,8 @@
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh resolve <origin-id> <decision-key> \
+#     --decision-file <path> --no-work
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -37,6 +39,13 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# `--no-work` is the resolve shape for a decision whose correct outcome is no work:
+# the hazard did not occur, the origin already landed, nothing is to be built. It
+# is refused together with --routed-to, still requires the captain decision file,
+# and records `routed: none (no work)` in the hold body where routed identities
+# would go. Everything else is unchanged: the record is written first and the hold
+# is marked Done only after, so a failure leaves it open.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +53,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+
+# Recorded where routed identities would go when the captain's answer routes to no
+# work. validate_slug rejects the spaces and parentheses, so this sentinel can
+# never collide with a real routed task id.
+NO_WORK_ROUTE='none (no work)'
+NO_WORK_RECORD="routed: $NO_WORK_ROUTE"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -169,6 +184,14 @@ verify_hold_active() {  # <hold-id>
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
+body_records_resolution() {  # <hold-body>
+  case "$1" in
+    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+    *"Resolution recorded by fm-decision-hold."*"$NO_WORK_RECORD"*) return 0 ;;
+  esac
+  return 1
+}
+
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
   show=$(task_show "$id") || return 1
@@ -177,10 +200,7 @@ verify_hold_resolved() {  # <hold-id>
   body=$(show_field "$show" body)
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
-  case "$body" in
-    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-  esac
-  return 1
+  body_records_resolution "$body"
 }
 
 verify_hold_durable() {  # <hold-id>
@@ -194,10 +214,8 @@ verify_hold_durable() {  # <hold-id>
   if [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  if [ "$state" = "done" ] && [ "$kind" = captain ]; then
-    case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-    esac
+  if [ "$state" = "done" ] && [ "$kind" = captain ] && body_records_resolution "$body"; then
+    return 0
   fi
   fail "captain decision $id is neither actively held nor durably resolved"
 }
@@ -367,28 +385,35 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' no_work=0 id='' decision='' decision_digest='' body='' trailer='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
+      --no-work) no_work=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  [ "$no_work" = 0 ] || [ -z "$routed" ] || fail "--no-work cannot be combined with --routed-to"
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
   decision=$(cat "$decision_file")
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
-  [ -n "$routed" ] || fail "at least one --routed-to task is required"
-  routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
-  routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  if [ "$no_work" = 1 ]; then
+    routed_csv=$NO_WORK_ROUTE
+  else
+    [ -n "$routed" ] \
+      || fail "at least one --routed-to task is required, or --no-work when the decision routes to no work"
+    routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
+    routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  fi
   decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
@@ -429,7 +454,12 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  if [ "$no_work" = 1 ]; then
+    trailer=$NO_WORK_RECORD
+  else
+    trailer='Routed work:'
+  fi
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\n%s\n' "$decision_digest" "$routed_csv" "$decision" "$trailer")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
@@ -449,7 +479,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
-  printf 'resolved: %s -> %s\n' "$id" "$routed"
+  printf 'resolved: %s -> %s\n' "$id" "${routed:-$NO_WORK_ROUTE}"
 }
 
 case "${1:-}" in
