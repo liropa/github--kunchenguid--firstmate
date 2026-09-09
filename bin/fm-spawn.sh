@@ -137,6 +137,9 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# FM_HARNESS_PID and CLAUDE_PID are cleared before backend startup and again
+# inside every worker launch, so an inherited primary PID cannot authorize a
+# worker through fm-lock.sh's environment fallback.
 set -eu
 
 unset FM_HARNESS_PID CLAUDE_PID
