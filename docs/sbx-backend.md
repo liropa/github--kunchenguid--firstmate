@@ -1218,10 +1218,11 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
 
    A failed export must never proceed to removal. It leaves the guest stopped, with its disk and saved agent session intact.
    If stopping itself fails, the command reports that it could not confirm the stopped state; removal is still refused.
-   To bring the guest back after an export failure, send the next steer:
+   To bring the guest back after an export failure, send the next steer with the same `<signals-dir>` used for export:
 
    ```sh
-   FM_HOME='<parent-home>' bin/fm-send.sh '<id>' --notice 'VM replacement was cancelled. Resume from your saved session.'
+   FM_HOME='<parent-home>' FM_SBX_SIGNALS_ROOT="$(dirname '<signals-dir>')" \
+     bin/fm-send.sh '<id>' --notice 'VM replacement was cancelled. Resume from your saved session.'
    ```
 
    `fm-send` rebuilds the guest session and resumes the agent from its saved session before it delivers the steer.
