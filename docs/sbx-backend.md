@@ -1172,7 +1172,7 @@ Nothing in the code path enforced it, so the safety lived in an agent's memory a
 The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts were lost for good.
 <!-- /fm-authority -->
 
-`bin/fm-teardown.sh` now exports those records before any `kind=secondmate` removal, on the `--force` path too, and refuses the removal when the host cannot verify the archive:
+`bin/fm-teardown.sh` exports those records before any `kind=secondmate` removal, on the `--force` path too, and requires explicit discard authority when the host cannot verify the archive:
 
 - The archive lands on the **signal bridge**, at `<signals-dir>/backup-<UTC stamp>/home-private.tgz`.
   The bridge is the one directory that is host-visible, writable from both sides, and never removed by teardown, so the archive outlives the machine it came from.
@@ -1188,15 +1188,15 @@ The records were rebuilt from a ten-day-old snapshot and prose; seven artifacts 
   It is the host's own digest of the bytes on the bridge, in `shasum -a 256 -c` format, so the archive can be rechecked later with a stock tool.
   Publication refuses links in the destination directory path and any existing sidecar, so a guest cannot redirect the host checksum write into host records.
   **An archive with no `<archive>.sha256` next to it was never verified and is not a backup.**
-- Every failure refuses the removal: an unreadable sandbox state, a failed guest command, a missing or empty archive, contents that disagree with what the guest reported, or a digest that could not be computed.
+- Without explicit discard authority, every failure refuses the removal: an unreadable sandbox state, a failed guest command, a missing or empty archive, contents that disagree with what the guest reported, or a digest that could not be computed.
   A confirmed-**absent** sandbox is the one clean pass, because its disk is already gone and there is nothing left to rescue.
 - The export **stops the VM first** to terminate guest writers, including the agent and its child processes.
   `sbx exec` then starts the VM only to run the archive command; it does not rebuild the agent session or its daemons.
   The export stops the VM again before host verification and leaves it stopped through removal.
-  Both stops must be confirmed from the host inventory; a failed or unconfirmed stop refuses verification and removal.
+  Both stops must be confirmed from the host inventory; a failed or unconfirmed stop refuses verification.
 - `--force` does **not** waive this.
   `--force` is authority over unlanded code; it says nothing about durable records, and conflating the two is exactly what cost the 2026-09-09 artifacts.
-  No flag permits removal after an export failure.
+  `--force --discard-private` is the sole explicit exception; `bin/fm-teardown.sh --help` owns its scope and required authority.
 
 ## Recreating a secondmate's VM
 
@@ -1216,8 +1216,8 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
    BASH
    ```
 
-   A failed export must never proceed to removal. It leaves the guest stopped, with its disk and saved agent session intact.
-   If stopping itself fails, the command reports that it could not confirm the stopped state; removal is still refused.
+   Without explicit discard authority, a failed export must never proceed to removal. It leaves the guest stopped, with its disk and saved agent session intact.
+   If stopping itself fails, the command reports that it could not confirm the stopped state; this recreate procedure still stops without removal.
    To bring the guest back after an export failure, send the next steer with the same `<signals-dir>` used for export:
 
    ```sh

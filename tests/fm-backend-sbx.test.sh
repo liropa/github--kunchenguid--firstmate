@@ -3290,23 +3290,30 @@ test_teardown_refuses_when_the_export_cannot_be_verified() {
 }
 
 test_teardown_force_alone_does_not_waive_the_export() {
-  local w fb out rc
-  w=$(new_teardown_world teardown-export-force); fb=$(make_fake_sbx "$w")
-  sbx_ls_json fm-domain running > "$w/ls.json"
-  : > "$w/sbx.log"
-  set +e
-  out=$(run_teardown_sbx "$w" "$fb" "--force" FM_FAKE_SBX_EXPORT_SILENT=1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "--force alone must not waive the private-record export: $out"
-  assert_contains "$out" "Fix the export and re-run" \
-    "the refusal must require a successful export"
-  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
-    "a refused --force teardown must still not destroy the VM"
-  [ -d "$w/subhome" ] || fail "a refused --force teardown must preserve the secondmate home"
-  [ "$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-domain')" = stopped ] \
-    || fail "a refused --force teardown must leave the guest stopped"
-  pass "teardown: --force alone still refuses when the private records cannot be exported"
+  local failure export_failure w fb out
+  for failure in command verification; do
+    w=$(new_teardown_world "teardown-export-force-$failure"); fb=$(make_fake_sbx "$w")
+    sbx_ls_json fm-domain running > "$w/ls.json"
+    if [ "$failure" = command ]; then
+      export_failure=FM_FAKE_SBX_EXPORT_RC=1
+    else
+      export_failure=FM_FAKE_SBX_EXPORT_SILENT=1
+    fi
+
+    if out=$(run_teardown_sbx "$w" "$fb" --force "$export_failure"); then
+      fail "--force alone must not waive the private-record export: $out"
+    fi
+
+    assert_contains "$out" "Fix the export and re-run" \
+      "the refusal must require a successful export or explicit discard authority"
+    assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+      "a refused --force teardown must still not destroy the VM"
+    assert_present "$w/subhome" "a refused --force teardown must preserve the secondmate home"
+    assert_present "$w/home/state/domain.meta" "a refused --force teardown must preserve task metadata"
+    [ "$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-domain')" = stopped ] \
+      || fail "a refused --force teardown must leave the guest stopped"
+    pass "teardown: --force alone refuses removal after export $failure failure"
+  done
 }
 
 test_teardown_force_stops_writers_before_export_and_removal() {
@@ -3329,6 +3336,57 @@ test_teardown_force_stops_writers_before_export_and_removal() {
   assert_contains "$(cat "$w/sbx.log")" "rm --force fm-domain" "verified export must permit removal"
   assert_absent "$w/subhome" "verified export must permit retirement"
   pass "teardown: --force stops guest writers before export and removal"
+}
+
+test_teardown_discard_private_proceeds_and_names_the_loss() {
+  local failure flags export_failure w fb out log
+  for failure in command verification; do
+    w=$(new_teardown_world "teardown-discard-$failure"); fb=$(make_fake_sbx "$w")
+    sbx_ls_json fm-domain running > "$w/ls.json"
+    seed_guest_private_home "$w/subhome"
+    if [ "$failure" = command ]; then
+      flags='--force --discard-private'
+      export_failure=FM_FAKE_SBX_EXPORT_RC=1
+    else
+      flags='--discard-private --force'
+      export_failure=FM_FAKE_SBX_EXPORT_SILENT=1
+    fi
+
+    out=$(run_teardown_sbx "$w" "$fb" "$flags" "$export_failure") \
+      || fail "explicit discard authority must permit retirement after $failure failure: $out"
+
+    assert_contains "$out" 'DISCARDING' 'an authorized discard must be announced'
+    assert_contains "$out" 'data/ and state/' 'the discard notice must name the private directories'
+    assert_contains "$out" "$w/subhome" 'the discard notice must name the guest home'
+    assert_contains "$out" 'sbx:fm-domain' 'the discard notice must identify the sandbox'
+    log=$(cat "$w/sbx.log")
+    case "$log" in
+      *fm-sbx-export-private*rm\ --force\ fm-domain*) : ;;
+      *) fail "discard authority must still attempt export before removal: $log" ;;
+    esac
+    assert_absent "$w/subhome" 'an authorized discard must retire the host home'
+    assert_absent "$w/home/state/domain.meta" 'an authorized discard must remove task metadata'
+    pass "teardown: explicit discard authority proceeds and names the loss after $failure failure"
+  done
+}
+
+test_teardown_discard_private_still_prefers_a_working_export() {
+  local w fb out archive
+  w=$(new_teardown_world teardown-discard-verified); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-domain running > "$w/ls.json"
+  seed_guest_private_home "$w/subhome"
+
+  out=$(run_teardown_sbx "$w" "$fb" '--force --discard-private') \
+    || fail "discard authority must preserve a working export: $out"
+
+  archive=$(exported_archive "$w/signals/domain") || fail 'discard authority must still export records'
+  assert_present "$archive.sha256" 'a successful export must still be verified'
+  assert_contains "$(tar -xOzf "$archive" data/backlog.md)" 'keep-me' 'the archive must retain the backlog'
+  assert_not_contains "$out" 'DISCARDING' 'a verified export must not be reported as discarded'
+  [ "$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-domain')" = stopped ] \
+    || fail 'the guest must stay stopped through removal after a verified export'
+  assert_absent "$w/subhome" 'a verified export must permit retirement'
+  pass 'teardown: discard authority still exports and verifies available records'
 }
 
 test_teardown_refuses_removal_when_export_cannot_stop_the_guest() {
@@ -3591,6 +3649,8 @@ test_teardown_exports_private_records_before_the_kill
 test_teardown_refuses_when_the_export_cannot_be_verified
 test_teardown_force_alone_does_not_waive_the_export
 test_teardown_force_stops_writers_before_export_and_removal
+test_teardown_discard_private_proceeds_and_names_the_loss
+test_teardown_discard_private_still_prefers_a_working_export
 test_teardown_refuses_removal_when_export_cannot_stop_the_guest
 test_send_resumes_saved_session_after_a_failed_export
 test_teardown_allows_clean_guest

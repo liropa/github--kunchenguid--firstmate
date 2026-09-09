@@ -432,9 +432,8 @@ FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
 #   1  anything else. Every failure mode is a refusal: an unreadable sandbox
 #      state, a failed guest tar, a missing or empty archive, an archive whose
 #      listing does not carry what the guest reported it has, or a digest that
-#      could not be computed. The caller's removal must not proceed on any of
-#      them, because "the export failed" and "there was nothing to export" are
-#      indistinguishable from the outside and only one of them is safe.
+#      could not be computed. The caller must refuse removal without explicit
+#      authority to discard private records.
 #
 # Verification is deliberately HOST-side. The guest reports which expected files
 # it holds, but that report is only used to decide WHAT to look for; the host
