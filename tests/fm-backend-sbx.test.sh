@@ -2896,6 +2896,59 @@ test_export_private_tolerates_a_guest_with_no_state_dir() {
   pass "export_private: a guest with no state/ yet exports what it has, and is not refused"
 }
 
+test_export_private_does_not_follow_guest_links() {
+  local kind w fb out host_record real_tar
+  real_tar=$(command -v tar)
+  for kind in sidecar dangling hardlink parent ancestor; do
+    w=$(new_sbx_world "export-link-$kind"); fb=$(make_fake_sbx "$w")
+    sbx_ls_json fm-x running > "$w/ls.json"
+    mkdir -p "$w/signals/x" "$w/host/data"
+    seed_guest_private_home "$w/guest"
+    host_record="$w/host/data/backlog.md"
+    printf 'host records must survive\n' > "$host_record"
+    "$real_tar" -C "$w/guest" -czf "$w/host/data/home-private.tgz" data state
+    cat > "$fb/tar" <<'SH'
+#!/usr/bin/env bash
+set -eu
+"$FM_TEST_REAL_TAR" "$@"
+[ "$1" = -C ] || exit 0
+archive=$4
+dir=${archive%/*}
+case "$FM_TEST_EXPORT_LINK" in
+  sidecar) ln -s "$FM_TEST_HOST_RECORD" "$archive.sha256" ;;
+  dangling) ln -s "$FM_TEST_HOST_RECORD.absent" "$archive.sha256" ;;
+  hardlink) ln "$FM_TEST_HOST_RECORD" "$archive.sha256" ;;
+  parent)
+    mv "$dir" "$dir.saved"
+    ln -s "${FM_TEST_HOST_RECORD%/*}" "$dir"
+    ;;
+  ancestor)
+    bridge=${dir%/*}
+    mv "$bridge" "$bridge.saved"
+    mkdir "${FM_TEST_HOST_RECORD%/*}/${dir##*/}"
+    cp "${FM_TEST_HOST_RECORD%/*}/home-private.tgz" "${FM_TEST_HOST_RECORD%/*}/${dir##*/}/"
+    ln -s "${FM_TEST_HOST_RECORD%/*}" "$bridge"
+    ;;
+esac
+SH
+    chmod +x "$fb/tar"
+
+    if out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_export_private sbx:fm-x /guest/home' \
+        FM_FAKE_SBX_GUEST_HOME="$w/guest" FM_TEST_REAL_TAR="$real_tar" \
+        FM_TEST_EXPORT_LINK="$kind" FM_TEST_HOST_RECORD="$host_record"); then
+      fail "an export with a guest-created $kind link must be refused: $out"
+    fi
+
+    [ "$(cat "$host_record")" = 'host records must survive' ] \
+      || fail "a guest-created $kind link must not overwrite the host backlog"
+    assert_absent "$host_record.absent" "a dangling sidecar must not create its host target"
+    [ -z "$(find "$w/host" -name '*.sha256' -print)" ] \
+      || fail "a guest-created $kind link must not publish a marker outside the bridge"
+    assert_contains "$out" 'could not record the sha256' "unsafe publication must report failure"
+    pass "export_private: a guest-created $kind link cannot redirect the host checksum write"
+  done
+}
+
 test_export_private_refuses_a_guest_with_nothing_private() {
   local w fb out
   w=$(new_sbx_world export-empty); fb=$(make_fake_sbx "$w")
@@ -3289,6 +3342,10 @@ test_teardown_force_skips_guest_probe() {
   pass "teardown: --force discards an sbx secondmate without probing the guest (captain-authorized)"
 }
 
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 test_state_probe_classifies
 test_agent_alive_matrix
 test_agent_alive_dispatcher_routes_sbx
@@ -3395,6 +3452,7 @@ test_unlanded_work_stopped_guest_is_inspected
 test_unlanded_work_dispatcher_routes
 test_export_private_writes_a_host_verified_archive
 test_export_private_tolerates_a_guest_with_no_state_dir
+test_export_private_does_not_follow_guest_links
 test_export_private_refuses_a_guest_with_nothing_private
 test_export_private_catches_a_guest_that_wrote_nothing
 test_export_private_guest_command_failure_refuses
