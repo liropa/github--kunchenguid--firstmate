@@ -177,8 +177,6 @@ case "$cmd" in
         *) sandbox=$1; shift ;;
       esac
     done
-    inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
-    printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
     # No element of a guest command may be empty. This is firstmate's own
     # invariant on every vector it builds, and it is enforced HERE - once, for
     # every suite - because `$*` joins the arguments and so cannot show an
@@ -208,6 +206,8 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
         ;;
       "tmux new-session"*)
+        inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+        printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
         rm -f "$fake_state.stopped-$sandbox"
         exit 0
         ;;
@@ -315,6 +315,8 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_KEEPALIVE_RC:-0}"
         ;;
       "sh -c "*"fm-sbx-export-private"*)
+        inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+        printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
         # The private-record export (fm_backend_sbx_export_private). Executed
         # for real, with the home argument remapped onto the guest-clone
         # fixture the same way the provisioning route does it: clone mode puts
