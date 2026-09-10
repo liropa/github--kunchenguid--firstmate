@@ -562,10 +562,10 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 }
 
 # fm_backend_send_text_submit: submit and verify text according to the
-# backend's transport contract. Most adapters type once and retry only Enter;
-# sbx may retype when pane verification shows the typed text was swallowed.
-# Echoes the verdict (empty|pending|unknown|send-failed for submit-verifying
-# adapters).
+# backend's transport contract. Every adapter types the text once and retries
+# only Enter (bin/fm-send.sh's no-double-text rule); they differ only in what
+# they read back as proof. Echoes the verdict (empty|pending|unknown|send-failed
+# for submit-verifying adapters).
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift

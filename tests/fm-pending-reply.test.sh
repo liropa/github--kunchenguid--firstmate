@@ -35,6 +35,9 @@
 #      undeliverable, and still resolvable by a late correlated reply
 #  20. Scanner retries deferred recovery escalation publication once, without
 #      duplicate undeliverable lines
+#  21. One marked steer over the sbx backend is ONE guest delivery and ONE
+#      pending-reply record (the 2026-09-09 multiplied-steer defect, which
+#      delivered the same correlation token up to four times)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -43,6 +46,10 @@ set -u
 . "$ROOT/bin/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
+# The fake sbx CLI, for the one end-to-end case that has to run over the real
+# sbx adapter rather than a pane stub (test 21).
+# shellcheck source=tests/sbx-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 REPORT="$ROOT/bin/fm-secondmate-report.sh"
@@ -672,6 +679,44 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   [ "$(fm_pending_reply_get "$rec" task_id)" = hibit ] \
     || fail "task_id must match secondmate id"
   pass "fm-send marked secondmate path creates pending and embeds corr"
+}
+
+# Test 21. The sbx path end to end, because the multiplied-steer defect lived
+# below fm-send: one invocation must reach the guest once and leave one record.
+test_fm_send_sbx_marked_steer_delivers_once() {
+  local dir fb home state sm_home typed text corr records
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; return 0; }
+  dir="$TMP_ROOT/send-sbx"; mkdir -p "$dir/signals"
+  fb=$(make_fake_sbx "$dir")
+  home=$(setup_parent send-sbx); state="$home/state"
+  sm_home="$home/sm"; mkdir -p "$sm_home"
+  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sbx:fm-hibit"
+  printf 'backend=sbx\n' >> "$state/hibit.meta"
+  sbx_ls_json fm-hibit running > "$dir/ls.json"
+  printf 'idle notice line\n' > "$dir/pane.txt"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_SETTLE=0 \
+    FM_PENDING_REPLY_GRACE_SECS=0 \
+    FM_FAKE_SBX_LOG="$dir/sbx.log" FM_FAKE_SBX_LS_FILE="$dir/ls.json" \
+    FM_FAKE_SBX_CAPTURE="$dir/pane.txt" FM_FAKE_SBX_TYPE_ECHO=1 \
+    FM_FAKE_SBX_ENTER_BUSY=1 \
+    FM_SBX_SIGNALS_ROOT="$dir/signals" FM_SBX_RESURRECT_SETTLE=0 \
+    FM_SBX_RESURRECT_READY_TRIES=0 FM_SBX_KEEPALIVE_MAX=0 \
+    "$SEND" hibit "HOLD: file nothing until I nudge you" 2>/dev/null \
+    || fail "an sbx secondmate steer should succeed"
+  typed=$(grep -c 'send-keys -t fm:fm-hibit -l' "$dir/sbx.log")
+  [ "$typed" -eq 1 ] || fail "one marked steer must be one guest delivery, typed $typed time(s)"
+  text=$(sed -n 's/.*send-keys -t fm:fm-hibit -l //p' "$dir/sbx.log")
+  case "$text" in
+    "$FM_FROMFIRST_MARK"corr=*) : ;;
+    *) fail "the delivered text must carry the marker and one corr token"$'\n'"$(printf '%s' "$text" | od -An -c)" ;;
+  esac
+  corr=$(fm_pending_reply_extract_corr "$text")
+  [ -f "$(fm_pending_reply_path "$state" "$corr")" ] \
+    || fail "the delivered corr must have a pending-reply record"
+  records=$(find "$(fm_pending_reply_dir "$state")" -type f | wc -l | tr -d ' ')
+  [ "$records" -eq 1 ] || fail "one marked steer must leave exactly one record, found $records"
+  pass "fm-send over sbx: one marked steer is one delivery and one pending-reply record"
 }
 
 test_document_pointer_resolves() {
@@ -1552,6 +1597,7 @@ test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
+test_fm_send_sbx_marked_steer_delivers_once
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
