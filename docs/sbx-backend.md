@@ -550,9 +550,11 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures, then let the caller deliver.
 
-The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: after Enter it reads the pane back; text absent → clear (C-u) and retype; text parked in the composer with no busy footer → re-send Enter only (never retype); busy on the text → `submitted`.
-Retries exhausted stays the conservative `unknown`.
-**Presence means newly appeared, not merely visible**: the needle is the steer's first 24 chars (marker + a few payload chars), which a *previous* steer's rendered line in scrollback also matches - so the occurrence count is baselined from the full tmux history after the ready poll and before typing, and only a count above the baseline reads as our text (one extra capture exec per steer). Without this, a resume-time swallow behind a stale same-prefix line converts the designed retype into a no-op Enter loop and the steer is lost behind a clean exit (observed live, 5-secondmate soak: 1 of 5 concurrent resurrections).
+The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: the text is typed ONCE, before the retry loop, and each retry sends Enter alone until the pane shows the text newly AND the busy footer on it (`submitted`).
+Every other reading - text parked in an idle composer, or a pane that cannot account for the text at all - loops on Enter and ends at the conservative `unknown`.
+**Nothing is ever retyped and nothing clears the composer**; the retype this adapter used to do on an absent needle is what multiplied steers on 2026-09-09 (below).
+**Presence means newly appeared, not merely visible**: the needle is the steer's first 24 chars (marker + a few payload chars), which a *previous* steer's rendered line in scrollback also matches - so the occurrence count is baselined from the full tmux history after the ready poll and before typing, and only a count above the baseline reads as our text (one extra capture exec per steer). Without that baseline a stale same-prefix line reads as this steer's own, and an eaten steer exits exactly as cleanly as a delivered one (observed live, 5-secondmate soak: 1 of 5 concurrent resurrections).
+**The needle is matched as the guest RENDERS the text, not as it was typed**: both the needle and the capture pass through `fm_marker_strip_separators` (`bin/fm-marker-lib.sh`), because the from-firstmate marker's U+2063 separator never reaches the pane.
 Every successful turn-submitting delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
 Literal typing and standalone special keys, including Enter, do not prove that a turn started, so they neither arm the delivery alarm nor start a keep-alive.
 Verified text submissions and spawn's explicit literal-plus-composed-submit path do both.
@@ -579,6 +581,54 @@ Run against the pre-fix loop the first of those reproduces the incident exactly,
 In-guest daemons do not come back on VM start.
 The one an in-guest workflow depends on - the no-mistakes daemon - is restored by resurrection itself (below); anything else remains the resumed agent's own job, and its brief owns that knowledge.
 Such a daemon inherits its credentials from the guest shell profiles ("Guest shell-profile env" above), not from the agent's own env.
+
+### Multiplied steers (2026-09-09 incident, cause measured 2026-09-10)
+
+The `agent-dotfiles` secondmate reported that every marked message it received that day arrived **three times under one correlation token** (its status lines 1111 and 1116).
+It read each copy as one request, so nothing was acted on twice, but a decision carrying an action would have been.
+Each extra copy also spent a guest turn: three consecutive turn-end wakes per steer.
+
+**Cause, in two parts, both measured.**
+
+The needle could never match a marked steer.
+Claude Code's composer accepts U+2063 but does not draw it, so the marker the needle starts with is absent from every capture.
+Measured 2026-09-10, claude 2.1.267, a real pane at 100x30:
+
+```
+$ tmux send-keys -t p -l $'[fm-from-firstmate]\xE2\x81\xA3corr=6edc6c2493fafee8 HOLD: the restore is running; ...'
+$ tmux capture-pane -p -t p -S - | grep -F 'fm-from-firstmate' | head -1 | cut -c1-60 | od -c | head -3
+0000000    ❯  **  **      **   [   f   m   -   f   r   o   m   -   f   i
+0000020    r   s   t   m   a   t   e   ]   c   o   r   r   =   6   e   d
+0000040    c   6   c   2   4   9   3   f   a   f   e   e   8       H   O
+```
+
+The label is there; the separator between `]` and `corr` is not.
+tmux itself is not the filter - the same `send-keys -l` into a plain `cat` captures the three bytes back intact (tmux 3.7b, same date) - the TUI is.
+
+An unmatched needle then read as "the type vanished", and the loop cleared the composer and retyped.
+Measured the same day against the fake `sbx` CLI, at `fm-send`'s default budget of `FM_SEND_RETRIES=3`:
+
+```
+verdict              : unknown
+literal type sends   : 4
+Enter sends          : 4
+C-u clears           : 3
+```
+
+Four deliveries, one correlation token, and a clean exit - `fm-send` treats `unknown` as delivered.
+The secondmate counted three arrivals, which sits inside that budget; which copy did not land is not established.
+
+**Why it was this backend only.**
+`fm-send` has documented the no-double-text rule since the verified-submit work ("the line is typed ONCE, then Enter is sent and retried (Enter only, never retyped)"), and `fm_tmux_submit_core` implements it.
+This adapter was the one that broke it, and it is also the only one that confirms a submit by looking for the sent text in the pane rather than by reading the composer's own state.
+Because sbx is secondmate-only, every steer it carries is marked, so the defect fired on all of them rather than on an edge case.
+
+**Fix.**
+The type moved out of the retry loop, the C-u and the retype are gone, and both sides of the needle comparison are normalized through `fm_marker_strip_separators`.
+A steer the pane cannot confirm now ends at `unknown` with one delivery: firstmate resending one unconfirmed steer is recoverable, a transport that multiplies a delivered one is not.
+Regression coverage: `tests/fm-backend-sbx.test.sh`'s `test_submit_marked_steer_is_delivered_once` and `test_submit_never_retypes_when_text_unconfirmed`, plus `tests/fm-pending-reply.test.sh`'s `test_fm_send_sbx_marked_steer_delivers_once` for the whole `fm-send` path.
+Both marked-steer cases fail against the pre-fix adapter with `typed 4 time(s)` (observed 2026-09-10).
+`FM_FAKE_SBX_TYPE_ECHO` now renders the typed text the way the measurement shows a TUI does, with the separator dropped, so a fixture cannot hide this class of defect again.
 
 ### Gate-activity arm (the fourth arm, 2026-08-07)
 

@@ -156,6 +156,12 @@ fi
 # shellcheck source=bin/fm-state-key-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../fm-state-key-lib.sh"
 
+# This is the one backend that confirms a submit by looking for the SENT TEXT in
+# the pane, so it needs the marker's render rule (bin/fm-marker-lib.sh owns both
+# the separator bytes and the fact that a TUI never draws them).
+# shellcheck source=bin/fm-marker-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../fm-marker-lib.sh"
+
 fm_backend_sbx_state_dir() {
   printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 }
@@ -1385,30 +1391,48 @@ fm_backend_sbx_send_literal() {  # <target> <text>
   sbx exec "$name" -- tmux send-keys -t "$(fm_backend_sbx_guest_tmux_target "$name")" -l "$text" || return 1
 }
 
-# fm_backend_sbx_send_text_submit: type, submit, VERIFY, retry - echo a
-# verdict. Verification reads the pane back after Enter, which the first v1
-# cut skipped to save a capture exec per steer; the live rig proved it
+# fm_backend_sbx_send_text_submit: type ONCE, submit, VERIFY, retry Enter only
+# - echo a verdict. Verification reads the pane back after Enter, which the
+# first v1 cut skipped to save a capture exec per steer; the live rig proved it
 # necessary: a freshly resumed codex TUI shows stable-looking notices that
 # swallow the first keystrokes nondeterministically, so a fire-and-forget
 # type+Enter can vanish without a trace while the very same keys land fine
-# seconds later (verified live, twice). The check distinguishes the two
-# swallow modes: text absent from the pane -> retype from scratch; text
-# still sitting in the composer (Enter eaten, pane not busy) -> re-send
-# Enter only, never retype (fm-send's no-double-text rule). Only a newly
-# visible needle plus the busy signature counts as submitted; ambiguous
-# exhausted retries report unknown instead of cleanly claiming delivery.
+# seconds later (verified live, twice).
+#
+# The text is typed once, BEFORE the retry loop, and every retry sends Enter
+# alone. That is fm-send's no-double-text rule (bin/fm-send.sh's header,
+# bin/fm-tmux-lib.sh's submit core), and this adapter was the only backend that
+# broke it: it retyped from scratch whenever the needle read absent. An absent
+# needle is not proof that the text never arrived, so every steer this
+# verification could not confirm was delivered once per retry instead of once -
+# measured 2026-09-10 at fm-send's default budget of 3: four full deliveries,
+# four Enters, three C-u clears, all under one correlation token. A decision
+# carrying an action would have been acted on four times.
+#
+# The needle is matched as the guest RENDERS the text, not as it was typed.
+# fm_marker_strip_separators (bin/fm-marker-lib.sh) normalizes both sides,
+# because the from-firstmate marker's U+2063 never reaches the pane and a
+# byte-exact needle therefore cannot match a MARKED steer - the only kind this
+# secondmate-only backend carries. That is what made the retype fire on every
+# marked steer rather than only on a real swallow.
+#
+# Only a newly visible needle plus the busy signature counts as submitted;
+# anything else reports unknown rather than cleanly claiming delivery.
 # Presence means NEWLY appeared, not merely visible: steers routinely share
 # the needle prefix (the from-firstmate marker plus a repeated verb), and a
 # prior steer's rendered line can stay in captured scrollback.
 # Verified live in the 5-secondmate soak: a freshly resumed codex ate the
 # typed text, the previous turn's steer line matched the needle, and the
-# loop re-Entered an empty composer to a clean "sent" exit while the steer
-# was lost. The occurrence count is baselined before typing (one extra
+# pre-baseline loop reported that as a clean submit while the steer was
+# lost. The occurrence count is baselined before typing (one extra
 # capture exec per steer); only a count above the baseline is treated as
-# composer text.
+# composer text. A steer that is genuinely eaten now ends at the conservative
+# unknown verdict, which is the caller's to act on: firstmate resending one
+# unconfirmed steer is recoverable, a transport that multiplies a delivered one
+# is not.
 fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=${3:-3} enter_sleep=${4:-0.4} settle=${5:-1}
-  local name pane_t probe base_pane pane tries typed base cur busy pending attempt_pending
+  local name pane_t probe base_pane pane rendered tries base cur busy pending attempt_pending
   fm_backend_sbx_ensure_stack "$target" || { printf 'send-failed'; return 1; }
   name=$(fm_backend_sbx_name_of_target "$target")
   pane_t=$(fm_backend_sbx_guest_tmux_target "$name")
@@ -1416,32 +1440,22 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # false-match, short enough to survive composer line-wrapping. Bash
   # substring, not cut -c: the from-firstmate marker is multibyte and a
   # byte-split needle would never match the pane.
-  probe=${text//$'\n'/ }
+  fm_marker_strip_separators "${text//$'\n'/ }" probe
   probe=${probe:0:24}
   # Baseline AFTER ensure_stack: a resume's history re-render repaints old
   # steer lines, and a pre-redraw baseline would attribute them to our type.
   # ensure_stack's ready poll has already settled the pane here.
   base_pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) \
     || { printf 'send-failed'; return 1; }
-  base=$(printf '%s' "$base_pane" | grep -cF -- "$probe") || base=0
+  fm_marker_strip_separators "$base_pane" rendered
+  base=$(printf '%s' "$rendered" | grep -cF -- "$probe") || base=0
   case "$base" in ''|*[!0-9]*) base=0 ;; esac
+  # Typed here, outside the loop, so no control path below can type it twice.
+  sbx exec "$name" -- tmux send-keys -t "$pane_t" -l "$text" \
+    || { printf 'send-failed'; return 1; }
   pending=
-  typed=0
   tries=0
   while [ "$tries" -le "$retries" ]; do
-    if [ "$typed" -eq 0 ]; then
-      sbx exec "$name" -- tmux send-keys -t "$pane_t" -l "$text" \
-        || {
-          if [ -n "$pending" ]; then
-            fm_backend_sbx_after_send "$target" "$pending"
-            printf 'unknown'
-            return 0
-          fi
-          printf 'send-failed'
-          return 1
-        }
-      typed=1
-    fi
     if ! attempt_pending=$(fm_backend_sbx_delivery_prepare "$target"); then
       if [ -n "$pending" ]; then
         fm_backend_sbx_after_send "$target" "$pending"
@@ -1466,25 +1480,19 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
     sleep "$settle"
     pane=$(sbx exec "$name" -- tmux capture-pane -p -t "$pane_t" -S - 2>/dev/null) || pane=
     if [ -n "$pane" ]; then
-      cur=$(printf '%s' "$pane" | grep -cF -- "$probe") || cur=0
+      fm_marker_strip_separators "$pane" rendered
+      cur=$(printf '%s' "$rendered" | grep -cF -- "$probe") || cur=0
       case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
       busy=0
       printf '%s' "$pane" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.}" && busy=1
-      if [ "$cur" -gt "$base" ]; then
-        # Text NEWLY visible: submitted if the harness is busy on it;
-        # otherwise it is still sitting in the composer - loop re-sends
-        # Enter only.
-        if [ "$busy" -eq 1 ]; then
-          fm_backend_sbx_after_send "$target" "$pending"
-          printf 'submitted'
-          return 0
-        fi
-      elif [ "$tries" -lt "$retries" ]; then
-        # No occurrence beyond the baseline: the type vanished unsubmitted
-        # (a resume-time notice ate it), and any needle match is a stale
-        # scrollback line. Clear partial composer state and retype.
-        sbx exec "$name" -- tmux send-keys -t "$pane_t" C-u || true
-        typed=0
+      # Text NEWLY visible and the harness busy on it: the only positive
+      # confirmation. Text visible but idle means it is still parked in the
+      # composer, and no occurrence beyond the baseline means the pane cannot
+      # account for it; both just loop and re-send Enter.
+      if [ "$cur" -gt "$base" ] && [ "$busy" -eq 1 ]; then
+        fm_backend_sbx_after_send "$target" "$pending"
+        printf 'submitted'
+        return 0
       fi
     fi
     tries=$((tries + 1))

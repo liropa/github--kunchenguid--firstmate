@@ -26,9 +26,9 @@
 #                            makes the first capture-pane return non-zero
 #   FM_FAKE_SBX_TYPE_ECHO    when set (with FM_FAKE_SBX_CAPTURE), a literal
 #                            `tmux send-keys ... -l <text>` appends <text> to
-#                            the capture file - models a terminal that renders
-#                            what was typed; unset = the type is eaten (the
-#                            resume-time swallow)
+#                            the capture file AS A TUI RENDERS IT, with the
+#                            marker's U+2063 separator dropped (bin/fm-marker-lib.sh);
+#                            unset = the type is eaten (the resume-time swallow)
 #   FM_FAKE_SBX_TYPE_FAIL_ON  literal send ordinal that returns non-zero
 #   FM_FAKE_SBX_ENTER_BUSY   appends the default busy footer on Enter
 #   FM_FAKE_SBX_ENTER_BUSY_AFTER
@@ -264,7 +264,12 @@ case "$cmd" in
             *" -l "*)
               if [ -n "${FM_FAKE_SBX_TYPE_ECHO:-}" ]; then
                 for last in "$@"; do :; done
-                printf '%s\n' "$last" >> "$FM_FAKE_SBX_CAPTURE"
+                # Rendered, not echoed: a real TUI composer drops the marker's
+                # U+2063 separator (measured 2026-09-10, claude 2.1.267;
+                # docs/sbx-backend.md), so a fake that returned the typed bytes
+                # verbatim would hide every needle-matching defect on marked
+                # traffic - the only traffic this backend carries.
+                printf '%s\n' "${last//$'\xE2\x81\xA3'/}" >> "$FM_FAKE_SBX_CAPTURE"
               fi
               ;;
             *" Enter")

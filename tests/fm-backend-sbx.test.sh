@@ -23,6 +23,9 @@
 #     agent relaunched with its harness's RESUME command - before delivery.
 #   - Turn-submitting sends publish a pre-injection delivery edge and start a
 #     keep-alive; literal typing and control keys do neither.
+#   - A verified submit types the text exactly ONCE and retries Enter alone, so
+#     a pane that cannot confirm the text downgrades the verdict instead of
+#     delivering the steer again (the 2026-09-09 multiplied-steer defect).
 #   - Verified-submit retries preserve the conservative delivery edge, and
 #     keep-alives pin visible child work while classifying suspicious exits.
 #   - The session-start liveness sweep respawns an sbx secondmate only on
@@ -37,6 +40,11 @@ set -u
 # files the production code does rather than re-rolling the transform.
 # shellcheck source=bin/fm-state-key-lib.sh
 . "$ROOT/bin/fm-state-key-lib.sh"
+
+# The from-firstmate marker, so the marked-steer fixture carries the exact bytes
+# fm-send prepends instead of a hand-rolled copy of them.
+# shellcheck source=bin/fm-marker-lib.sh
+. "$ROOT/bin/fm-marker-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the sbx adapter's state probe)"; exit 0; }
 
@@ -943,21 +951,52 @@ test_submit_confirms_busy_pane() {
   pass "send_text_submit: text visible + busy pane -> submitted, typed once"
 }
 
-test_submit_retypes_when_text_swallowed() {
-  local w fb out
+test_submit_marked_steer_is_delivered_once() {
+  local w fb out msg typed
+  w=$(new_sbx_world submit-marked-once); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x running > "$w/ls.json"
+  # The reported defect (agent-dotfiles secondmate, 2026-09-09): every MARKED
+  # steer reached the guest several times under ONE correlation token. The
+  # needle carried the marker's U+2063 separator, which no TUI renders, so
+  # presence could never be confirmed and the loop retyped the whole message
+  # once per retry - measured at four deliveries on fm-send's default budget of
+  # 3. Marked traffic is the only traffic this secondmate-only backend carries,
+  # so this is every steer, not an edge case.
+  msg="${FM_FROMFIRST_MARK}corr=6edc6c2493fafee8 HOLD: file nothing until I nudge you."
+  printf 'idle notice line\n' > "$w/pane.txt"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "'"$msg"'" 3 0 0' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1)
+  typed=$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")
+  [ "$typed" -eq 1 ] \
+    || fail "one marked steer must be one delivery, typed $typed time(s)"
+  [ "$out" = submitted ] \
+    || fail "a marked steer the guest rendered and is busy on must confirm, got '$out'"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "a marked steer must never be cleared and retyped"
+  pass "send_text_submit: a marked steer is delivered exactly once and confirms"
+}
+
+test_submit_never_retypes_when_text_unconfirmed() {
+  local w fb out typed
   w=$(new_sbx_world submit-eaten); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
-  # The pane never shows the text - the resume-time-notice swallow observed
-  # live: the delivery must be retyped, not just re-Entered.
+  # The pane cannot account for the text. A resume-time swallow and a render
+  # the needle cannot match look identical from here, so the loop keeps
+  # fm-send's no-double-text rule and retries Enter alone: an unconfirmed steer
+  # firstmate can resend is recoverable, a steer the transport multiplies is
+  # not.
   printf 'some other pane content\n' > "$w/pane.txt"
-  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text that vanished" 1 0 0' \
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text that vanished" 3 0 0' \
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
   [ "$out" = unknown ] || fail "an unconfirmable submit should stay conservative (unknown), got '$out'"
-  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -ge 2 ] \
-    || fail "swallowed text must be retyped on retry"
-  assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
-    "a retype must clear any partial composer state first"
-  pass "send_text_submit: swallowed text is cleared and retyped, verdict stays unknown"
+  typed=$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")
+  [ "$typed" -eq 1 ] || fail "an unconfirmable submit must never retype, typed $typed time(s)"
+  [ "$(grep -c 'send-keys -t fm:fm-x Enter' "$w/sbx.log")" -ge 2 ] \
+    || fail "an unconfirmable submit must still retry Enter"
+  assert_not_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
+    "nothing may clear the composer: the text there may be the steer itself"
+  pass "send_text_submit: an unconfirmable pane retries Enter only, never retypes"
 }
 
 test_submit_reenters_when_enter_swallowed() {
@@ -1018,24 +1057,26 @@ test_submit_failure_preserves_previous_delivery_edge() {
   pass "send_text_submit: total failure preserves the previous delivery edge"
 }
 
-test_submit_retype_failure_preserves_previous_delivery_edge() {
+test_submit_type_failure_reports_send_failed() {
   local w fb out
-  w=$(new_sbx_world submit-retype-fail); fb=$(make_fake_sbx "$w")
+  w=$(new_sbx_world submit-type-fail); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
   printf 'idle notice line\n' > "$w/pane.txt"
+  # The text is typed once, before the Enter loop, so a failed type is always
+  # the FIRST one: nothing was delivered and nothing may be recorded as such.
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "steer text" 1 0 0' \
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
-    FM_FAKE_SBX_TYPE_FAIL_ON=2)
-  [ "$out" = unknown ] || fail "a failed retype after an Enter should report unknown, got '$out'"
-  [ "$(cat "$w/sbx.log.type-count")" -eq 2 ] \
-    || fail "the fixture should fail the second type attempt"
-  [ "$(cat "$w/sbx.log.enter-count")" -eq 1 ] \
-    || fail "the retype failure should follow exactly one successful Enter"
-  [ -e "$w/state/.sbx-delivered-x" ] \
-    || fail "the earlier Enter's delivery edge must be published after a failed retype"
+    FM_FAKE_SBX_TYPE_FAIL_ON=1)
+  [ "$out" = send-failed ] || fail "a failed type should report send-failed, got '$out'"
+  [ "$(cat "$w/sbx.log.type-count")" -eq 1 ] \
+    || fail "a failed type must not be attempted a second time"
+  [ "$(grep -c 'send-keys -t fm:fm-x Enter' "$w/sbx.log")" -eq 0 ] \
+    || fail "nothing may be submitted after the type failed"
+  [ ! -e "$w/state/.sbx-delivered-x" ] \
+    || fail "a failed type must publish no delivery edge"
   [ -z "$(find "$w/state" -name '.sbx-delivery-pending-*' -print -quit)" ] \
-    || fail "a failed retype should leave no unpublished delivery candidate"
-  pass "send_text_submit: failed retype preserves the earlier delivery edge"
+    || fail "a failed type should leave no unpublished delivery candidate"
+  pass "send_text_submit: a failed type reports send-failed and records no delivery"
 }
 
 test_submit_ignores_stale_prefix_line_in_scrollback() {
@@ -1046,20 +1087,18 @@ test_submit_ignores_stale_prefix_line_in_scrollback() {
   # 24-char prefix ("[fm-from-firstmate]soak turn 2" vs "... turn 3"), and the
   # previous turn's rendered steer line still sits in the captured scrollback.
   # When the freshly typed text is eaten by resume-time init, that stale line
-  # must NOT read as parked/submitted - the type has to be retried, exactly as
-  # if the pane never showed the text.
+  # must NOT read as parked/submitted - the verdict stays unconfirmed, exactly
+  # as if the pane never showed the text.
   printf '> [fm-from-firstmate]soak turn 2\nidle notice line\n' > "$w/pane.txt"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt")
   [ "$out" = unknown ] || fail "a stale-prefix match never confirms, got '$out'"
-  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -ge 2 ] \
-    || fail "an eaten type must be retyped even when an older steer matches the needle prefix"
-  assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
-    "the retype must clear any partial composer state first"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "an unconfirmed steer must not be retyped when an older steer matches the needle prefix"
   pass "send_text_submit: a stale same-prefix scrollback line does not mask an eaten type"
 }
 
-test_submit_retypes_when_stale_prefix_goes_busy() {
+test_submit_stale_prefix_busy_pane_does_not_confirm() {
   local w fb out
   w=$(new_sbx_world submit-stale-busy); fb=$(make_fake_sbx "$w")
   sbx_ls_json fm-x running > "$w/ls.json"
@@ -1067,10 +1106,8 @@ test_submit_retypes_when_stale_prefix_goes_busy() {
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_submit sbx:fm-x "[fm-from-firstmate]soak turn 3" 1 0 0' \
     FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" FM_FAKE_SBX_ENTER_BUSY=1)
   [ "$out" = unknown ] || fail "a busy pane with only a stale-prefix match must not confirm, got '$out'"
-  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -ge 2 ] \
-    || fail "a stale-prefix busy pane must still retype an eaten steer"
-  assert_contains "$(cat "$w/sbx.log")" "send-keys -t fm:fm-x C-u" \
-    "the retype must clear any partial composer state first"
+  [ "$(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")" -eq 1 ] \
+    || fail "a stale-prefix busy pane must not retype the steer"
   pass "send_text_submit: stale same-prefix busy pane does not confirm"
 }
 
@@ -3559,13 +3596,14 @@ test_guest_profile_seed_reports_unowned_source_without_touching_profile
 test_guest_profile_seed_repositions_owned_stale_source_line
 test_guest_profile_seed_skips_absent_or_unsafe_values
 test_submit_confirms_busy_pane
-test_submit_retypes_when_text_swallowed
+test_submit_marked_steer_is_delivered_once
+test_submit_never_retypes_when_text_unconfirmed
 test_submit_reenters_when_enter_swallowed
 test_submit_refreshes_delivery_candidate_per_retry
 test_submit_failure_preserves_previous_delivery_edge
-test_submit_retype_failure_preserves_previous_delivery_edge
+test_submit_type_failure_reports_send_failed
 test_submit_ignores_stale_prefix_line_in_scrollback
-test_submit_retypes_when_stale_prefix_goes_busy
+test_submit_stale_prefix_busy_pane_does_not_confirm
 test_submit_counts_full_history_when_window_scrolls
 test_submit_fails_when_baseline_capture_fails
 test_send_starts_keepalive_after_delivery
