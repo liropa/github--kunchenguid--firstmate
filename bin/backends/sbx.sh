@@ -415,18 +415,16 @@ fm_backend_sbx_unlanded_work() {  # <target> <home>
 FM_SBX_BACKUP_DIR_PREFIX='backup-'
 FM_SBX_BACKUP_ARCHIVE='home-private.tgz'
 
-# The guest-private directories to rescue, and the files whose presence in the
-# finished archive is checked from the host. A guest that legitimately has
-# neither directory yet (a freshly provisioned home whose own session start has
-# not run) is not an error; a guest that has them and produces an archive
-# without them is.
+# A home with neither private directory is refused because the host cannot
+# distinguish an empty home from a wrong home path. A young home with data/
+# but no state/ is allowed so it can retire before its first session start.
 FM_SBX_PRIVATE_DIRS="data state"
 FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
 
 # fm_backend_sbx_export_private: copy <target>'s guest-private records onto the
 # signal bridge and PROVE the copy from the host, before any caller destroys the
-# VM. Prints one line - the archive path on success, the reason on failure - and
-# returns:
+# VM. Prints a message naming the archive and digest on verified export, the
+# absence on an already-gone sandbox, or the reason on failure. Returns:
 #   0  the archive is on the bridge and verified, OR the sandbox is confirmed
 #      ABSENT (the disk is already gone; there is nothing left to rescue).
 #   1  anything else. Every failure mode is a refusal: an unreadable sandbox
@@ -445,7 +443,10 @@ FM_SBX_PRIVATE_EXPECT="data/backlog.md data/charter.md"
 #
 # The sha256 sidecar written beside the archive is also the verification MARK: an
 # archive with no <archive>.sha256 next to it was never verified from the host and
-# must not be trusted as a backup.
+# must not be trusted as a backup. Failed verification leaves any partial archive
+# for inspection without publishing a mark. Publication refuses links in the
+# resolved destination path and an existing sidecar so guest-controlled links
+# cannot redirect the host checksum write into host records.
 #
 # Stops guest writers before export. `sbx exec` starts the VM for tar without
 # rebuilding the agent session; the VM is stopped again before host verification.
