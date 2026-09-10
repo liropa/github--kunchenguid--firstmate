@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Static regression tests for the captain-facing plain-English translation
-# contract owned by AGENTS.md section 9.
+# Static regression tests for the response and commit-subject contracts owned
+# by AGENTS.md's opening block and section 9.
 set -u
 
 # shellcheck source=tests/lib.sh

@@ -9,12 +9,10 @@
 # "delegate" and "reconcile" the shared worktree. It has real capability because
 # those entrypoints self-locate their home and never knew a gate context existed.
 #
-# no-mistakes owns the authority-removal half (it neutralizes the project
-# instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
-# THIS is the firstmate capability-removal half: an enforceable script refusal,
-# not a prose rule the neutralized agent would never read. It is sourced at the
-# top of the three fleet-lifecycle entrypoints and called before any fleet
-# mutation, so a gate agent that still reaches for the fleet is stopped cold.
+# For the separate instruction-loading boundary, see docs/architecture.md
+# "No-mistakes gate authority boundary".
+# This refusal must run before fleet mutation even when an agent reads
+# AGENTS.md directly.
 #
 # Two independent signals, either of which refuses (fail closed):
 #
