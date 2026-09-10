@@ -562,10 +562,9 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 }
 
 # fm_backend_send_text_submit: submit and verify text according to the
-# backend's transport contract. Every adapter types the text once and retries
-# only Enter (bin/fm-send.sh's no-double-text rule); they differ only in what
-# they read back as proof. Echoes the verdict (empty|pending|unknown|send-failed
-# for submit-verifying adapters).
+# backend's transport contract and bin/fm-send.sh's no-double-text rule.
+# Echoes empty|submitted|pending|unknown|send-failed; the adapter owns how it
+# confirms submission.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
