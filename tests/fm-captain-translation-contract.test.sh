@@ -179,10 +179,17 @@ test_commit_subjects_reject_address_seasoning_and_narration() {
 }
 
 test_commit_subject_owner_is_cross_referenced_not_duplicated() {
-  assert_grep "Commit subjects follow the rule in \`AGENTS.md\`'s opening block" "$GUIDELINES" \
+  local phrase
+  assert_grep "- Commit subjects follow the rule in \`AGENTS.md\`'s opening block." "$GUIDELINES" \
     "the coding-guidelines skill does not cross-reference the commit-subject owner"
-  assert_no_grep "Every commit subject in this repo follows Conventional Commits" "$GUIDELINES" \
-    "the coding-guidelines skill duplicates the commit-subject owner"
+  for phrase in \
+    "Conventional Commits" \
+    "captain address" \
+    "nautical seasoning" \
+    "narration"; do
+    assert_no_grep "$phrase" "$GUIDELINES" \
+      "the coding-guidelines skill duplicates the commit-subject owner with '$phrase'"
+  done
   pass "the commit-subject rule is cross-referenced, not duplicated"
 }
 
