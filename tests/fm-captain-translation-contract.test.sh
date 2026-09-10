@@ -15,12 +15,20 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODEXAPP="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
 FMX="$ROOT/.agents/skills/fmx-respond/SKILL.md"
 UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+GUIDELINES="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 
 section_9() {
   awk '
     /^## 9\. Escalation and captain etiquette$/ { found = 1 }
     found && /^## 10\. / { exit }
     found { print }
+  ' "$AGENTS"
+}
+
+identity_block() {
+  awk '
+    /^## 1\. Identity and prime directives$/ { exit }
+    { print }
   ' "$AGENTS"
 }
 
@@ -138,7 +146,50 @@ test_section_9_owner_is_not_duplicated_into_skills() {
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
 }
 
+test_captain_address_is_scoped_to_the_primary_session() {
+  local block
+  block=$(identity_block)
+  assert_contains "$block" "every response you send the captain from this primary firstmate session" \
+    "the captain address is not scoped to the primary firstmate session"
+  assert_contains "$block" "any other agent that reads this file" \
+    "the captain address is not withheld from every other reader of this file"
+  assert_contains "$block" "inherits no captain address from it" \
+    "the captain address does not state what other readers inherit"
+  assert_contains "$block" "a no-mistakes pipeline agent" \
+    "the captain address does not name the pipeline agent among the excluded readers"
+  assert_not_contains "$block" 'Address the user as "captain" at least once in every response.' \
+    "the captain address is still stated without a session scope"
+  pass "the captain address is scoped to the primary firstmate session"
+}
+
+test_commit_subjects_reject_address_seasoning_and_narration() {
+  local block
+  block=$(identity_block)
+  assert_contains "$block" "never use the address or the seasoning in commits, briefs, PRs, or anything crewmates or other tools read" \
+    "the commit exclusion still covers only the nautical seasoning"
+  assert_contains "$block" "Every commit subject in this repo follows Conventional Commits, whoever writes it" \
+    "AGENTS.md does not own the commit-subject rule for every writer"
+  for phrase in \
+    "no captain address" \
+    "no nautical seasoning" \
+    "no narration of the work done"; do
+    assert_contains "$block" "$phrase" "the commit-subject rule is missing '$phrase'"
+  done
+  pass "commit subjects reject the captain address, seasoning, and narration"
+}
+
+test_commit_subject_owner_is_cross_referenced_not_duplicated() {
+  assert_grep "Commit subjects follow the rule in \`AGENTS.md\`'s opening block" "$GUIDELINES" \
+    "the coding-guidelines skill does not cross-reference the commit-subject owner"
+  assert_no_grep "Every commit subject in this repo follows Conventional Commits" "$GUIDELINES" \
+    "the coding-guidelines skill duplicates the commit-subject owner"
+  pass "the commit-subject rule is cross-referenced, not duplicated"
+}
+
 test_section_9_owns_positive_translation_contract
+test_captain_address_is_scoped_to_the_primary_session
+test_commit_subjects_reject_address_seasoning_and_narration
+test_commit_subject_owner_is_cross_referenced_not_duplicated
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
 test_mapping_list_covers_high_risk_internal_families
