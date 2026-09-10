@@ -58,18 +58,10 @@ fm_message_from_firstmate() {  # <message>
   return 1
 }
 
-# fm_marker_strip_separators: assign <text> with every marker separator byte
-# removed, so the result is the text as a terminal actually RENDERS it.
-# U+2063 travels through a pane's input faithfully but is never drawn: a TUI
-# composer drops it, so a capture of a marked message does not contain it.
-# Measured 2026-09-10 on claude 2.1.267: a composer typed with
-# "[fm-from-firstmate]<U+2063>corr=6edc6c2493fafee8 HOLD: ..." captures back as
-# "[fm-from-firstmate]corr=6edc6c2493fafee8 HOLD: ..." (docs/sbx-backend.md
-# records the exact command and output).
-# Any check that matches sent text against captured pane content must pass BOTH
-# sides through this first. Matching raw marked text against a pane can never
-# succeed, and a backend that reads that failure as "the text never arrived"
-# will act on a delivered message as if it were lost.
+# fm_marker_strip_separators: assign <result-var> the text with all U+2063
+# separators removed. Normalize both sent text and captured content before
+# comparing them because a TUI can omit separators from its rendered output.
+# docs/sbx-backend.md records the 2026-09-10 measurement.
 fm_marker_strip_separators() {  # <text> <result-var>
   local text=${1-} result_var=${2-}
   [ -n "$result_var" ] || return 2

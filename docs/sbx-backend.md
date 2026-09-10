@@ -550,11 +550,17 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures, then let the caller deliver.
 
-The steer itself (`fm_backend_sbx_send_text_submit`) **verifies submission**: the text is typed ONCE, before the retry loop, and each retry sends Enter alone until the pane shows the text newly AND the busy footer on it (`submitted`).
-Every other reading - text parked in an idle composer, or a pane that cannot account for the text at all - loops on Enter and ends at the conservative `unknown`.
-**Nothing is ever retyped and nothing clears the composer**; the retype this adapter used to do on an absent needle is what multiplied steers on 2026-09-09 (below).
-**Presence means newly appeared, not merely visible**: the needle is the steer's first 24 chars (marker + a few payload chars), which a *previous* steer's rendered line in scrollback also matches - so the occurrence count is baselined from the full tmux history after the ready poll and before typing, and only a count above the baseline reads as our text (one extra capture exec per steer). Without that baseline a stale same-prefix line reads as this steer's own, and an eaten steer exits exactly as cleanly as a delivered one (observed live, 5-secondmate soak: 1 of 5 concurrent resurrections).
-**The needle is matched as the guest RENDERS the text, not as it was typed**: both the needle and the capture pass through `fm_marker_strip_separators` (`bin/fm-marker-lib.sh`), because the from-firstmate marker's U+2063 separator never reaches the pane.
+The steer itself (`fm_backend_sbx_send_text_submit`) follows [fm-send's no-double-text contract](../bin/fm-send.sh): it types once, then retries Enter only, without clearing the composer.
+The comparison needle is the first 24 characters after replacing newlines with spaces and applying `fm_marker_strip_separators`; [bin/fm-marker-lib.sh](../bin/fm-marker-lib.sh) owns that normalization rule.
+Both the baseline capture and later captures use the same helper.
+After the ready poll and before typing, the adapter counts matching lines in the full tmux history.
+It reports `submitted` only when a later capture has more matching lines than that baseline and shows a busy footer.
+The baseline prevents an older steer with the same prefix from confirming a swallowed type, as observed in one of five concurrent resurrections during the 2026-07-20 soak.
+If Enter succeeds but the pane stays idle, unreadable, or without a new match, exhausted retries return `unknown`.
+An `unknown` verdict does not prove delivery; [fm-send's caller policy](../bin/fm-send.sh) accepts it as transport success.
+A swallowed type can therefore remain undelivered: preventing duplicate actions takes priority over automatic text recovery.
+Failure to prepare the stack, capture the baseline, or type returns `send-failed` before the submit loop.
+Failure to prepare a delivery candidate or send Enter returns `pending` if no earlier Enter succeeded, or `unknown` while preserving an earlier successful attempt's delivery record.
 Every successful turn-submitting delivery then fires a **keep-alive**: one background `sbx exec` whose guest-side loop pins the VM until the guest is done working (or `FM_SBX_KEEPALIVE_MAX`, default 7200 s, elapses) - without it, connection-based auto-stop kills any work that outlasts the post-disconnect grace, the turn-end never fires, and the secondmate silently freezes.
 Literal typing and standalone special keys, including Enter, do not prove that a turn started, so they neither arm the delivery alarm nor start a keep-alive.
 Verified text submissions and spawn's explicit literal-plus-composed-submit path do both.
@@ -585,14 +591,14 @@ Such a daemon inherits its credentials from the guest shell profiles ("Guest she
 ### Multiplied steers (2026-09-09 incident, cause measured 2026-09-10)
 
 The `agent-dotfiles` secondmate reported that every marked message it received that day arrived **three times under one correlation token** (its status lines 1111 and 1116).
-It read each copy as one request, so nothing was acted on twice, but a decision carrying an action would have been.
+No harmful repeated action was reported, but a decision carrying an action could be executed more than once.
 Each extra copy also spent a guest turn: three consecutive turn-end wakes per steer.
 
 **Cause, in two parts, both measured.**
 
 The needle could never match a marked steer.
 Claude Code's composer accepts U+2063 but does not draw it, so the marker the needle starts with is absent from every capture.
-Measured 2026-09-10, claude 2.1.267, a real pane at 100x30:
+Measured 2026-09-10, claude 2.1.267, a real pane at 100x30 in a local throwaway tmux session:
 
 ```
 $ tmux send-keys -t p -l $'[fm-from-firstmate]\xE2\x81\xA3corr=6edc6c2493fafee8 HOLD: the restore is running; ...'
@@ -615,20 +621,20 @@ Enter sends          : 4
 C-u clears           : 3
 ```
 
-Four deliveries, one correlation token, and a clean exit - `fm-send` treats `unknown` as delivered.
+The fake recorded four type-and-Enter sends under one correlation token and a clean exit; it did not measure a live guest processing four requests.
 The secondmate counted three arrivals, which sits inside that budget; which copy did not land is not established.
 
 **Why it was this backend only.**
-`fm-send` has documented the no-double-text rule since the verified-submit work ("the line is typed ONCE, then Enter is sent and retried (Enter only, never retyped)"), and `fm_tmux_submit_core` implements it.
-This adapter was the one that broke it, and it is also the only one that confirms a submit by looking for the sent text in the pane rather than by reading the composer's own state.
-Because sbx is secondmate-only, every steer it carries is marked, so the defect fired on all of them rather than on an edge case.
+Source comparison found the retype branch in the sbx adapter; the tmux adapter and shared submit core already retried Enter only and are unchanged by this fix.
+The tmux busy-pane fallback is documented in [Submit acknowledgement](tmux-backend.md#submit-acknowledgement-landed-is-empty-with-one-busy-queue-exception).
+The reported steers were all marked, so each encountered the separator mismatch; [bin/fm-send.sh](../bin/fm-send.sh) owns which target forms receive a marker.
 
 **Fix.**
-The type moved out of the retry loop, the C-u and the retype are gone, and both sides of the needle comparison are normalized through `fm_marker_strip_separators`.
-A steer the pane cannot confirm now ends at `unknown` with one delivery: firstmate resending one unconfirmed steer is recoverable, a transport that multiplies a delivered one is not.
+The current [submit contract](#steering-and-resurrection-fm_backend_sbx_send_) replaces the retype behavior measured above.
 Regression coverage: `tests/fm-backend-sbx.test.sh`'s `test_submit_marked_steer_is_delivered_once` and `test_submit_never_retypes_when_text_unconfirmed`, plus `tests/fm-pending-reply.test.sh`'s `test_fm_send_sbx_marked_steer_delivers_once` for the whole `fm-send` path.
 Both marked-steer cases fail against the pre-fix adapter with `typed 4 time(s)` (observed 2026-09-10).
-`FM_FAKE_SBX_TYPE_ECHO` now renders the typed text the way the measurement shows a TUI does, with the separator dropped, so a fixture cannot hide this class of defect again.
+The fixture's rendering behavior is defined by `FM_FAKE_SBX_TYPE_ECHO` in [tests/sbx-helpers.sh](../tests/sbx-helpers.sh).
+All measurement used the local throwaway pane and repository fakes; no test steer was sent to the real secondmate.
 
 ### Gate-activity arm (the fourth arm, 2026-08-07)
 
@@ -1029,7 +1035,8 @@ Verified end to end on real sandboxes (design doc §10 "Then (v1)" items 2, 3, 4
 - **Five-secondmate soak** (2026-07-20 evening, 3× claude adf-claude:v3 + 2× codex adf-codex:v2, ~2 h 15 m on a 16 GB/8-core host): isolation, per-id wake attribution, and grace coalescing all hold at N=5 (a same-window burst of turn-ends coalesces to one wake naming every id's files; per-row attribution stays per-id; each guest's `data/soak-notes.md` contains only its own turns). Independent per-VM auto-stop, idle watcher structurally quiet. **Concurrent resurrection**: steering all 5 stopped VMs simultaneously lands every steer in 25-32 s each (vs the 23-24 s single-VM baseline - mild contention only); a 3-way claude round after re-auth took 26 s each. Host resource ceilings were never approached: Docker-family RSS stayed ~2-3.4 GB total across all 5 VMs, load average low single digits, no swap growth beyond the spawn ramp. The soak surfaced the stale-needle submit-verify defect above (fixed) and the token-rotation recovery note below.
 - **Teardown landed-work probe, live**: a deliberately dirtied guest (`README.md` edit in-VM) made non-`--force` `fm-teardown.sh` REFUSE with the VM and home preserved; after restoring the file the same command proceeded (`sbx rm`), and four more clean secondmates retired the same way. Both probe paths verified on real sandboxes.
 
-All six original codex-rig gaps and the containment-downgrade bug are fixed in this tree: the bash-3.2 brief-rewrite scramble, the printf-format quote-eating in the codex resume template, delivery into a dead pane after a failed resume, codex's trust-dialog launch park, resume-time keystroke swallowing (now a verified submit), the BSD-stat-signs-symlinks watcher freeze, and the sweep's ambient-backend containment downgrade.
+The original rig fixes covered the bash-3.2 brief-rewrite scramble, the printf-format quote-eating in the codex resume template, delivery into a dead pane after a failed resume, codex's trust-dialog launch park, the BSD-stat-signs-symlinks watcher freeze, and the sweep's ambient-backend containment downgrade.
+For the current handling of resume-time keystroke swallowing, see [Steering and resurrection](#steering-and-resurrection-fm_backend_sbx_send_).
 
 ## Beat-beacon alarms (`scan_sbx_beacon`, `bin/fm-watch.sh`)
 
