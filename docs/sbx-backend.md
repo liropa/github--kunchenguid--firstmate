@@ -612,13 +612,57 @@ The label is there; the separator between `]` and `corr` is not.
 tmux itself is not the filter - the same `send-keys -l` into a plain `cat` captures the three bytes back intact (tmux 3.7b, same date) - the TUI is.
 
 An unmatched needle then read as "the type vanished", and the loop cleared the composer and retyped.
-Measured the same day against the fake `sbx` CLI, at `fm-send`'s default budget of `FM_SEND_RETRIES=3`:
+Measured the same day against the fake `sbx` CLI, at `fm-send`'s default budget of `FM_SEND_RETRIES=3`.
+
+**Repository reproduction command.**
+Run from the repository root in a clean checkout containing this fix, with `jq` available.
+Keep the regression tests and fixture unchanged while replacing only the adapter with its base version:
+
+```sh
+git checkout 585b4b30 -- bin/backends/sbx.sh # base adapter only, tests and fixture unchanged
+bash tests/fm-backend-sbx.test.sh # test_submit_marked_steer_is_delivered_once fails: "typed 4 time(s)"
+git checkout HEAD -- bin/backends/sbx.sh # restore the fix; the same test passes, typed 1
+bash tests/fm-backend-sbx.test.sh
+```
+
+The validation phase independently repeated this comparison and also reported four literal sends with the base adapter.
+Assess the named regression separately from the suite exit: `test_sweep_respawns_confirmed_absent_secondmate` can fail when bootstrap reports `TANGLE` on a feature-branch worktree.
+
+**Original invocation (author-supplied, verbatim).**
+This ad-hoc probe produced the counts below; its original checkout path is historical, while the repository command above is the reproducible check.
+
+```bash
+#!/usr/bin/env bash
+set -u
+cd /Users/lp1/.treehouse/github--kunchenguid--firstmate-92834d/1/github--kunchenguid--firstmate || exit 1
+. tests/sbx-helpers.sh
+TMP_ROOT=$(fm_test_tmproot fm-count-probe)
+w="$TMP_ROOT/c1"; mkdir -p "$w/signals" "$w/state"; : > "$w/sbx.log"
+printf '%s\n' "$SBX_LS_EMPTY" > "$w/ls.json"
+fb=$(make_fake_sbx "$w")
+sbx_ls_json fm-x running > "$w/ls.json"
+# A guest pane that renders the typed text the way the real TUI does: without the
+# marker's U+2063 separator. Modelled here by a pane that never shows the needle.
+printf 'idle notice line\n' > "$w/pane.txt"
+MSG=$'[fm-from-firstmate]\xE2\x81\xA3corr=6edc6c2493fafee8 HOLD: file nothing until I nudge you.'
+out=$(PATH="$fb:/usr/bin:/bin:/usr/sbin:/sbin" \
+FM_FAKE_SBX_LOG="$w/sbx.log" FM_FAKE_SBX_LS_FILE="$w/ls.json" \
+FM_SBX_SIGNALS_ROOT="$w/signals" FM_SBX_RESURRECT_SETTLE=0 \
+FM_SBX_RESURRECT_READY_TRIES=0 FM_SBX_KEEPALIVE_MAX=0 \
+FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source sbx; fm_backend_sbx_send_text_submit sbx:fm-x "$1" 3 0 0' \
+"$PWD" "$MSG")
+echo "verdict : $out"
+echo "literal type sends : $(grep -c 'send-keys -t fm:fm-x -l' "$w/sbx.log")"
+echo "Enter sends : $(grep -c 'send-keys -t fm:fm-x Enter' "$w/sbx.log")"
+echo "C-u clears : $(grep -c 'send-keys -t fm:fm-x C-u' "$w/sbx.log")"
+```
 
 ```
-verdict              : unknown
-literal type sends   : 4
-Enter sends          : 4
-C-u clears           : 3
+verdict : unknown
+literal type sends : 4
+Enter sends : 4
+C-u clears : 3
 ```
 
 The fake recorded four type-and-Enter sends under one correlation token and a clean exit; it did not measure a live guest processing four requests.
