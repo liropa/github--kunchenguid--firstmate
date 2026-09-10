@@ -23,8 +23,8 @@
 # NO_MISTAKES_GATE=1 and a gate-worktree cwd).
 #
 # Finally, assert firstmate's TRACKED .no-mistakes.yaml parses and sets
-# disable_project_settings: true (the trusted-only opt-out that neutralizes gate
-# agents' project instructions on the no-mistakes side).
+# disable_project_settings: true; its limits are documented in docs/architecture.md
+# "No-mistakes gate authority boundary".
 set -u
 
 # shellcheck source=tests/lib.sh

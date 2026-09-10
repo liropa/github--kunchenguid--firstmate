@@ -127,8 +127,10 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 ## No-mistakes gate authority boundary
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
-The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
-The same file's `document.instructions` is trusted the same way, and closes a different gap: the document step polices duplication correctly but cannot tell that a line's justification is external to the diff, so it twice deleted material it had no authority over - a captain decision and a firstmate host observation - and passed its checks afterwards both times.
+The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot change the gate's project-loading policy.
+This suppresses automatic loading of project settings and instructions; it does not prevent a gate agent from reading `AGENTS.md` with a shell command.
+[`AGENTS.md`'s opening block](../AGENTS.md) owns the response scope and commit-subject rule for agents that read it.
+`.no-mistakes.yaml`'s `document.instructions` is trusted the same way, and closes a different gap: the document step polices duplication correctly but cannot tell that a line's justification is external to the diff, so it twice deleted material it had no authority over - a captain decision and a firstmate host observation - and passed its checks afterwards both times.
 The instructions declare the `fm-authority` marker that makes such content visible to the step, which reports a conflict against it instead of resolving one; no-mistakes appends them beneath its built-in placement policy and states that repository rules may narrow it but never weaken it, so ordinary duplicate removal is untouched.
 Because the value is read only from the default branch, a marker added on a branch protects nothing until that change lands.
 The `firstmate-coding-guidelines` skill owns when and how to mark content.
