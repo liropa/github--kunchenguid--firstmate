@@ -70,6 +70,8 @@
 # host verification and removal.
 # Without discard authority, an export failure leaves the VM stopped; the
 # next fm-send steer rebuilds the guest session and resumes its saved session.
+# A failed stop can leave the VM state unconfirmed; removal still requires a
+# verified export or explicit discard authority.
 # Usage: fm-teardown.sh <task-id> [--force] [--discard-private]
 #        fm-teardown.sh [<task-id>] --help
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report

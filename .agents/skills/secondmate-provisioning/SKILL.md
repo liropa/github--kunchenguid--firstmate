@@ -184,7 +184,7 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
 For sbx-backed secondmates, teardown also refuses non-`--force` retirement when the guest clone has unlanded work or cannot be verified; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#teardown-fm_backend_sbx_unlanded_work) owns that backend-specific probe.
-Every sbx secondmate removal, `--force` included, first exports the guest's private `data/` and `state/` to the signal bridge and refuses when the host cannot verify that archive; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#private-record-export-fm_backend_sbx_export_private) owns it, and [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#recreating-a-secondmates-vm) owns the recreate-and-restore procedure.
+For sbx private-record export and discard authority, see `bin/fm-teardown.sh --help`; [`docs/sbx-backend.md`](../../../docs/sbx-backend.md#recreating-a-secondmates-vm) owns the recreate-and-restore procedure.
 When safe, teardown kills the direct runtime endpoint, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.

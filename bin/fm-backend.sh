@@ -655,15 +655,10 @@ fm_backend_unlanded_work() {  # <backend> <target> <home>
   esac
 }
 
-# fm_backend_export_private: rescue the task's backend-private records to a
-# host-visible place, and prove the rescue from the host, BEFORE teardown
-# destroys the endpoint. Only sbx keeps records the host cannot otherwise reach
-# - the in-VM home's gitignored data/ and state/, which clone mode never carried
-# and `sbx rm --force` destroys with the disk. Every other backend keeps its
-# records in host directories teardown does not touch, so they answer "nothing
-# to rescue" (rc 0, no output). Prints one line on rc 0 (the archive path) or
-# rc 1 (why it could not be verified). See bin/backends/sbx.sh's
-# fm_backend_sbx_export_private.
+# fm_backend_export_private: delegate sbx's guest-private rescue to
+# bin/backends/sbx.sh's fm_backend_sbx_export_private, which owns its output and
+# verification contract. Other loaded backends return 0 with no output because
+# they have no guest-private disk; this does not preserve their host homes.
 fm_backend_export_private() {  # <backend> <target> <home> <signals-dir>
   local backend=$1
   shift
