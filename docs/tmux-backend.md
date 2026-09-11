@@ -319,20 +319,20 @@ During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shel
 
 ## Submit acknowledgement: "landed" is empty (with two busy-queue shapes)
 
-The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) types the message once, then retries Enter (Enter only, never a retype) until the composer clears.
-The submit is reported `empty` iff the composer cleared, which is the same corrected, border-aware detector the composer guard uses, so a bordered-but-empty composer is correctly seen as the positive acknowledgement of a delivered submit.
+The shared `fm_tmux_submit_core` (`bin/fm-tmux-lib.sh`) types the message once, then calls `fm_tmux_submit_enter_core` to retry Enter within the retry budget (Enter only, never a retype).
+The submit reports `empty` when the border-aware composer detector confirms no unsubmitted text or the busy fallback below confirms a queued Enter.
 A genuine swallowed Enter leaves the typed text in the composer and the function reports `pending`; `fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
-
-A harness that accepts a mid-turn Enter and queues it has not swallowed anything, so it must never be reported as a swallow.
 
 **Shape one, opencode 1.18.4:** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
 After the Enter-retry budget is spent and the composer still reads `pending`, the submit core falls back to `fm_pane_is_busy`:
 a busy pane means the harness accepted and queued the Enter (reported as `empty`, so the caller does not re-send), and an idle pane keeps `pending` as a genuine swallow.
-That fallback lives only in `fm_tmux_submit_enter_core`; the herdr adapter observes the same opencode behavior but needs a separate fix (see the opencode note in [harness-adapters](../.agents/skills/harness-adapters/SKILL.md) and the opencode-busy gap recorded in [herdr-backend.md](herdr-backend.md)).
+That fallback lives only in `fm_tmux_submit_enter_core`; the separate herdr gap is recorded in [herdr-backend.md](herdr-backend.md#known-gaps-and-follow-up-notes).
 
 **Shape two, claude:** claude clears the composer and replaces it with its own acknowledgement row, `❯ Press up to edit queued messages`.
 It also prints no busy text, so the shape-one fallback cannot rescue it.
 The shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`) reads the acknowledgement as `empty` only for a pane whose recorded harness is `claude`, on any adapter that uses this classifier.
+After outer whitespace is removed, the complete captured content must be exactly the acknowledgement phrase, optionally preceded by one `❯` or `›` glyph and whitespace.
+Other text before, after, or on another captured line remains `pending`.
 Backend dispatch reads `harness=` from this home's task metadata for the matching backend and endpoint, then passes it through the adapter to the classifier.
 Other, unknown, and unset harnesses retain the previous verdict, so this phrase stays `pending` instead of authorizing injection.
 A Claude pane reached without recorded harness metadata can therefore report the old false swallow.
@@ -407,8 +407,9 @@ pending
 ```
 
 The guest pane that produced the two reports was not itself probed (no live steer was permitted to it), so its exact styling is unmeasured; `NO_COLOR=1` is a local reproduction of the unstyled condition, not a claim about that pane's cause.
-Reading the acknowledgement by its text removes the dependence on styling altogether.
-Re-run after the fix, on a pane still streaming and still reporting no busy footer:
+Reading the acknowledgement by its text removes the dependence on styling for recorded Claude panes.
+The following live re-run used the initial acknowledgement fix, before the recorded-harness requirement was added, on a pane still streaming and still reporting no busy footer.
+These commands and outputs are historical evidence; current direct-call requirements are stated above, with function signatures in [bin/fm-tmux-lib.sh](../bin/fm-tmux-lib.sh).
 
 ```sh
 $ . bin/fm-tmux-lib.sh; fm_tmux_submit_core m:nocolor "/no-mistakes" 3 0.4 1.2
@@ -417,7 +418,7 @@ $ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S -60 | grep -cE '❯ /no-m
 1
 ```
 
-An idle pane genuinely holding unsubmitted text still reports the swallow, verified on the same live pane:
+An idle pane genuinely holding unsubmitted text still reported the swallow in that measurement:
 
 ```sh
 $ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S 46 -E 46
@@ -425,6 +426,8 @@ $ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S 46 -E 46
 $ . bin/fm-tmux-lib.sh; fm_tmux_composer_state m:nocolor
 pending
 ```
+
+## Agent-liveness measurement (2026-07-07)
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
