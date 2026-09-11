@@ -174,7 +174,15 @@ fm_composer_strip_ghost() {
 # cannot cover claude.
 # fm_composer_queued_matches: 0 when <content> is such an acknowledgement.
 fm_composer_queued_matches() {  # <content>
-  printf '%s' "$1" | grep -qE '^[[:space:]]*((❯|›)[[:space:]]+)?Press up to edit queued messages[[:space:]]*$'
+  local content=$1
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  case "$content" in
+    '❯'[[:space:]]*) content=${content#❯} ;;
+    '›'[[:space:]]*) content=${content#›} ;;
+  esac
+  content="${content#"${content%%[![:space:]]*}"}"
+  [ "$content" = 'Press up to edit queued messages' ]
 }
 
 # fm_composer_classify_content: the single shared composer-content verdict.
