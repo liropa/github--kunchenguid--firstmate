@@ -127,17 +127,12 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | NONE from 2.1.268 on (was `esc to interrupt`) |
+| Busy-pane signature | See the [measured Claude busy-signature gap](../../../docs/tmux-backend.md#measurement-claude-21268-queues-mid-turn-enter-and-shows-no-busy-text-2026-09-10). |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-**Busy-queued Enter, and the missing busy signature (verified 2026-09-10, Claude Code 2.1.268).**
-Claude accepts an Enter sent mid-turn, queues the line for after the current turn, clears the composer, and replaces it with `❯ Press up to edit queued messages` at every queue depth.
-The shared classifier recognizes that row only for a recorded Claude pane; [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes) owns the metadata requirement and accepted cursor-row limit.
-Without it `fm-send` reported a swallowed Enter for a line claude already held, and the caller re-sent and ran the instruction twice.
-The opencode busy fallback cannot cover this shape: 2.1.268 prints no busy text anywhere in the pane, so `fm_pane_is_busy` reads a busy claude pane as idle.
-That gap is real and wider than the submit path - it is not worked around with a guessed pattern, and `docs/tmux-backend.md`'s "Submit acknowledgement" section owns the measurement and the sampling behind it.
+For Claude queued-Enter recognition, recorded-harness requirements, and the accepted cursor-row limit, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes).
 
 **Trust-gate scope (verified 2026-08-02, Claude Code v2.1.220, host/tmux path).**
 Two independent gates can park a claude launch, and a machine's first ever run may add a bypass-permissions confirmation on top of them.
@@ -224,23 +219,7 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-**Busy-queued Enter (opencode 1.18.4, tmux backend fix, herdr known gap).**
-While opencode is mid-turn, the composer accepts Enter as a "send when the turn
-ends" keystroke but does not clear the typed text from the composer until the
-turn actually finishes.
-Without a fix, every `fm-send` to a busy opencode pane exits non-zero on a
-false "Enter swallowed", and every daemon escalation that lands while the
-primary is mid-turn is treated as wedged.
-The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
-to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
-the Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
-adapter observes the same opencode behavior but needs a separate fix; it is
-recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
-so the tmux adapter does not paper over a herdr-specific shape.
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers those four
-scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`) plus claude's two.
+For OpenCode queued-Enter handling, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes) and the separate [herdr gap](../../../docs/herdr-backend.md#known-gaps-and-follow-up-notes).
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
