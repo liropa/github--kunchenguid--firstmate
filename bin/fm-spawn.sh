@@ -377,6 +377,13 @@ spawn_restore_prespawn_meta() {
   SPAWN_META_BACKUP=
 }
 
+spawn_launch_delivered() {
+  local seen
+  [ -n "${LAUNCH_NONCE:-}" ] && [ -f "${LAUNCH_SENTINEL:-}" ] || return 1
+  seen=$(cat "$LAUNCH_SENTINEL" 2>/dev/null) || return 1
+  [ "$seen" = "$LAUNCH_NONCE" ]
+}
+
 spawn_abort_cleanup() {
   local status=$? sig host_sig
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -442,12 +449,17 @@ spawn_abort_cleanup() {
   # could not read them.
   if [ "$SBX_ABORT_CLEANUP" = 1 ]; then
     SBX_ABORT_CLEANUP=0
-    if sbx rm --force "$W"; then
-      echo "error: removed sandbox $W after failed spawn" >&2
+    if spawn_launch_delivered; then
+      SBX_ABORT_SIGNALS=
+      echo "error: $ID spawn aborted, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
     else
-      echo "error: failed to remove sandbox $W; remove it with 'sbx rm --force $W' before retrying the spawn" >&2
+      if sbx rm --force "$W"; then
+        echo "error: removed sandbox $W after failed spawn" >&2
+      else
+        echo "error: failed to remove sandbox $W; remove it with 'sbx rm --force $W' before retrying the spawn" >&2
+      fi
+      spawn_restore_prespawn_meta
     fi
-    spawn_restore_prespawn_meta
   fi
   # Separate guard, because the bridge can outlive the sandbox claim: a create
   # that failed on its own `sbx create` still made this directory.
@@ -1886,13 +1898,6 @@ FM_SPAWN_LAUNCH_TRIES=${FM_SPAWN_LAUNCH_TRIES:-3}
 # Seconds to give a retry's flushing Enter before concluding it submitted nothing.
 FM_SPAWN_LAUNCH_FLUSH_WAIT=${FM_SPAWN_LAUNCH_FLUSH_WAIT:-3}
 
-spawn_launch_delivered() {
-  local seen
-  [ -f "$LAUNCH_SENTINEL" ] || return 1
-  seen=$(cat "$LAUNCH_SENTINEL" 2>/dev/null) || return 1
-  [ "$seen" = "$LAUNCH_NONCE" ]
-}
-
 # 0 delivered, 1 the backend refused the send outright, 2 the pane never ran it.
 spawn_deliver_launch() {
   local attempt=0 waited state
@@ -1963,10 +1968,8 @@ spawn_launch_failed() {  # <delivery-status>
       echo "--- end ---" >&2
     fi
   fi
-  if [ "$BACKEND" = sbx ] && spawn_launch_delivered; then
-    SBX_ABORT_CLEANUP=0
-    SBX_ABORT_SIGNALS=
-    echo "error: $ID launch $failure_kind to $META_WINDOW failed, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
+  if [ "$BACKEND" = sbx ]; then
+    echo "error: $ID launch $failure_kind to $META_WINDOW failed" >&2
     exit 1
   fi
   if [ "$delivery_status" -eq 1 ]; then
@@ -1993,8 +1996,7 @@ fi
 # orca's: an undelivered launch leaves a guest with a bare tmux session and no
 # agent, which is the same stranded VM every post-create refusal leaves. From
 # this line on the sandbox is a live secondmate and nothing may remove it.
-SBX_ABORT_CLEANUP=0
-SBX_ABORT_SIGNALS=
+SBX_ABORT_CLEANUP=0 SBX_ABORT_SIGNALS=
 rm -f "$SPAWN_META_BACKUP" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
