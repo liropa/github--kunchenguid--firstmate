@@ -15,6 +15,7 @@
 # suites). Behavior is driven by env at call time:
 #   FM_FAKE_SBX_LS_FILE      file whose contents `sbx ls --json` prints
 #   FM_FAKE_SBX_LS_RC        non-zero makes `sbx ls` fail (CLI-error case)
+#   FM_FAKE_SBX_RM_RC        non-zero makes `sbx rm` fail with a diagnostic
 #   FM_FAKE_SBX_LOG          every invocation appended as one "$*" line
 #   FM_FAKE_SBX_TMUX_HAS_RC  exit code for `exec ... tmux has-session` (default 0)
 #   FM_FAKE_SBX_CREATE_JSON  when set, `sbx create` overwrites LS_FILE with it
@@ -161,6 +162,10 @@ case "$cmd" in
     exit 0
     ;;
   rm)
+    if [ "${FM_FAKE_SBX_RM_RC:-0}" != 0 ]; then
+      echo "fake sbx: removal unavailable" >&2
+      exit "$FM_FAKE_SBX_RM_RC"
+    fi
     exit 0
     ;;
   stop)

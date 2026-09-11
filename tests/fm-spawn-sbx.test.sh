@@ -1031,12 +1031,67 @@ test_post_create_refusal_removes_what_the_spawn_created() {
       "this case only means anything if the refusal landed with the sandbox already created"
     assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
       "a refusal after create must destroy the sandbox it is refusing to finish"
+    assert_contains "$out" "removed sandbox fm-smx after failed spawn" \
+      "successful removal must be confirmed"
     [ ! -d "$w/signals/smx" ] \
       || fail "the $case_name refusal must remove the signal directory this spawn created"
     assert_absent "$w/home/state/smx.meta" \
       "the $case_name refusal must leave no task record reading as a started secondmate"
     pass "spawn: the $case_name refusal removes the sandbox, bridge and record it created"
   done
+}
+
+test_post_create_abort_reports_failed_sandbox_removal() {
+  local w fb out rc=0
+  w=$(new_world abort-remove-failed); fb=$(make_fake_sbx "$w")
+
+  out=$(FM_FAKE_SBX_SOURCE_RC=1 FM_FAKE_SBX_RM_RC=23 \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -eq 1 ] || fail "cleanup must preserve the spawn failure status: $out"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "a failed post-create probe must attempt sandbox removal"
+  assert_contains "$out" "fake sbx: removal unavailable" \
+    "the removal command's error must reach the caller"
+  assert_contains "$out" "failed to remove sandbox fm-smx" \
+    "the caller must know which sandbox still needs removal"
+  assert_contains "$out" "sbx rm --force fm-smx" \
+    "the error must give the command to retry removal"
+  assert_not_contains "$out" "removed sandbox fm-smx" \
+    "failed removal must not be reported as successful"
+  assert_absent "$w/signals/smx" "failed removal must not skip local abort cleanup"
+  assert_absent "$w/home/state/smx.meta" "a failed spawn must not be recorded as started"
+  pass "spawn: failed sandbox removal reports the error and the required cleanup"
+}
+
+test_failed_restore_does_not_claim_failed_sandbox_removal_succeeded() {
+  local w fb out rc=0 archive digest
+  w=$(new_world abort-restore-remove-failed); fb=$(make_fake_sbx "$w")
+  archive=$(seed_unreadable_restore "$w")
+  digest=$(shasum -a 256 "$archive")
+
+  out=$(FM_SBX_RESTORE_PRIVATE="$archive" FM_FAKE_SBX_GUEST_HOME="$w/guest" \
+    FM_FAKE_SBX_RM_RC=23 \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -eq 1 ] || fail "cleanup must preserve the restore failure status: $out"
+  assert_contains "$out" "failed to restore private records in sandbox fm-smx" \
+    "the restore failure must reach the caller"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "a failed restore must attempt sandbox removal"
+  assert_contains "$out" "failed to remove sandbox fm-smx" \
+    "the restore failure must report incomplete sandbox removal"
+  assert_contains "$out" "archive is preserved at $archive" \
+    "the error must identify the preserved archive"
+  assert_not_contains "$out" "are removed" \
+    "the restore error must not claim removal before cleanup succeeds"
+  assert_not_contains "$out" "removed sandbox fm-smx" \
+    "the cleanup must not report failed removal as successful"
+  [ "$(shasum -a 256 "$archive")" = "$digest" ] \
+    || fail "the archive must survive failed cleanup unchanged"
+  assert_present "$archive.sha256" "the archive's verification must survive"
+  assert_absent "$w/home/state/smx.meta" "the agentless guest must not be recorded as started"
+  pass "spawn: a failed restore reports failed removal and preserves the archive"
 }
 
 test_abort_preserves_records_the_spawn_did_not_create() {
@@ -1177,6 +1232,8 @@ test_refuses_projects_bearing_home
 test_refuses_missing_source_mount
 test_spawn_fails_when_provision_exec_fails
 test_post_create_refusal_removes_what_the_spawn_created
+test_post_create_abort_reports_failed_sandbox_removal
+test_failed_restore_does_not_claim_failed_sandbox_removal_succeeded
 test_abort_preserves_records_the_spawn_did_not_create
 test_failed_restore_leaves_no_record_of_a_started_secondmate
 test_abort_keeps_a_bridge_that_absorbed_host_history
