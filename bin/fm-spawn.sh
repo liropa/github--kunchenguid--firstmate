@@ -381,7 +381,7 @@ spawn_launch_delivered() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? sig host_sig sbx_sandbox sbx_signals
+  local status=$? sbx_sandbox sbx_signals
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -466,15 +466,6 @@ spawn_abort_cleanup() {
       spawn_restore_prespawn_meta
       if [ -n "$sbx_signals" ]; then
         rm -rf "$sbx_signals"
-        # The host-side signal symlinks this spawn pointed into that bridge are
-        # now dangling, and a dangling name in state/ is scan surface with
-        # nothing behind it.
-        for sig in status turn-ended; do
-          host_sig="$STATE/$ID.$sig"
-          if [ -L "$host_sig" ] && [ ! -e "$host_sig" ]; then
-            rm -f "$host_sig"
-          fi
-        done
       fi
     fi
   fi
@@ -1650,6 +1641,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+SPAWN_META_WRITTEN=1
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1717,7 +1709,6 @@ META_WINDOW=$T
   # whole record for bin/fm-pr-lib.sh and silently disarms this task's merge poll.
   spawn_emit_pr_identity
 } > "$STATE/$ID.meta" || exit 1
-SPAWN_META_WRITTEN=1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 if [ "$BACKEND" = sbx ]; then

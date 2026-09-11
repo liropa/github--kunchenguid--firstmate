@@ -1114,10 +1114,13 @@ SH
 }
 
 test_post_create_refusal_removes_what_the_spawn_created() {
-  local w fb nmbin out rc case_name
+  local w fb nmbin out rc case_name sig
   for case_name in source-mount tmux-probe gate-vendor guest-session; do
     w=$(new_world "abort-$case_name"); fb=$(make_fake_sbx "$w")
     mkdir -p "$w/guest-writes"
+    for sig in status turn-ended; do
+      ln -s "$w/previous-signals/smx.$sig" "$w/home/state/smx.$sig"
+    done
     rc=0
     case "$case_name" in
       source-mount)
@@ -1149,6 +1152,12 @@ test_post_create_refusal_removes_what_the_spawn_created() {
       || fail "the $case_name refusal must remove the signal directory this spawn created"
     assert_absent "$w/home/state/smx.meta" \
       "the $case_name refusal must leave no task record reading as a started secondmate"
+    for sig in status turn-ended; do
+      [ -L "$w/home/state/smx.$sig" ] \
+        || fail "the $case_name refusal must preserve the pre-existing $sig link"
+      [ "$(readlink "$w/home/state/smx.$sig")" = "$w/previous-signals/smx.$sig" ] \
+        || fail "the $case_name refusal must preserve the prior $sig link target"
+    done
     pass "spawn: the $case_name refusal removes the sandbox, bridge and record it created"
   done
 }
@@ -1272,19 +1281,97 @@ test_abort_keeps_a_bridge_that_absorbed_host_history() {
   pass "spawn: an abort keeps a bridge that already absorbed the host's status history"
 }
 
+test_interrupt_during_metadata_write_restores_the_prior_record() {
+  local w fb out rc record phase
+  for record in fresh respawn; do
+    for phase in empty partial; do
+      w=$(new_world "abort-meta-$record-$phase"); fb=$(make_fake_sbx "$w")
+      mkdir -p "$w/guest-writes"
+      if [ "$record" = respawn ]; then
+        fm_write_meta "$w/home/state/smx.meta" \
+          "window=previous-window" "project=$w/sm" "harness=claude" "kind=secondmate"
+        cp "$w/home/state/smx.meta" "$w/meta-before"
+      fi
+      cat > "$w/interrupt-meta-write.sh" <<'SH'
+echo() {
+  if [ "${1:-}" = window=sbx:fm-smx ]; then
+    if [ "$FM_TEST_META_WRITE_PHASE" = partial ]; then
+      builtin echo "$@"
+    fi
+    cp "$FM_TEST_META_PATH" "$FM_TEST_META_WITNESS"
+    kill -INT "$$"
+  fi
+  builtin echo "$@"
+}
+SH
+      rc=0
+
+      out=$(BASH_ENV="$w/interrupt-meta-write.sh" FM_TEST_META_WRITE_PHASE="$phase" \
+        FM_TEST_META_PATH="$w/home/state/smx.meta" FM_TEST_META_WITNESS="$w/meta-interrupted" \
+        run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+      [ "$rc" -eq 130 ] || fail "an interrupted metadata write must exit 130, got $rc: $out"
+      assert_present "$w/meta-interrupted" "the interrupt must occur during the metadata write"
+      if [ "$phase" = empty ]; then
+        [ ! -s "$w/meta-interrupted" ] || fail "the interrupt must follow metadata truncation"
+      else
+        [ "$(cat "$w/meta-interrupted")" = window=sbx:fm-smx ] \
+          || fail "the interrupt must follow the first metadata field"
+      fi
+      assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+        "an interrupted metadata write must remove the unlaunched sandbox"
+      assert_absent "$w/signals/smx" "an interrupted metadata write must remove its new bridge"
+      if [ "$record" = respawn ]; then
+        cmp -s "$w/meta-before" "$w/home/state/smx.meta" \
+          || fail "an interrupted metadata write must restore the prior record byte-for-byte"
+      else
+        assert_absent "$w/home/state/smx.meta" "an interrupted fresh metadata write must leave no record"
+      fi
+      assert_absent "$w/home/state/.smx.meta.prespawn" "rollback must consume the metadata backup"
+      assert_absent "$w/home/state/smx.launched" "an interrupted metadata write must precede launch"
+      assert_not_contains "$out" "spawned smx" "an interrupted metadata write must not report success"
+      pass "spawn: an interrupt during a $phase $record metadata write preserves the prior state"
+    done
+  done
+}
+
 test_delivered_launch_disarms_the_abort_cleanup() {
-  local w fb out
+  local w fb out rc=0
   w=$(new_world abort-disarmed); fb=$(make_fake_sbx "$w")
   mkdir -p "$w/guest-writes"
+  fm_write_meta "$w/home/state/smx.meta" \
+    "window=previous-window" "project=$w/sm" "harness=claude" "kind=secondmate"
+  cat > "$fb/rm" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = "$FM_TEST_META_BACKUP" ] \
+   && [ -s "$FM_TEST_SENTINEL" ]; then
+  cp "$FM_TEST_SENTINEL" "$FM_TEST_NONCE_WITNESS"
+  cp "$FM_TEST_META_PATH" "$FM_TEST_META_WITNESS"
+  /bin/rm -f "$FM_TEST_SENTINEL"
+  kill -INT "$PPID"
+  kill -INT "$$"
+fi
+exec /bin/rm "$@"
+SH
+  chmod +x "$fb/rm"
 
-  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
-    || fail "an ordinary sbx secondmate spawn must succeed: $out"
+  out=$(FM_TEST_META_BACKUP="$w/home/state/.smx.meta.prespawn" \
+    FM_TEST_SENTINEL="$w/signals/smx/smx.launched" FM_TEST_NONCE_WITNESS="$w/nonce-removed" \
+    FM_TEST_META_PATH="$w/home/state/smx.meta" FM_TEST_META_WITNESS="$w/meta-delivered" \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
 
+  [ "$rc" -eq 130 ] || fail "an interrupt after launch must exit 130, got $rc: $out"
+  [ -s "$w/nonce-removed" ] || fail "the guest must confirm launch before the later abort"
+  assert_absent "$w/signals/smx/smx.launched" "the nonce must be absent when abort cleanup runs"
   assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
-    "a delivered launch must leave the sandbox alone - from that point it is a live secondmate"
-  assert_present "$w/home/state/smx.meta" "a started secondmate keeps its task record"
-  assert_present "$w/signals/smx" "a started secondmate keeps its signal bridge"
-  pass "spawn: a delivered launch disarms the abort cleanup"
+    "a later abort must preserve the sandbox even without the launch nonce"
+  cmp -s "$w/meta-delivered" "$w/home/state/smx.meta" \
+    || fail "a later abort must preserve the delivered task record byte-for-byte"
+  assert_grep 'window=sbx:fm-smx' "$w/home/state/smx.meta" "a later abort must not restore old metadata"
+  assert_present "$w/signals/smx" "a later abort must preserve the signal bridge"
+  assert_not_contains "$out" "spawned smx" "an interrupted spawn must not report success"
+  pass "spawn: a delivered launch disarms cleanup even if a later abort finds no nonce"
 }
 
 test_delivery_failure_checks_the_launch_nonce_before_cleanup() {
@@ -1481,6 +1568,7 @@ test_failed_restore_does_not_claim_failed_sandbox_removal_succeeded
 test_abort_preserves_records_the_spawn_did_not_create
 test_failed_restore_leaves_no_record_of_a_started_secondmate
 test_abort_keeps_a_bridge_that_absorbed_host_history
+test_interrupt_during_metadata_write_restores_the_prior_record
 test_delivered_launch_disarms_the_abort_cleanup
 test_delivery_failure_checks_the_launch_nonce_before_cleanup send
 test_delivery_failure_checks_the_launch_nonce_before_cleanup timeout-state
