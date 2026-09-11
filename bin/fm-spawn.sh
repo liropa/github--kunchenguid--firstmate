@@ -1238,6 +1238,9 @@ EOF
     # the same pure function so a direct adapter caller is refused too; this
     # call additionally supplies the value meta records below.
     SBX_AGENT=$(fm_backend_sbx_agent_for_harness "$HARNESS") || exit 1
+    # The guest's memory cap is resolved here for the same reason and recorded
+    # below; a malformed FM_SBX_MEMORY refuses before anything is created.
+    SBX_MEMORY=$(fm_backend_sbx_memory_pin) || exit 1
     # A projects-bearing home is refused before anything is created: its
     # projects/ sub-clones are independent gitignored repos that clone mode
     # structurally cannot carry into the VM, and a secondmate whose charter
@@ -1608,6 +1611,11 @@ fi
     # liveness sweep's respawn must reproduce the sandbox from the meta
     # alone (a session-start sweep has no FM_SBX_TEMPLATE in its env).
     [ -z "${FM_SBX_TEMPLATE:-}" ] || echo "sbx_template=$FM_SBX_TEMPLATE"
+    # The memory cap is placement state for the same reason: `sbx create -m`
+    # is honored at create only, so reproducing a guest's allocation means
+    # re-entering the cap on the recreate (docs/sbx-backend.md "Guest memory
+    # cap").
+    [ -z "${SBX_MEMORY:-}" ] || echo "sbx_memory=$SBX_MEMORY"
     [ -z "${SBX_GUEST_HEAD:-}" ] || echo "sbx_guest_synced=$SBX_GUEST_HEAD"
   fi
   if [ "$KIND" = secondmate ]; then
