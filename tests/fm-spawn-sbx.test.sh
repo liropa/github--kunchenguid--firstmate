@@ -1392,6 +1392,30 @@ SH
   done
 }
 
+test_interrupt_between_creation_and_return_removes_the_sandbox() {
+  local w fb out rc=0
+  w=$(new_world abort-interrupt-create); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  # SIGINT during the post-create source-mount probe. The sandbox and the
+  # signal bridge both exist by then, and fm_backend_sbx_create_task never
+  # returns, so nothing carried by a return value could describe either one.
+  out=$(FM_FAKE_SBX_INTERRUPT_ON=" -- test -r " \
+    FM_FAKE_SBX_INTERRUPT_WITNESS="$w/probe-interrupted" \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn must not report success: $out"
+  assert_not_contains "$out" "spawned smx" "an interrupted spawn must not report a started task"
+  assert_present "$w/probe-interrupted" "the interrupt must land during the post-create probe"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx" \
+    "this case only means anything if the sandbox already exists when the interrupt lands"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "ownership published at creation must reach cleanup even though the backend never returned"
+  assert_absent "$w/signals/smx" "the signal bridge this spawn created must go with the sandbox"
+  assert_absent "$w/home/state/smx.meta" "no task record exists yet, and none may be left behind"
+  pass "spawn: an interrupt between creation and return still removes the sandbox"
+}
+
 test_undelivered_launch_removes_the_sandbox_it_created() {
   local w fb out rc=0
   w=$(new_world abort-undelivered); fb=$(make_fake_sbx "$w")
@@ -1463,5 +1487,6 @@ test_delivery_failure_checks_the_launch_nonce_before_cleanup timeout-state
 test_delivery_failure_checks_the_launch_nonce_before_cleanup timeout-capture
 test_delivery_failure_checks_the_launch_nonce_before_cleanup interrupt
 test_undelivered_launch_removes_the_sandbox_it_created
+test_interrupt_between_creation_and_return_removes_the_sandbox
 
 echo "# all fm-spawn-sbx tests passed"

@@ -1518,16 +1518,24 @@ fm_backend_sbx_memory_valid() {  # <s>
 # optionally caps the guest's memory. Resolution runs FIRST so an unusable
 # flavor/driver pairing, or a malformed memory cap, refuses before any
 # sandbox, signal directory, or guest state exists.
-# Return values are a CONTRACT, because they say what the caller has to clean
-# up: 0 created and ready; 1 failed without creating a sandbox; 2 refused after
-# `sbx create`, so the sandbox is running and the CALLER owns destroying it.
-# Every post-create refusal returns 2, consumed by bin/fm-spawn.sh's sbx
-# abort-cleanup arm.
-# FM_SBX_CREATED_SIGNALS_DIR names the directory created by this call, or is empty.
+# Cleanup ownership is PUBLISHED, never returned. FM_SBX_CREATED_SIGNALS_DIR
+# names the signal directory this call created and FM_SBX_CREATED_SANDBOX the
+# sandbox it created; each is set the instant that resource exists and is empty
+# when this call did not create it. bin/fm-spawn.sh's EXIT trap reads them
+# directly.
+#
+# A return code cannot carry this, which is why it no longer tries. An
+# interrupt during the post-create probes below never returns any code at all,
+# and the sandbox is already running by then: ownership that arrives with the
+# return value arrives too late to destroy it. Published at creation, there is
+# no window in either direction - nothing is claimed before it exists, and
+# nothing exists unclaimed. The return value now means only success or failure.
+# shellcheck disable=SC2034
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent memory gate_line gate_rc
   local -a create_args
   FM_SBX_CREATED_SIGNALS_DIR=
+  FM_SBX_CREATED_SANDBOX=
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1
   memory=$(fm_backend_sbx_memory_pin) || return 1
   # sbx clone mode refuses linked git worktrees outright ("--clone is not
@@ -1560,6 +1568,9 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   [ -z "$memory" ] || create_args+=(-m "$memory")
   create_args+=("$agent" "$home_abs" "$signals_dir")
   sbx "${create_args[@]}" >&2 || return 1
+  # Published HERE, on the line after the sandbox exists and before anything
+  # can fail or be interrupted with it running.
+  FM_SBX_CREATED_SANDBOX=$name
   # Right after create, prove the clone-mode RO source mount is where the
   # guest-home provisioning pass expects it: the path is an sbx
   # implementation detail, so version drift must be a loud refusal here, not
@@ -1568,20 +1579,20 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   # every firstmate home commits, so its readability proves the mount.
   if ! sbx exec "$name" -- test -r "$FM_SBX_SOURCE_MOUNT/AGENTS.md"; then
     echo "error: sandbox $name has no readable clone-mode source mount at $FM_SBX_SOURCE_MOUNT; guest-home provisioning depends on it (if sbx moved the mount, set FM_SBX_SOURCE_MOUNT; agent-dotfiles docs/firstmate-sbx-guest-home-provisioning.md)" >&2
-    return 2
+    return 1
   fi
   if ! sbx exec "$name" -- sh -c 'command -v tmux >/dev/null 2>&1'; then
     echo "error: sandbox $name's template has no tmux; the sbx backend needs an in-guest tmux (pin FM_SBX_TEMPLATE to a template that ships it)" >&2
-    return 2
+    return 1
   fi
   # Cross-vendor gate assertion. A PROVEN match joins the two refusals above,
   # for the same stated reason - half-provisioned is worse than no sandbox:
   # firstmate chose this guest's worker vendor, so a secondmate whose gate
   # would review with that same vendor must not come into existence, and create
   # is the one point in the lifecycle where refusing strands no work. That last
-  # clause is only true because of the rc-2 contract in this function's header:
-  # the sandbox this refusal leaves running is destroyed by the caller, which
-  # is what stops a refusal from stranding the VM it was refusing to finish.
+  # clause is only true because of the published ownership in this function's
+  # header: the sandbox this refusal leaves running is already claimed, so the
+  # caller's EXIT trap destroys it however this function ends.
   #
   # An indeterminate reading is loud but NOT fatal, and the asymmetry is
   # deliberate. Refusing there would make firstmate an enforcer of what the
@@ -1600,11 +1611,11 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
     gate_rc=$?
     if [ "$gate_rc" -eq 1 ]; then
       echo "error: $gate_line; refusing to finish creating $name, because its adversarial review would not be independent of the code it reviews. Pin FM_SBX_TEMPLATE to a template whose baked gate config resolves to a different vendor than '$harness', or drive this secondmate with a different harness (docs/sbx-backend.md 'Guest gate-vendor assertion')" >&2
-      return 2
+      return 1
     fi
     echo "firstmate sbx: $gate_line; $name is created, but nothing here proved its gate would review on a different vendor than '$harness' (docs/sbx-backend.md 'Guest gate-vendor assertion')" >&2
   fi
-  sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home_abs" || return 2
+  sbx exec "$name" -- tmux new-session -d -s "$FM_SBX_GUEST_SESSION" -n "$name" -c "$home_abs" || return 1
   return 0
 }
 

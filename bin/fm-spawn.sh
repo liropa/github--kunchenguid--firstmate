@@ -30,12 +30,15 @@
 #   state/<id>.turn-ended become host symlinks onto it); supported harnesses
 #   are claude and codex, and ship/scout sbx spawns are refused
 #   (docs/sbx-backend.md).
-#   An sbx spawn that fails ANY time after its own `sbx create` destroys the
-#   sandbox again, and with it the signal directory and the task metadata THIS
-#   spawn wrote - never a bridge, archive, folded status history, or metadata
-#   record that was already there. The claim is held until the launch is
-#   confirmed, because a guest whose launch never landed is the same stranded
-#   VM: running, agentless, and read as `alive` by every liveness probe.
+#   An sbx spawn that fails, refuses, or is interrupted ANY time after its own
+#   `sbx create` destroys the sandbox again, and with it the signal directory
+#   and the task metadata THIS spawn wrote - never a bridge, archive, folded
+#   status history, or metadata record that was already there. The backend
+#   publishes each resource as it creates it and this script's EXIT trap reads
+#   that, so an interrupt mid-backend is covered too. The claim is released
+#   only once the launch nonce confirms an agent started, because a guest whose
+#   launch never landed is the same stranded VM: running, agentless, and read
+#   as `alive` by every liveness probe.
 #   FM_SBX_RESTORE_PRIVATE names a verified home-private.tgz on this secondmate's
 #   signal bridge. An sbx spawn checks its host-side sha256 sidecar before VM
 #   creation, then restores data/ and state/ into the new guest before provisioning
@@ -158,7 +161,7 @@ unset FM_HARNESS_PID CLAUDE_PID
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,94p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -293,18 +296,11 @@ SPAWN_LEASE_RELEASE_ON_ABORT=0
 SPAWN_WORKTREE_LEASE=
 SPAWN_META_BACKUP=
 SPAWN_META_WRITTEN=0
-# Armed only when THIS spawn's `sbx create` brought a sandbox into existence,
-# and disarmed the moment the launch is confirmed. While it is set, an abort
-# owes the fleet a removal: bin/backends/sbx.sh's create returns 2 for every
-# refusal that lands after the VM is up, and the paths after it (brief seed,
-# private-record restore, provisioning, launch delivery) leave a guest with a
-# bare tmux session and no agent.
-SBX_ABORT_CLEANUP=0
-# The signal directory only when this spawn created it. A respawn over an
-# existing bridge leaves it empty, because that bridge carries records - a
-# verified private-record archive, folded host status history - this spawn did
-# not write and must never destroy.
-SBX_ABORT_SIGNALS=
+# sbx cleanup ownership is not tracked here. bin/backends/sbx.sh publishes
+# FM_SBX_CREATED_SANDBOX and FM_SBX_CREATED_SIGNALS_DIR the instant each
+# resource exists, and spawn_abort_cleanup reads those. Anything this script
+# copied out of them would be set only once the adapter RETURNED, which an
+# interrupt during its post-create probes never does.
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_PR_URL=
@@ -385,7 +381,7 @@ spawn_launch_delivered() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? sig host_sig
+  local status=$? sig host_sig sbx_sandbox sbx_signals
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -441,40 +437,46 @@ spawn_abort_cleanup() {
   # and that the liveness sweep therefore never respawns (docs/sbx-backend.md
   # "Create-time abort cleanup").
   #
-  # Removal is safe at exactly these points and nowhere else: the VM was
-  # created by this run, no agent was ever launched in it, and everything it
-  # holds still exists on the host. A failed private-record restore is the
-  # sharpest case - the verified archive stays on the signal bridge, which this
-  # arm does not touch, so the records being protected outlive the guest that
-  # could not read them.
-  if [ "$SBX_ABORT_CLEANUP" = 1 ]; then
-    SBX_ABORT_CLEANUP=0
+  # What may be destroyed is decided by the adapter's published ownership and
+  # by the nonce below, never by how the spawn got here. Everything a claimed
+  # guest holds still exists on the host: a failed private-record restore is
+  # the sharpest case, and the verified archive stays on the signal bridge,
+  # which is removed only when this spawn created that bridge and nothing else
+  # folded history into it.
+  if [ -n "${FM_SBX_CREATED_SANDBOX:-}" ] || [ -n "${FM_SBX_CREATED_SIGNALS_DIR:-}" ]; then
+    sbx_sandbox=${FM_SBX_CREATED_SANDBOX:-}
+    sbx_signals=${FM_SBX_CREATED_SIGNALS_DIR:-}
+    FM_SBX_CREATED_SANDBOX=
+    FM_SBX_CREATED_SIGNALS_DIR=
+    # The nonce lives here, at the last point every route reaches, because the
+    # routes are not alike: a send failure returns, a timeout returns a
+    # different way, and an interrupt returns through none of them. A guest can
+    # write its nonce while any of those are still deciding, and this is the
+    # only place that sees all three before the removal.
     if spawn_launch_delivered; then
-      SBX_ABORT_SIGNALS=
       echo "error: $ID spawn aborted, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
     else
-      if sbx rm --force "$W"; then
-        echo "error: removed sandbox $W after failed spawn" >&2
-      else
-        echo "error: failed to remove sandbox $W; remove it with 'sbx rm --force $W' before retrying the spawn" >&2
+      if [ -n "$sbx_sandbox" ]; then
+        if sbx rm --force "$sbx_sandbox"; then
+          echo "error: removed sandbox $sbx_sandbox after failed spawn" >&2
+        else
+          echo "error: failed to remove sandbox $sbx_sandbox; remove it with 'sbx rm --force $sbx_sandbox' before retrying the spawn" >&2
+        fi
       fi
       spawn_restore_prespawn_meta
-    fi
-  fi
-  # Separate guard, because the bridge can outlive the sandbox claim: a create
-  # that failed on its own `sbx create` still made this directory.
-  if [ -n "$SBX_ABORT_SIGNALS" ]; then
-    rm -rf "$SBX_ABORT_SIGNALS"
-    SBX_ABORT_SIGNALS=
-    # The host-side signal symlinks this spawn pointed into that bridge are now
-    # dangling, and a dangling name in state/ is scan surface with nothing
-    # behind it.
-    for sig in status turn-ended; do
-      host_sig="$STATE/$ID.$sig"
-      if [ -L "$host_sig" ] && [ ! -e "$host_sig" ]; then
-        rm -f "$host_sig"
+      if [ -n "$sbx_signals" ]; then
+        rm -rf "$sbx_signals"
+        # The host-side signal symlinks this spawn pointed into that bridge are
+        # now dangling, and a dangling name in state/ is scan surface with
+        # nothing behind it.
+        for sig in status turn-ended; do
+          host_sig="$STATE/$ID.$sig"
+          if [ -L "$host_sig" ] && [ ! -e "$host_sig" ]; then
+            rm -f "$host_sig"
+          fi
+        done
       fi
-    done
+    fi
   fi
   # Release a pool slot this run leased but never handed to a task. The flag is
   # cleared the moment the task's pane is created, so this only fires while the
@@ -1398,20 +1400,7 @@ EOF
         exit 1
       fi
     fi
-    set +e
-    fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR"
-    SBX_CREATE_STATUS=$?
-    SBX_ABORT_SIGNALS=$FM_SBX_CREATED_SIGNALS_DIR
-    set -e
-    if [ "$SBX_CREATE_STATUS" -ne 0 ]; then
-      # rc 2 is create's "the sandbox is up and it is yours to remove" (see
-      # that function's header); rc 1 refused with no sandbox anywhere. The
-      # bridge claim stands either way, because it names a directory only this
-      # spawn could have made and removing one create never reached is a no-op.
-      [ "$SBX_CREATE_STATUS" -ne 2 ] || SBX_ABORT_CLEANUP=1
-      exit 1
-    fi
-    SBX_ABORT_CLEANUP=1
+    fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR" || exit 1
     T="sbx:$W"
     # Seed the tracked-file sync's staleness cache from the guest's OWN
     # rev-parse, never from the host clone's tip: what `sbx create --clone`
@@ -1746,7 +1735,7 @@ if [ "$BACKEND" = sbx ]; then
       cat "$host_sig" >> "$mount_sig" 2>/dev/null || true
       # The bridge now carries history this spawn did not write, so it stops
       # being this spawn's to delete however the rest of the launch goes.
-      SBX_ABORT_SIGNALS=
+      FM_SBX_CREATED_SIGNALS_DIR=
     fi
     rm -f "$host_sig"
     ln -s "$mount_sig" "$host_sig"
@@ -1992,11 +1981,14 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-# The sbx claim is held until HERE, not dropped at the metadata write like
-# orca's: an undelivered launch leaves a guest with a bare tmux session and no
-# agent, which is the same stranded VM every post-create refusal leaves. From
-# this line on the sandbox is a live secondmate and nothing may remove it.
-SBX_ABORT_CLEANUP=0 SBX_ABORT_SIGNALS=
+# Release the sbx claim HERE, not at the metadata write where orca's is
+# dropped: until the launch is confirmed, a guest holds a bare tmux session and
+# no agent, which is the same stranded VM a post-create refusal leaves. The
+# nonce check in the abort arm would spare this sandbox anyway; releasing the
+# claim outright means a live secondmate stays safe even if its sentinel file
+# is gone by the time the trap runs.
+FM_SBX_CREATED_SANDBOX=
+FM_SBX_CREATED_SIGNALS_DIR=
 rm -f "$SPAWN_META_BACKUP" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
