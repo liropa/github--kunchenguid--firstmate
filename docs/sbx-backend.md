@@ -29,6 +29,8 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
   Two tmux-capable templates verified as of 2026-07-20: **`adf-codex:v2`** (agent-dotfiles' `adf-codex:v1` + tmux 3.6, codex 0.142.5) and **`adf-claude:v3`** (agent-dotfiles' `adf-claude:v2` + tmux 3.6, claude 2.1.195).
+  <!-- fm-authority: firstmate-observation 2026-09-11 - read from a live guest's own gate resolution during that day's drill; nothing in this repo carries what a template image bakes -->
+  The `adf-codex` family bakes a gate config that resolves to **codex**, so only a **claude** driver can be created on one: a codex driver hits the cross-vendor refusal in "Guest gate-vendor assertion" below (observed 2026-09-11).
   The template image and the sandbox's agent flavor are independent choices ("Agent flavor vs driver harness" below).
   Both templates' apt lists were corrupt in the base image; the tmux install recipe is `sudo find /var/lib/apt/lists -type f -delete && apt-get update && apt-get install -y tmux && apt-get clean` inside a builder sandbox, then `sbx template save`.
 - Clone mode (`sbx create --clone`) clones the workspace repo into the VM **at the same absolute path**, mounts the host repo read-only at `/run/sandbox/source`, and carries only **committed** files (gitignored `data/`, `state/`, `config/` never arrive).
@@ -166,6 +168,18 @@ The grace share is deliberate (coalescing a status write with its turn-end saves
 Measured live (2026-07-19, steady-state watcher): **34.5 s** turn-end → wake (≈4 s poll phase + 30 s grace), one coalesced wake for status + turn-end; a full steer of a stopped VM (resurrection + verified delivery) took 16.5 s and the guest's reply landed ~3 s later.
 Idle supervision costs **zero** sbx CLI calls (the scan is pure host stats; stopped VMs stay stopped) - versus an `sbx exec`-polling design's ~240 exec round-trips/hour/secondmate at 302 ms p50 (Gate 0) that would also auto-start every stopped VM on each probe.
 The design doc's v2 latency trigger is **not met**: the wake path is grace-dominated by design, and v2's event layer could only shave the ≤15 s poll share.
+
+### Create-time abort cleanup (2026-09-11 live drill)
+
+<!-- fm-authority: firstmate-observation 2026-09-11 - both readings come from a throwaway guest driven outside this checkout, and neither is reproducible from the diff -->
+Two failure shapes were driven against a real sandbox, and both returned non-zero with the microVM still running.
+A refusal after `sbx create` (the gate-vendor assertion, reached through an ordinary spawn) left a guest with no tmux, no agent, no task record, and an empty signal directory, which had to be removed by hand.
+A failed private-record restore left a guest with the bare tmux session create makes, no agent, and a `state/<id>.meta` already written.
+The second is the worse half: a running sandbox reads as `alive` (see "Agent liveness probe" above), so the session-start liveness sweep would never have respawned that guest and the home read as staffed forever.
+<!-- /fm-authority -->
+
+Both are cleaned up at the point they fail now, and the two script headers own the mechanics.
+Regression coverage is the abort-cleanup group in `tests/fm-spawn-sbx.test.sh`, starting at `test_post_create_refusal_removes_what_the_spawn_created`.
 
 ## Guest-home provisioning (read-through inheritance)
 

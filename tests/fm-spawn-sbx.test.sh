@@ -37,6 +37,10 @@
 #     absence both read through the links, a projects-bearing home is
 #     refused before `sbx create`, and a guest whose source mount is not
 #     where FM_SBX_SOURCE_MOUNT says is refused right after create.
+#   - Every failure AFTER `sbx create` - each post-create refusal, a failed
+#     private-record restore, an undelivered launch - destroys the sandbox,
+#     signal directory and task record this spawn created, and leaves a
+#     pre-existing bridge, archive, folded host history or task record alone.
 set -u
 
 # shellcheck source=tests/sbx-helpers.sh
@@ -984,6 +988,155 @@ test_private_restore_refuses_invalid_archive() {
   done
 }
 
+# --- create-time abort cleanup (live drill 2026-09-11) ------------------------
+
+# seed_unreadable_restore <world>: a restore archive whose host verification
+# matches and whose bytes are not a tarball, so the refusal lands INSIDE the
+# guest - sandbox up, task record already written. Echoes the archive path.
+seed_unreadable_restore() {
+  local w=$1 archive="$1/signals/smx/backup-fixture/home-private.tgz"
+  seed_private_restore "$w"
+  printf 'not a tarball\n' > "$archive"
+  (cd "${archive%/*}" && shasum -a 256 home-private.tgz > home-private.tgz.sha256)
+  printf '%s\n' "$archive"
+}
+
+test_post_create_refusal_removes_what_the_spawn_created() {
+  local w fb nmbin out rc case_name
+  for case_name in source-mount tmux-probe gate-vendor guest-session; do
+    w=$(new_world "abort-$case_name"); fb=$(make_fake_sbx "$w")
+    mkdir -p "$w/guest-writes"
+    rc=0
+    case "$case_name" in
+      source-mount)
+        out=$(FM_FAKE_SBX_SOURCE_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+        ;;
+      tmux-probe)
+        out=$(FM_FAKE_SBX_TMUX_PROBE_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+        ;;
+      gate-vendor)
+        # A gate that would review on the driver's own vendor: the refusal the
+        # drill hit first, and the only one of the four driven against a live VM.
+        nmbin=$(make_fake_no_mistakes "$w")
+        out=$(FM_FAKE_SBX_NM_BIN="$nmbin" FM_FAKE_NM_GATE=claude \
+          run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+        ;;
+      guest-session)
+        out=$(FM_FAKE_SBX_NEW_SESSION_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+        ;;
+    esac
+
+    [ "$rc" -ne 0 ] || fail "the $case_name refusal must fail the spawn: $out"
+    assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx" \
+      "this case only means anything if the refusal landed with the sandbox already created"
+    assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+      "a refusal after create must destroy the sandbox it is refusing to finish"
+    [ ! -d "$w/signals/smx" ] \
+      || fail "the $case_name refusal must remove the signal directory this spawn created"
+    assert_absent "$w/home/state/smx.meta" \
+      "the $case_name refusal must leave no task record reading as a started secondmate"
+    pass "spawn: the $case_name refusal removes the sandbox, bridge and record it created"
+  done
+}
+
+test_abort_preserves_records_the_spawn_did_not_create() {
+  local w fb out rc=0 archive before
+  w=$(new_world abort-preserve); fb=$(make_fake_sbx "$w")
+  archive=$(seed_unreadable_restore "$w")
+  printf 'earlier bridge record\n' > "$w/signals/smx/keep-me"
+  fm_write_meta "$w/home/state/smx.meta" \
+    "window=sbx:fm-smx" "project=$w/sm" "harness=claude" "kind=secondmate" \
+    "mode=secondmate" "yolo=off" "backend=sbx" "home=$w/sm"
+  before=$(cat "$w/home/state/smx.meta")
+
+  out=$(FM_SBX_RESTORE_PRIVATE="$archive" FM_FAKE_SBX_GUEST_HOME="$w/guest" \
+    run_spawn "$w" "$fb" smx "$w/sm" --backend sbx --harness claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "an unreadable archive must refuse the launch: $out"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "a guest that could not read the records must not outlive the failure"
+  assert_present "$archive" "the archive is the thing being protected and must survive"
+  assert_present "$archive.sha256" "the archive's host verification must survive with it"
+  assert_present "$w/signals/smx/keep-me" "a bridge this spawn did not create must survive"
+  assert_contains "$out" "$archive" \
+    "the refusal must name where the records it could not read are still kept"
+  [ "$(cat "$w/home/state/smx.meta")" = "$before" ] \
+    || fail "a task record this spawn did not write must come back byte-identical"
+  pass "spawn: a failed restore removes the guest and preserves the archive, bridge and prior record"
+}
+
+test_failed_restore_leaves_no_record_of_a_started_secondmate() {
+  local w fb out rc=0 archive
+  w=$(new_world abort-restore-fresh); fb=$(make_fake_sbx "$w")
+  archive=$(seed_unreadable_restore "$w")
+
+  out=$(FM_SBX_RESTORE_PRIVATE="$archive" FM_FAKE_SBX_GUEST_HOME="$w/guest" \
+    run_spawn "$w" "$fb" smx "$w/sm" --backend sbx --harness claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "an unreadable archive must refuse the launch: $out"
+  # The defect exactly: the record survived the failure, and a running sandbox
+  # reads as alive, so the home looked staffed and was not.
+  assert_absent "$w/home/state/smx.meta" \
+    "a failed restore must leave no record that reads as a live secondmate"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "a failed restore must destroy the agentless guest it created"
+  assert_present "$archive" "the archive must survive the failure it caused"
+  pass "spawn: a failed restore leaves neither a stranded guest nor a record of one"
+}
+
+test_abort_keeps_a_bridge_that_absorbed_host_history() {
+  local w fb out rc=0
+  w=$(new_world abort-folded-history); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # A host secondmate migrating to sbx: the bridge is new, but the first thing
+  # this spawn does with it is fold the host's status history INTO it, and that
+  # history is not this spawn's to destroy.
+  printf 'done: earlier host-side outcome\n' > "$w/home/state/smx.status"
+
+  out=$(FM_FAKE_SBX_PROVISION_RC=1 run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a failed provisioning exec must fail the spawn: $out"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "the half-provisioned guest must still be destroyed"
+  assert_grep "done: earlier host-side outcome" "$w/signals/smx/smx.status" \
+    "a bridge that absorbed host history must survive the abort that follows"
+  assert_absent "$w/home/state/smx.meta" \
+    "the record this spawn wrote must still go"
+  pass "spawn: an abort keeps a bridge that already absorbed the host's status history"
+}
+
+test_delivered_launch_disarms_the_abort_cleanup() {
+  local w fb out
+  w=$(new_world abort-disarmed); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "an ordinary sbx secondmate spawn must succeed: $out"
+
+  assert_not_contains "$(cat "$w/sbx.log")" "rm --force" \
+    "a delivered launch must leave the sandbox alone - from that point it is a live secondmate"
+  assert_present "$w/home/state/smx.meta" "a started secondmate keeps its task record"
+  assert_present "$w/signals/smx" "a started secondmate keeps its signal bridge"
+  pass "spawn: a delivered launch disarms the abort cleanup"
+}
+
+test_undelivered_launch_removes_the_sandbox_it_created() {
+  local w fb out rc=0
+  w=$(new_world abort-undelivered); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # A pane that never runs what it is handed: no nonce, so nothing was launched
+  # and the guest is the same agentless VM every post-create refusal leaves.
+  out=$(FM_TEST_LAUNCH_ACK='' FM_SPAWN_LAUNCH_WAIT=0 FM_SPAWN_LAUNCH_TRIES=1 \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "an unconfirmed launch must fail the spawn: $out"
+  assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" \
+    "the claim is held until the launch lands, so an undelivered one still removes the guest"
+  [ ! -d "$w/signals/smx" ] || fail "the signal directory this spawn created must go with it"
+  assert_absent "$w/home/state/smx.meta" "an unstarted task must leave no record"
+  pass "spawn: an undelivered launch removes the sandbox this spawn created"
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
@@ -1023,5 +1176,11 @@ test_spawn_read_through_and_absence_semantics
 test_refuses_projects_bearing_home
 test_refuses_missing_source_mount
 test_spawn_fails_when_provision_exec_fails
+test_post_create_refusal_removes_what_the_spawn_created
+test_abort_preserves_records_the_spawn_did_not_create
+test_failed_restore_leaves_no_record_of_a_started_secondmate
+test_abort_keeps_a_bridge_that_absorbed_host_history
+test_delivered_launch_disarms_the_abort_cleanup
+test_undelivered_launch_removes_the_sandbox_it_created
 
 echo "# all fm-spawn-sbx tests passed"
