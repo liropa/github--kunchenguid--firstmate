@@ -378,6 +378,14 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
   return 1
 }
 
+fm_backend_recorded_harness() {
+  local backend=$1 target=$2 meta
+  meta=$(fm_backend_meta_for_window "$target" "${FM_STATE_OVERRIDE:-$FM_HOME/state}") || return 0
+  [ "$(fm_backend_of_meta "$meta")" = "$backend" ] || return 0
+  [ "$(fm_backend_target_of_meta "$meta")" = "$target" ] || return 0
+  fm_meta_get "$meta" harness
+}
+
 fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 id
   case "$raw" in
@@ -566,15 +574,16 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # Echoes empty|submitted|pending|unknown|send-failed; the adapter owns how it
 # confirms submission.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local backend=$1
+  local backend=$1 harness
   shift
   fm_backend_source "$backend" || return 1
+  harness=$(fm_backend_recorded_harness "$backend" "$1")
   case "$backend" in
-    tmux) fm_backend_tmux_send_text_submit "$@" ;;
-    herdr) fm_backend_herdr_send_text_submit "$@" ;;
+    tmux) fm_backend_tmux_send_text_submit "${@:1:5}" "${6:-}" "$harness" ;;
+    herdr) fm_backend_herdr_send_text_submit "${@:1:5}" "${6:-}" "$harness" ;;
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
-    orca) fm_backend_orca_send_text_submit "$@" ;;
-    cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    orca) fm_backend_orca_send_text_submit "${@:1:5}" "${6:-}" "$harness" ;;
+    cmux) fm_backend_cmux_send_text_submit "${@:1:5}" "${6:-}" "$harness" ;;
     sbx) fm_backend_sbx_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
@@ -738,15 +747,15 @@ fm_backend_blocked_state() {  # <backend> <target> -> blocked|no|unknown
 # submit path uses an internal content-diff approach with no separately named
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
-  local backend=$1
-  shift
+fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|unknown
+  local backend=$1 target=$2 expected_label=${3:-} harness
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  harness=$(fm_backend_recorded_harness "$backend" "$target")
   case "$backend" in
-    tmux) fm_tmux_composer_state "$@" ;;
-    herdr) fm_backend_herdr_composer_state "$@" ;;
-    orca) fm_backend_orca_composer_state "$@" ;;
-    cmux) fm_backend_cmux_composer_state "$@" ;;
+    tmux) fm_tmux_composer_state "$target" "$harness" ;;
+    herdr) fm_backend_herdr_composer_state "$target" "$harness" ;;
+    orca) fm_backend_orca_composer_state "$target" "$harness" ;;
+    cmux) fm_backend_cmux_composer_state "$target" "$expected_label" "$harness" ;;
     *) printf 'unknown' ;;
   esac
 }

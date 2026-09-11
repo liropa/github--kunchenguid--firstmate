@@ -189,6 +189,23 @@ test_send_text_submit_retries_when_composer_stays_pending() {
   pass "fm_backend_orca_send_text_submit: retries Enter while composer remains pending"
 }
 
+test_composer_state_queued_phrase_uses_recorded_harness() {
+  local out harness expected
+  for harness in claude pi unset; do
+    orca_case "composer-queued-$harness"
+    mkdir -p "$CASE_DIR/state"
+    fm_write_meta "$CASE_DIR/state/draft.meta" 'backend=orca' 'terminal=term-123'
+    [ "$harness" = unset ] || printf 'harness=%s\n' "$harness" >> "$CASE_DIR/state/draft.meta"
+    printf '{"ok":true,"result":{"terminal":{"tail":["│ ❯ Press up to edit queued messages │"]}}}\n' > "$RESP/1.out"
+    out=$( PATH="$FB:$PATH" FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$CASE_DIR/state" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state orca term-123' "$ROOT" )
+    expected=pending
+    [ "$harness" != claude ] || expected=empty
+    [ "$out" = "$expected" ] || fail "queued phrase on Orca harness '$harness' should read '$expected', got '$out'"
+  done
+  pass "fm_backend_orca_composer_state: only recorded claude panes accept the queued phrase"
+}
+
 test_composer_state_popup_placeholder_fill_is_pending() {
   local out
   orca_case composer-popup-placeholder
@@ -1294,6 +1311,7 @@ test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_queued_phrase_uses_recorded_harness
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send

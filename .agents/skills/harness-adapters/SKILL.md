@@ -134,7 +134,7 @@ Natural language is acceptable if uncertain.
 
 **Busy-queued Enter, and the missing busy signature (verified 2026-09-10, Claude Code 2.1.268).**
 Claude accepts an Enter sent mid-turn, queues the line for after the current turn, clears the composer, and replaces it with `❯ Press up to edit queued messages` at every queue depth.
-That row is a positive delivery acknowledgement, so the shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`) reads it as "no unsubmitted text" and every backend adapter inherits the verdict - unlike opencode's shape below, which only the tmux adapter covers.
+The shared classifier recognizes that row only for a recorded Claude pane; [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes) owns the metadata requirement and accepted cursor-row limit.
 Without it `fm-send` reported a swallowed Enter for a line claude already held, and the caller re-sent and ran the instruction twice.
 The opencode busy fallback cannot cover this shape: 2.1.268 prints no busy text anywhere in the pane, so `fm_pane_is_busy` reads a busy claude pane as idle.
 That gap is real and wider than the submit path - it is not worked around with a guessed pattern, and `docs/tmux-backend.md`'s "Submit acknowledgement" section owns the measurement and the sampling behind it.

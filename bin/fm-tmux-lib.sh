@@ -48,8 +48,8 @@
 # Busy-queued Enter, shape two (claude): claude instead REPLACES the composer
 # with its own "queued" acknowledgement, and prints no busy text for the fallback
 # above to find, so that fallback cannot reach this shape at all. Reading the
-# acknowledgement is owned fleet-wide by bin/fm-composer-lib.sh, not here, so
-# every adapter gets it; docs/tmux-backend.md records the measurement.
+# acknowledgement is owned by bin/fm-composer-lib.sh;
+# docs/tmux-backend.md records the measurement.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -108,8 +108,8 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0
+fm_tmux_composer_state() {  # <target> [recorded-harness] -> empty|pending|unknown
+  local target=$1 harness=${2:-} cy raw plain stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -137,7 +137,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain" "$harness"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
@@ -174,12 +174,12 @@ fm_pane_is_busy() {  # <target>
 # is the only place that exception lives, so the daemon's strict and
 # fm-send's lenient success policies both treat a busy-queued Enter as
 # delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harness]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    state=$(fm_tmux_composer_state "$target")
+    state=$(fm_tmux_composer_state "$target" "$harness")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
@@ -196,9 +196,9 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-}
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness"
 }

@@ -151,7 +151,7 @@ test_claude_queued_acknowledgement_returns_empty() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 claude > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] \
     || fail "a queued claude composer should return empty, got '$(cat "$vfile")'"
   [ "$(wc -l < "$sent" | tr -d ' ')" = 0 ] || fail "queued claude pane should not retype text"
@@ -172,7 +172,7 @@ test_claude_idle_composer_text_still_pending() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 claude > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] \
     || fail "idle claude pane holding the steer should stay pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle claude pane holding real text still reports a genuine swallow"
