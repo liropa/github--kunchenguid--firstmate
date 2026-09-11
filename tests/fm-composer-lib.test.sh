@@ -126,25 +126,34 @@ test_real_text_is_pending() {
 }
 
 test_queued_acknowledgement_is_empty() {
-  local out
+  local out bordered prefix padding
   # The exact row a busy Claude Code 2.1.268 composer shows once it has accepted
   # and queued a mid-turn line (measured 2026-09-10; see docs/tmux-backend.md).
-  out=$(classify 0 '❯ Press up to edit queued messages')
-  [ "$out" = empty ] || fail "a queued-acknowledgement row should read empty, got '$out'"
-  out=$(classify 1 '❯ Press up to edit queued messages')
-  [ "$out" = empty ] || fail "a bordered queued-acknowledgement row should read empty, got '$out'"
-  # The acknowledgement is fleet-wide, so it lands with no caller idle_re.
-  out=$(classify 0 'Press up to edit queued messages')
-  [ "$out" = empty ] || fail "a glyph-less queued acknowledgement should read empty, got '$out'"
+  for bordered in 0 1; do
+    for prefix in '' '❯ ' '› ' $'❯\t' $'›\t'; do
+      for padding in '' $' \t'; do
+        out=$(classify "$bordered" "${padding}${prefix}Press up to edit queued messages${padding}")
+        [ "$out" = empty ] \
+          || fail "queued acknowledgement (bordered=$bordered, prefix='$prefix', padding='$padding') should read empty, got '$out'"
+      done
+    done
+  done
   pass "fm_composer_classify_content: a harness queued acknowledgement reads empty, not pending"
 }
 
 test_queued_acknowledgement_does_not_swallow_real_text() {
-  local out
+  local out bordered prefix
   # Only the harness's own whole row acknowledges a queue; a steer that merely
   # mentions it is still unsubmitted text the caller must not consider sent.
   out=$(classify 0 '❯ tell them to Press up to edit queued messages later')
   [ "$out" = pending ] || fail "text past the acknowledgement should stay pending, got '$out'"
+  for bordered in 0 1; do
+    for prefix in '' '❯ ' '› '; do
+      out=$(classify "$bordered" "${prefix}explain Press up to edit queued messages")
+      [ "$out" = pending ] \
+        || fail "text before the acknowledgement (bordered=$bordered, prefix='$prefix') should stay pending, got '$out'"
+    done
+  done
   pass "fm_composer_classify_content: the queued acknowledgement is anchored, so real text stays pending"
 }
 

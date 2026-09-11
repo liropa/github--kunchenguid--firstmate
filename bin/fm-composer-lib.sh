@@ -172,14 +172,9 @@ fm_composer_strip_ghost() {
 # harness de-emphasised that placeholder; see docs/tmux-backend.md's "Submit
 # acknowledgement" section for the measurement and for why the busy fallback
 # cannot cover claude.
-FM_COMPOSER_QUEUED_RE_DEFAULT='(^|[[:space:]])Press up to edit queued messages$'
-
 # fm_composer_queued_matches: 0 when <content> is such an acknowledgement.
-# The pattern tolerates a leading prompt glyph without naming it, so it matches
-# both before and after fm_composer_classify_content strips that glyph.
-# FM_COMPOSER_QUEUED_RE overrides the fleet-wide set.
 fm_composer_queued_matches() {  # <content>
-  printf '%s' "$1" | grep -qE "${FM_COMPOSER_QUEUED_RE:-$FM_COMPOSER_QUEUED_RE_DEFAULT}"
+  printf '%s' "$1" | grep -qE '^[[:space:]]*((❯|›)[[:space:]]+)?Press up to edit queued messages[[:space:]]*$'
 }
 
 # fm_composer_classify_content: the single shared composer-content verdict.
