@@ -100,7 +100,7 @@ The credential matrix itself is the live measurement above; a codex-flavor sandb
 
 ## Guest memory cap (`FM_SBX_MEMORY`, measured 2026-09-10)
 
-`sbx create -m, --memory` takes a size in binary units and defaults, in sbx's own words, to "50% of host memory, max 32 GiB" (`sbx create --help`, sbx v0.35.0).
+`sbx create -m, --memory` takes a size in binary units and defaults, in sbx's own words, to "50% of host memory, max 32 GiB" (`sbx create --help`, sbx v0.35.0, read 2026-09-11).
 Firstmate passed no memory flag until this knob existed, so every guest took that default.
 
 <!-- fm-authority: firstmate-observation 2026-09-10 - host-side VM measurement taken outside any checkout; the diff cannot support it -->
@@ -111,14 +111,10 @@ The hypervisor keeps every page the guest has ever touched, so freeing memory in
 Stopping the VM does return it, because the whole guest process tree dies with the stop - but the guest comes back under the same allocation and grows into it again, so the create-time cap is the only durable lever.
 <!-- /fm-authority -->
 
-- `FM_SBX_MEMORY` on a spawn is forwarded to `sbx create` as `-m <size>`.
-  Unset or empty is the previous behavior exactly: no flag, so sbx's own default applies and the create argv is unchanged.
-- The value is validated on **shape** before any sandbox exists - a nonzero integer followed by one binary-unit letter (`2g`, `4096m`), the form `sbx create --help` documents.
-  A malformed value refuses the spawn with a message naming the accepted form, rather than letting `sbx create` fail once the signal directory and guest state are half-built.
-  The accepted **range** stays sbx's own: firstmate does not re-encode the 32 GiB ceiling, so a later sbx that raises it needs no change here.
-- **The flag is honored at create only.** An existing guest keeps the allocation it was created with, so lowering a live secondmate's cap means recreating its VM ("Recreating a secondmate's VM" below).
-- The cap is recorded as `sbx_memory=` in task meta, so the liveness sweep's respawn and a manual recreate reproduce it instead of silently reverting to the default.
-  [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that meta field.
+The [`bin/backends/sbx.sh` header](../bin/backends/sbx.sh) owns `FM_SBX_MEMORY` flag syntax, validation, and default behavior.
+**The flag is honored at create only.**
+An existing guest keeps its allocation until recreated; use [the recreate procedure](#recreating-a-secondmates-vm) to change its cap.
+For task metadata and recovery, see the [schema](configuration.md#runtime-backend-configbackend--fm_backend) and [liveness procedure](#agent-liveness-probe-fm_backend_sbx_agent_alive).
 
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (shape resolution and refusal), `tests/fm-spawn-sbx.test.sh` (flag forwarded, absent when unpinned, malformed refused before create, meta recorded), and `tests/fm-secondmate-liveness.test.sh` (respawn re-entry).
 
@@ -137,11 +133,12 @@ Probe order:
 
 The sweep's harness gate (`bin/fm-bootstrap.sh`) demotes `dead` to `unknown` for harnesses outside `claude|codex|opencode|pi|grok`; the sbx spawn branch only ever records `claude` or `codex` (see below), so sbx metas always pass that gate.
 
-The sweep's respawn re-enters the meta's **recorded** placement, not ambient detection: it passes `--backend` from the meta's `backend=`, `FM_SBX_TEMPLATE` from the meta's `sbx_template=`, and `FM_SBX_AGENT` from the meta's `sbx_agent=`.
+The sweep's respawn re-enters the meta's **recorded** placement, not ambient detection: it passes `--backend` from the meta's `backend=`, `FM_SBX_TEMPLATE` from the meta's `sbx_template=`, `FM_SBX_AGENT` from the meta's `sbx_agent=`, and `FM_SBX_MEMORY` from the meta's `sbx_memory=`.
+If no memory cap was recorded, the sweep passes an empty value, so an ambient cap cannot change the replacement guest's allocation choice.
 Without this, a dead sbx secondmate on a `HERDR_ENV=1` host was respawned into a host-side herdr pane - a silent containment downgrade, not a recovery (found live 2026-07-20 during the design's §10 item 4 pass, fixed same day).
 The harness is deliberately *not* pinned from meta - respawns re-resolve it through `config/secondmate-harness -> config/crew-harness -> own` (the durable-mode contract), and an sbx-unverified resolution is refused loudly before any sandbox is created, as is a re-resolved harness the recorded agent flavor cannot serve ("Agent flavor vs driver harness" above).
 This persistence is load-bearing because changing the flavor requires destroying and recreating the VM; silently reverting to the default map could strand the guest without the credentials its work needs.
-A hand-run `fm-spawn.sh <id> --secondmate` does not read task meta: read the recorded `sbx_agent=` and pass it as `FM_SBX_AGENT`, just as a manual reprovision must re-enter the recorded template pin.
+A hand-run `fm-spawn.sh <id> --secondmate` does not read task meta; follow [the recreate procedure](#recreating-a-secondmates-vm) to preserve the recorded placement.
 
 Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon for bridge-health alarms; full mid-session *death* detection (stale beat checked against `sbx` state) remains session-start-only (design doc open question 6, partially closed).
 
