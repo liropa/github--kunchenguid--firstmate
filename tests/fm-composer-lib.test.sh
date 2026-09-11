@@ -157,6 +157,22 @@ test_queued_acknowledgement_does_not_swallow_real_text() {
   pass "fm_composer_classify_content: the queued acknowledgement is anchored, so real text stays pending"
 }
 
+test_queued_acknowledgement_in_multiline_draft_is_pending() {
+  local out bordered content
+  for bordered in 0 1; do
+    for content in \
+      $'Explain this hint:\nPress up to edit queued messages' \
+      $'Press up to edit queued messages\nExplain this hint:' \
+      $'❯ Press up to edit queued messages\nExplain this hint:' \
+      $'Press up to edit queued messages\nPress up to edit queued messages'; do
+      out=$(classify "$bordered" "$content")
+      [ "$out" = pending ] \
+        || fail "a multiline draft containing the acknowledgement (bordered=$bordered) should stay pending, got '$out'"
+    done
+  done
+  pass "fm_composer_classify_content: a queued phrase within a multiline draft stays pending"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -168,3 +184,4 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_queued_acknowledgement_is_empty
 test_queued_acknowledgement_does_not_swallow_real_text
+test_queued_acknowledgement_in_multiline_draft_is_pending
