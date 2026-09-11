@@ -40,7 +40,7 @@ The line is one `&&` chain; `LAUNCH_LINE` in [`bin/fm-spawn.sh`](../bin/fm-spawn
 - *Repeated input*: `test ! -s` makes the chain idempotent, so a pane that buffered a retry and replays it later cannot start a second agent.
 - *Subshell*: the pane's own shell never enters the worktree (see the teardown finding below).
 
-fm-spawn waits for the nonce, retries a bounded number of times, and on failure prints the pane's last lines, restores the pre-spawn record, and exits non-zero.
+The [`bin/fm-spawn.sh` header](../bin/fm-spawn.sh) owns nonce waiting, retries, failure diagnostics, and backend-specific abort cleanup.
 `FM_SPAWN_LAUNCH_WAIT`, `FM_SPAWN_LAUNCH_TRIES`, and `FM_SPAWN_LAUNCH_FLUSH_WAIT` tune it; the script's header owns their defaults.
 
 ## Per backend

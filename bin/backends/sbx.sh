@@ -1523,6 +1523,8 @@ fm_backend_sbx_memory_valid() {  # <s>
 # sandbox it created; each is set the instant that resource exists and is empty
 # when this call did not create it. bin/fm-spawn.sh's EXIT trap reads them
 # directly.
+# An existing signal directory is reused without claiming it; a non-directory
+# collision or failed directory creation refuses without claiming the path.
 #
 # A return code cannot carry this, which is why it no longer tries. An
 # interrupt during the post-create probes below never returns any code at all,
