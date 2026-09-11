@@ -177,10 +177,14 @@ case "$BEACON_MAX_AGE" in
   *) (( 10#$BEACON_MAX_AGE > 0 )) || BEACON_MAX_AGE=10 ;;
 esac
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
+# codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
 # turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
 # locale fragility of matching grok's braille spinner glyph directly).
+# claude matches NOTHING here from 2.1.268 on: it dropped the "esc to interrupt"
+# suffix and draws no spinner row at all while streaming a reply, so a busy claude
+# pane reads as not-busy (measured 2026-09-10, docs/tmux-backend.md). No pattern
+# is guessed in its place; the gap is recorded rather than papered over.
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather

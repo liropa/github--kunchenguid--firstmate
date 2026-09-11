@@ -159,6 +159,29 @@ fm_composer_strip_ghost() {
   '
 }
 
+# A harness that accepts a mid-turn Enter replaces the composer content with
+# its own "I took that line and will run it when this turn ends" text. That
+# is a POSITIVE delivery acknowledgement, not merely an idle row, so it is
+# tested fleet-wide rather than opted into per harness through <idle_re>.
+# Without it a queued steer reads as real unsubmitted text, and
+# bin/fm-send.sh reports a swallowed Enter for a line the harness already
+# holds - inviting the caller to re-send and act twice. Verified 2026-09-10
+# on Claude Code 2.1.268: the composer row becomes "❯ Press up to edit queued
+# messages" at every queue depth. Matching the text here, rather than leaning
+# on fm_pane_is_busy, is what makes the verdict independent of whether the
+# harness de-emphasised that placeholder; see docs/tmux-backend.md's "Submit
+# acknowledgement" section for the measurement and for why the busy fallback
+# cannot cover claude.
+FM_COMPOSER_QUEUED_RE_DEFAULT='(^|[[:space:]])Press up to edit queued messages$'
+
+# fm_composer_queued_matches: 0 when <content> is such an acknowledgement.
+# The pattern tolerates a leading prompt glyph without naming it, so it matches
+# both before and after fm_composer_classify_content strips that glyph.
+# FM_COMPOSER_QUEUED_RE overrides the fleet-wide set.
+fm_composer_queued_matches() {  # <content>
+  printf '%s' "$1" | grep -qE "${FM_COMPOSER_QUEUED_RE:-$FM_COMPOSER_QUEUED_RE_DEFAULT}"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -201,6 +224,11 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   esac
   # Nothing on the row = empty composer.
   [ -n "$content" ] || { printf 'empty'; return 0; }
+  # Harness-authored queued acknowledgement: the typed line was accepted, so the
+  # row holds no unsubmitted text (matched with the leading glyph still present).
+  if fm_composer_queued_matches "$content"; then
+    printf 'empty'; return 0
+  fi
   # Known idle placeholder (matched before a leading glyph is stripped).
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
