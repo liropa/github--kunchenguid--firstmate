@@ -670,7 +670,7 @@ The secondmate counted three arrivals, which sits inside that budget; which copy
 
 **Why it was this backend only.**
 Source comparison found the retype branch in the sbx adapter; the tmux adapter and shared submit core already retried Enter only and are unchanged by this fix.
-The tmux busy-pane fallback is documented in [Submit acknowledgement](tmux-backend.md#submit-acknowledgement-landed-is-empty-with-one-busy-queue-exception).
+The tmux busy-pane fallback is documented in [Submit acknowledgement](tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes).
 The reported steers were all marked, so each encountered the separator mismatch; [bin/fm-send.sh](../bin/fm-send.sh) owns which target forms receive a marker.
 
 **Fix.**

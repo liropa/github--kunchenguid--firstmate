@@ -31,19 +31,25 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
-# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
-# the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
-# keystroke but does NOT clear the composer until then, so the composer keeps
-# showing the typed text the whole time. The plain "empty iff composer cleared"
-# acknowledgement above false-positives on a swallowed Enter for every steer
-# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
-# the Enter-retry budget is spent: a busy pane means the harness accepted and
-# queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
+# Busy-queued Enter, shape one (opencode 1.18.4, on the tmux backend only for
+# now): when the agent is mid-turn, opencode accepts Enter as a "send when the
+# turn ends" keystroke but does NOT clear the composer until then, so the
+# composer keeps showing the typed text the whole time. The plain "empty iff
+# composer cleared" acknowledgement above false-positives on a swallowed Enter
+# for every steer sent to a busy opencode pane, and `fm-send` exits non-zero on
+# a normal captain instruction. The submit core now falls back to
+# `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
+# harness accepted and queued the Enter (report `empty` so the caller does not
+# re-send), while an idle pane keeps the `pending` verdict (a genuine swallow).
+# The herdr backend observes the same opencode behavior but needs a separate
+# fix; it is recorded as a known gap in `docs/herdr-backend.md` rather than
+# patched here, so the tmux adapter does not paper over a herdr-specific shape.
+#
+# Busy-queued Enter, shape two (claude): claude instead REPLACES the composer
+# with its own "queued" acknowledgement, and prints no busy text for the fallback
+# above to find, so that fallback cannot reach this shape at all. Reading the
+# acknowledgement is owned fleet-wide by bin/fm-composer-lib.sh, not here, so
+# every adapter gets it; docs/tmux-backend.md records the measurement.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -60,9 +66,12 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
+# Busy footers per harness (mirror fm-watch.sh). codex: "esc to interrupt";
+# opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel" (grok's
+# mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
+# claude is deliberately absent: from 2.1.268 on it prints no busy text a tail
+# regex can match (measured 2026-09-10, docs/tmux-backend.md), so fm_pane_is_busy
+# reads a busy claude pane as idle. The submit verdict no longer rests on it.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor

@@ -317,17 +317,108 @@ It reads tmux's own `#{pane_current_command}`, which reports the pane's live for
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
-## Submit acknowledgement: "landed" is empty (with one busy-queue exception)
+## Submit acknowledgement: "landed" is empty (with two busy-queue shapes)
 
 The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) types the message once, then retries Enter (Enter only, never a retype) until the composer clears.
 The submit is reported `empty` iff the composer cleared, which is the same corrected, border-aware detector the composer guard uses, so a bordered-but-empty composer is correctly seen as the positive acknowledgement of a delivered submit.
 A genuine swallowed Enter leaves the typed text in the composer and the function reports `pending`; `fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
 
-**Exception (opencode 1.18.4, on the tmux backend):** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
+A harness that accepts a mid-turn Enter and queues it has not swallowed anything, so it must never be reported as a swallow.
+
+**Shape one, opencode 1.18.4:** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
 After the Enter-retry budget is spent and the composer still reads `pending`, the submit core falls back to `fm_pane_is_busy`:
 a busy pane means the harness accepted and queued the Enter (reported as `empty`, so the caller does not re-send), and an idle pane keeps `pending` as a genuine swallow.
-This is the only place that exception lives; the herdr adapter observes the same opencode behavior but needs a separate fix (see the opencode note in [harness-adapters](../.agents/skills/harness-adapters/SKILL.md) and the opencode-busy gap recorded in [herdr-backend.md](herdr-backend.md)).
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four scenarios (busy pane + pending composer -> `empty`, idle pane + pending composer -> `pending`, busy pane + cleared composer -> `empty`, idle pane + cleared composer -> `empty`).
+That fallback lives only in `fm_tmux_submit_enter_core`; the herdr adapter observes the same opencode behavior but needs a separate fix (see the opencode note in [harness-adapters](../.agents/skills/harness-adapters/SKILL.md) and the opencode-busy gap recorded in [herdr-backend.md](herdr-backend.md)).
+
+**Shape two, claude:** claude clears the composer and replaces it with its own acknowledgement row, `❯ Press up to edit queued messages`.
+It also prints no busy text, so the shape-one fallback cannot rescue it.
+The acknowledgement is therefore read as "no unsubmitted text on this row" by the shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`), which every backend adapter delegates to, so the verdict is `empty` on the first read and no Enter retry is spent.
+
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios, plus claude queued -> `empty` with no busy footer and claude idle-holding-the-steer -> `pending`) and `tests/fm-composer-lib.test.sh` (the acknowledgement row reads `empty` bordered and bare, and stays anchored so a steer that merely quotes the phrase is still `pending`).
+
+### Measurement: claude 2.1.268 queues mid-turn Enter and shows no busy text (2026-09-10)
+
+<!-- fm-authority: firstmate-observation 2026-09-10 - the reported symptom this measurement answers, observed in another home and not reproducible from this checkout -->
+Reported twice on 2026-09-10, in both directions: `fm-send` exited non-zero with "Enter swallowed, text left in composer" for a `/no-mistakes` trigger a busy claude worker had in fact accepted, inviting the caller to re-send and run the instruction twice.
+
+Measured on macOS (Darwin 25.5.0), tmux 3.7b, Claude Code 2.1.268, in a throwaway tmux server on its own socket:
+
+```sh
+$ tmux -S "$TMUX_SOCK" new-session -d -s m -x 200 -y 50 'zsh -l'
+$ tmux -S "$TMUX_SOCK" send-keys -t m -l "cd $PROJ && CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions"
+$ tmux -S "$TMUX_SOCK" send-keys -t m Enter
+```
+
+**The busy signature is gone.** With a long reply streaming, `esc to interrupt` appears nowhere in the pane:
+
+```sh
+$ tmux -S "$TMUX_SOCK" capture-pane -p -t m -S -200 | grep -ciE 'esc (to )?interrupt'
+0
+```
+
+Zero across 80 full-pane samples taken through several complete turns, with and without this session's own `CLAUDECODE` variables inherited, so it is not a nested-session artifact.
+Claude still draws a spinner while it runs a tool, but that spinner carries no interrupt hint:
+
+```sh
+$ for f in "$SPIN"/*.txt; do sed -n '40,48p' "$f"; done | grep -v '^[[:space:]]*$' | sort -u
+...
+✶ Tinkering…
+· Tinkering… (3s · ↓ 25 tokens)
+✳ Tinkering… (3s · ↓ 33 tokens)
+✽ Tinkering… (4s · ↓ 38 tokens)
+✢ Tinkering… (5s · ↓ 38 tokens)
+✻ Crunched for 10s · done 11:34 PM
+```
+
+The same sample set carries that last row, a COMPLETED turn, in the same shape as the live ones, so the rotating status word cannot be matched either.
+While claude streams a reply rather than running a tool there is no spinner row at all: the equivalent sample set over a streaming turn holds reply text and composer rows only.
+
+No tail regex can classify a busy claude pane from this, so `fm_pane_is_busy` reports a busy claude pane as idle and the shape-one fallback is unreachable.
+Nothing in `FM_TMUX_BUSY_REGEX_DEFAULT` or `fm-watch.sh`'s `BUSY_REGEX` was changed to guess at one; both record the gap instead.
+
+**The queued acknowledgement.** With a reply streaming, sending a line and one Enter queues it and rewrites the composer row, identically at queue depth 1, 2 and 3:
+
+```sh
+$ tmux -S "$TMUX_SOCK" capture-pane -p -t m -S 46 -E 46
+❯ Press up to edit queued messages
+$ tmux -S "$TMUX_SOCK" capture-pane -p -t m -S -60 | grep -cE '❯ /no-mistakes'
+1
+```
+
+**Why it was reported as a swallow.** The row's styling decides it.
+Where claude renders the placeholder dim, `fm_composer_strip_ghost` removes it and the row already read `empty`:
+
+```sh
+$ tmux -S "$TMUX_SOCK" capture-pane -e -p -t m -S 46 -E 46 | sed -e 's/\x1b/<ESC>/g'
+<ESC>[38;5;246m❯ <ESC>[2m<ESC>[39mPress up to edit queued messages<ESC>[0m
+```
+
+Where it does not (reproduced locally by launching the same claude with `NO_COLOR=1`), there is nothing to strip, the whole phrase survives as apparent typed text, and the pre-fix verdict was the reported false swallow:
+
+```sh
+$ . bin/fm-tmux-lib.sh; fm_tmux_submit_core m:nocolor "/no-mistakes" 3 0.4 1.2
+pending
+```
+
+The guest pane that produced the two reports was not itself probed (no live steer was permitted to it), so its exact styling is unmeasured; `NO_COLOR=1` is a local reproduction of the unstyled condition, not a claim about that pane's cause.
+Reading the acknowledgement by its text removes the dependence on styling altogether.
+Re-run after the fix, on a pane still streaming and still reporting no busy footer:
+
+```sh
+$ . bin/fm-tmux-lib.sh; fm_tmux_submit_core m:nocolor "/no-mistakes" 3 0.4 1.2
+empty
+$ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S -60 | grep -cE '❯ /no-mistakes'
+1
+```
+
+An idle pane genuinely holding unsubmitted text still reports the swallow, verified on the same live pane:
+
+```sh
+$ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S 46 -E 46
+❯ /no-mistakes fix findings 1 and 3
+$ . bin/fm-tmux-lib.sh; fm_tmux_composer_state m:nocolor
+pending
+```
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
