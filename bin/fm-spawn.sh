@@ -442,8 +442,11 @@ spawn_abort_cleanup() {
   # could not read them.
   if [ "$SBX_ABORT_CLEANUP" = 1 ]; then
     SBX_ABORT_CLEANUP=0
-    echo "error: removing sandbox $W: this spawn created it, nothing was launched in it, and a running sandbox with no agent would report a healthy secondmate forever" >&2
-    fm_backend_kill sbx "$W" || true
+    if sbx rm --force "$W"; then
+      echo "error: removed sandbox $W after failed spawn" >&2
+    else
+      echo "error: failed to remove sandbox $W; remove it with 'sbx rm --force $W' before retrying the spawn" >&2
+    fi
     spawn_restore_prespawn_meta
   fi
   # Separate guard, because the bridge can outlive the sandbox claim: a create
@@ -1762,7 +1765,7 @@ if [ "$BACKEND" = sbx ]; then
   # plants the shell-profile env snippet owned by "Guest shell-profile env".
   if [ -n "$SBX_RESTORE_ARCHIVE" ]; then
     sbx exec "$W" -- tar -C "$PROJ_ABS" -xzf "$SBX_RESTORE_ARCHIVE" || {
-      echo "error: failed to restore private records in sandbox $W; agent launch refused. The verified archive is untouched at $SBX_RESTORE_ARCHIVE - the sandbox and this spawn's task record are removed, so a corrected respawn can restore from it" >&2
+      echo "error: failed to restore private records in sandbox $W; agent launch refused. The verified archive is preserved at $SBX_RESTORE_ARCHIVE" >&2
       exit 1
     }
   fi
