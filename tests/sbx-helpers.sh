@@ -64,6 +64,16 @@
 #   FM_FAKE_SBX_SOURCE_RC    exit code for the spawn-time source-mount probe
 #                            (`exec ... test -r <mount>/AGENTS.md`; default 0 =
 #                            the clone-mode RO mount is where sbx puts it)
+#   FM_FAKE_SBX_TMUX_PROBE_RC
+#                            exit code for the spawn-time in-guest tmux probe
+#                            (`exec ... sh -c 'command -v tmux ...'`; default
+#                            0 = the template ships tmux). Non-zero poses the
+#                            stock agent image, whose refusal lands with the
+#                            sandbox already running.
+#   FM_FAKE_SBX_NEW_SESSION_RC
+#                            exit code for `exec ... tmux new-session` (default
+#                            0). Non-zero poses the last post-create refusal,
+#                            where the VM is up and its guest session is not.
 #   FM_FAKE_SBX_PROVISION_RC non-zero fails the guest-home provisioning exec
 #                            (the `sh -c` pass carrying `ln -sfn`) instead of
 #                            executing it
@@ -206,6 +216,7 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_TMUX_HAS_RC:-0}"
         ;;
       "tmux new-session"*)
+        [ "${FM_FAKE_SBX_NEW_SESSION_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_NEW_SESSION_RC}"
         inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
         printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
         rm -f "$fake_state.stopped-$sandbox"
@@ -308,6 +319,11 @@ case "$cmd" in
       "test -r "*)
         # fm_backend_sbx_create_task's source-mount probe.
         exit "${FM_FAKE_SBX_SOURCE_RC:-0}"
+        ;;
+      "sh -c command -v tmux"*)
+        # fm_backend_sbx_create_task's in-guest tmux probe. Without this arm
+        # the catch-all below answers 0, so the refusal could never be driven.
+        exit "${FM_FAKE_SBX_TMUX_PROBE_RC:-0}"
         ;;
       "sh -c "*"fm-keepalive"*)
         # The keep-alive's guest activity loop (fm_backend_sbx_keepalive):
