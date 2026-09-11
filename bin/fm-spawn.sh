@@ -1949,37 +1949,36 @@ spawn_deliver_launch() {
 # question eats the leading characters, while a pane with nothing reading its
 # input echoes the whole line and runs none of it
 # (docs/spawn-launch-delivery.md).
-spawn_launch_failed() {  # <exit-status-to-use>
-  local tail_text
-  echo "error: $ID launch command was not delivered to its pane after $FM_SPAWN_LAUNCH_TRIES attempts; $META_WINDOW either has a shell consuming typed input (an unanswered startup question does this) or nothing reading its input at all. Nothing was launched and the task is NOT recorded as started. Inspect that window and spawn again. Worktree $WT is still held for $ID" >&2
-  # Show what the pane is actually displaying. Whatever swallowed the command is
-  # almost always still on screen, and quoting it here saves the operator from
-  # having to reach a pane that may be on another machine entirely.
-  tail_text=$(fm_backend_capture "$BACKEND" "$SEND_TARGET" 30 2>/dev/null | tail -20) || tail_text=
-  if [ -n "$tail_text" ]; then
-    echo "--- last lines of $META_WINDOW ---" >&2
-    printf '%s\n' "$tail_text" >&2
-    echo "--- end ---" >&2
-  fi
-  spawn_restore_prespawn_meta
-  exit "$1"
-}
-
-spawn_deliver_launch || {
-  spawn_deliver_status=$?
-  if [ "$spawn_deliver_status" -eq 1 ]; then
-    if [ "$BACKEND" = sbx ] && spawn_launch_delivered; then
-      SBX_ABORT_CLEANUP=0
-      SBX_ABORT_SIGNALS=
-      echo "error: $ID launch send to $META_WINDOW failed, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
-      exit 1
+spawn_launch_failed() {  # <delivery-status>
+  local delivery_status=$1 tail_text failure_kind=send
+  if [ "$delivery_status" -ne 1 ]; then
+    failure_kind=delivery
+    # Show what the pane is actually displaying. Whatever swallowed the command is
+    # almost always still on screen, and quoting it here saves the operator from
+    # having to reach a pane that may be on another machine entirely.
+    tail_text=$(fm_backend_capture "$BACKEND" "$SEND_TARGET" 30 2>/dev/null | tail -20) || tail_text=
+    if [ -n "$tail_text" ]; then
+      echo "--- last lines of $META_WINDOW ---" >&2
+      printf '%s\n' "$tail_text" >&2
+      echo "--- end ---" >&2
     fi
-    echo "error: $ID launch could not be sent to $META_WINDOW at all; the runtime refused the send. The task is NOT recorded as started, and worktree $WT is still held for $ID" >&2
-    spawn_restore_prespawn_meta
+  fi
+  if [ "$BACKEND" = sbx ] && spawn_launch_delivered; then
+    SBX_ABORT_CLEANUP=0
+    SBX_ABORT_SIGNALS=
+    echo "error: $ID launch $failure_kind to $META_WINDOW failed, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
     exit 1
   fi
-  spawn_launch_failed 1
+  if [ "$delivery_status" -eq 1 ]; then
+    echo "error: $ID launch could not be sent to $META_WINDOW at all; the runtime refused the send. The task is NOT recorded as started, and worktree $WT is still held for $ID" >&2
+  else
+    echo "error: $ID launch command was not delivered to its pane after $FM_SPAWN_LAUNCH_TRIES attempts; $META_WINDOW either has a shell consuming typed input (an unanswered startup question does this) or nothing reading its input at all. Nothing was launched and the task is NOT recorded as started. Inspect that window and spawn again. Worktree $WT is still held for $ID" >&2
+  fi
+  spawn_restore_prespawn_meta
+  exit 1
 }
+
+spawn_deliver_launch || spawn_launch_failed "$?"
 # The projection's ordering lock is held across the WHOLE launch handoff, which
 # is not over until the launch is confirmed: releasing at the send would let a
 # concurrent projected spawn interleave its own create and cleanup with this

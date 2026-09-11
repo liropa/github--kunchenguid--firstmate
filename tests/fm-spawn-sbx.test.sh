@@ -1287,17 +1287,22 @@ test_delivered_launch_disarms_the_abort_cleanup() {
   pass "spawn: a delivered launch disarms the abort cleanup"
 }
 
-test_send_failure_checks_the_launch_nonce_before_cleanup() {
-  local w fb out rc case_name nonce_mode
+test_delivery_failure_checks_the_launch_nonce_before_cleanup() {
+  local failure_mode=$1 w fb out rc case_name nonce_mode ack_event enter_rc failure_kind
+  case "$failure_mode" in
+    send) ack_event=enter; enter_rc=23; failure_kind=send ;;
+    timeout-state) ack_event=state; enter_rc=0; failure_kind=delivery ;;
+    timeout-capture) ack_event=capture; enter_rc=0; failure_kind=delivery ;;
+  esac
   for case_name in matching-fresh matching-respawn missing mismatched; do
-    w=$(new_world "send-failure-$case_name"); fb=$(make_fake_sbx "$w")
+    w=$(new_world "$failure_mode-$case_name"); fb=$(make_fake_sbx "$w")
     mkdir -p "$w/guest-writes"
     nonce_mode=${case_name%%-*}
     if [ "$case_name" = matching-respawn ]; then
       fm_write_meta "$w/home/state/smx.meta" \
         "window=previous-window" "project=$w/sm" "harness=claude" "kind=secondmate"
     fi
-    cat > "$w/ack-on-enter" <<'SH'
+    cat > "$w/deferred-ack" <<'SH'
 #!/usr/bin/env bash
 set -eu
 for arg in "$@"; do
@@ -1308,49 +1313,59 @@ for arg in "$@"; do
       ;;
   esac
 done
+event=
 case "$*" in
   *" -- tmux send-keys "*" Enter")
-    [ -f "$FM_TEST_LAUNCH_BUFFER" ] || exit 0
-    case "$FM_TEST_NONCE_MODE" in
-      matching)
-        "$FM_TEST_ACK_SCRIPT" "$(cat "$FM_TEST_LAUNCH_BUFFER")"
-        cp "$FM_TEST_SENTINEL" "$FM_TEST_NONCE_WITNESS"
-        ;;
-      mismatched)
-        printf 'wrong-launch-nonce\n' > "$FM_TEST_SENTINEL"
-        ;;
-    esac
+    : > "$FM_TEST_LAUNCH_BUFFER.entered"
+    event=enter
+    ;;
+  'ls --json') event=state ;;
+  *" -- tmux capture-pane "*) event=capture ;;
+esac
+[ "$event" = "$FM_TEST_ACK_EVENT" ] || exit 0
+[ -f "$FM_TEST_LAUNCH_BUFFER" ] && [ -f "$FM_TEST_LAUNCH_BUFFER.entered" ] || exit 0
+case "$FM_TEST_NONCE_MODE" in
+  matching)
+    "$FM_TEST_ACK_SCRIPT" "$(cat "$FM_TEST_LAUNCH_BUFFER")"
+    cp "$FM_TEST_SENTINEL" "$FM_TEST_NONCE_WITNESS"
+    ;;
+  mismatched)
+    printf 'wrong-launch-nonce\n' > "$FM_TEST_SENTINEL"
     ;;
 esac
 SH
-    chmod +x "$w/ack-on-enter"
+    chmod +x "$w/deferred-ack"
     rc=0
 
-    out=$(FM_TEST_LAUNCH_ACK="$w/ack-on-enter" FM_TEST_ACK_SCRIPT="$ROOT/tests/fake-launch-ack.sh" \
+    out=$(FM_TEST_LAUNCH_ACK="$w/deferred-ack" FM_TEST_ACK_SCRIPT="$ROOT/tests/fake-launch-ack.sh" \
       FM_TEST_LAUNCH_BUFFER="$w/launch-buffer" FM_TEST_SENTINEL="$w/signals/smx/smx.launched" \
       FM_TEST_NONCE_MODE="$nonce_mode" FM_TEST_NONCE_WITNESS="$w/nonce-received" \
-      FM_FAKE_SBX_ENTER_RC=23 \
+      FM_TEST_ACK_EVENT="$ack_event" FM_FAKE_SBX_ENTER_RC="$enter_rc" \
+      FM_SPAWN_LAUNCH_WAIT=0 FM_SPAWN_LAUNCH_TRIES=1 \
       run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
 
-    [ "$rc" -eq 1 ] || fail "a failed send reply must still fail the spawn: $out"
-    [ "$(cat "$w/sbx.log.enter-count")" = 1 ] || fail "a failed send reply must not cause another Enter"
-    assert_not_contains "$out" "spawned smx" "a failed send reply must not report success"
+    [ "$rc" -eq 1 ] || fail "a $failure_mode failure must still fail the spawn: $out"
+    [ "$(cat "$w/sbx.log.enter-count")" = 1 ] || fail "a $failure_mode failure must not cause another Enter"
+    assert_not_contains "$out" "spawned smx" "a $failure_mode failure must not report success"
+    if [ "$failure_mode" != send ]; then
+      assert_contains "$(cat "$w/sbx.log")" "tmux capture-pane" "timeout diagnostics must read the guest pane"
+    fi
     if [ "$nonce_mode" = matching ]; then
-      assert_present "$w/nonce-received" "the guest must receive the launch before the send reply fails"
-      assert_not_contains "$(cat "$w/sbx.log")" "rm --force" "confirmed delivery must preserve the sandbox after a send failure"
+      assert_present "$w/nonce-received" "the guest must write the launch nonce during $ack_event"
+      assert_not_contains "$(cat "$w/sbx.log")" "rm --force" "confirmed delivery must preserve the sandbox after $failure_mode"
       cmp -s "$w/nonce-received" "$w/signals/smx/smx.launched" \
         || fail "confirmed delivery must preserve the signal bridge and its nonce"
       assert_grep 'window=sbx:fm-smx' "$w/home/state/smx.meta" \
         "confirmed delivery must preserve the new task record without rollback"
-      assert_contains "$out" "launch send to sbx:fm-smx failed" "the send failure must still be reported"
+      assert_contains "$out" "launch $failure_kind to sbx:fm-smx failed" "the delivery failure must still be reported"
       assert_contains "$out" "launch nonce confirms delivery" "the error must explain why the sandbox is preserved"
       assert_not_contains "$out" "NOT recorded as started" "the error must not claim metadata rollback"
     else
-      assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" "an unconfirmed failed send must remove its sandbox"
-      assert_absent "$w/signals/smx" "an unconfirmed failed send must remove its new signal bridge"
-      assert_absent "$w/home/state/smx.meta" "an unconfirmed failed send must remove its new task record"
+      assert_contains "$(cat "$w/sbx.log")" "rm --force fm-smx" "an unconfirmed $failure_mode failure must remove its sandbox"
+      assert_absent "$w/signals/smx" "an unconfirmed $failure_mode failure must remove its new signal bridge"
+      assert_absent "$w/home/state/smx.meta" "an unconfirmed $failure_mode failure must remove its new task record"
     fi
-    pass "spawn: a $case_name nonce determines cleanup after a failed send reply"
+    pass "spawn: a $case_name nonce determines cleanup after $failure_mode"
   done
 }
 
@@ -1420,7 +1435,9 @@ test_abort_preserves_records_the_spawn_did_not_create
 test_failed_restore_leaves_no_record_of_a_started_secondmate
 test_abort_keeps_a_bridge_that_absorbed_host_history
 test_delivered_launch_disarms_the_abort_cleanup
-test_send_failure_checks_the_launch_nonce_before_cleanup
+test_delivery_failure_checks_the_launch_nonce_before_cleanup send
+test_delivery_failure_checks_the_launch_nonce_before_cleanup timeout-state
+test_delivery_failure_checks_the_launch_nonce_before_cleanup timeout-capture
 test_undelivered_launch_removes_the_sandbox_it_created
 
 echo "# all fm-spawn-sbx tests passed"
