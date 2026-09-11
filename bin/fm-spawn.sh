@@ -1618,7 +1618,7 @@ fi
   # spawn_emit_pr_identity owns why: any ordinary field after pr= invalidates the
   # whole record for bin/fm-pr-lib.sh and silently disarms this task's merge poll.
   spawn_emit_pr_identity
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 if [ "$BACKEND" = sbx ]; then
