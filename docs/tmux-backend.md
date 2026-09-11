@@ -333,6 +333,7 @@ That fallback lives only in `fm_tmux_submit_enter_core`; the herdr adapter obser
 **Shape two, claude:** claude clears the composer and replaces it with its own acknowledgement row, `❯ Press up to edit queued messages`.
 It also prints no busy text, so the shape-one fallback cannot rescue it.
 The acknowledgement is therefore read as "no unsubmitted text on this row" by the shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`), which every backend adapter delegates to, so the verdict is `empty` on the first read and no Enter retry is spent.
+On tmux, this acknowledgement has an [accepted cursor-row limitation](#limitations) for human multiline drafts.
 
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios, plus claude queued -> `empty` with no busy footer and claude idle-holding-the-steer -> `pending`) and `tests/fm-composer-lib.test.sh` (the acknowledgement row reads `empty` bordered and bare, and stays anchored so a steer that merely quotes the phrase is still `pending`).
 
@@ -555,7 +556,16 @@ Both are fixture-driven; no live-host run was taken for this change, so the sand
 
 ## Limitations
 
-The reference path is fully verified, with two probe-specific limitations:
+The reference path has these probe and composer limitations:
 
 - The agent-liveness probe cannot confidently classify `pi`'s generic `node` process name; see [Known gap: `pi` cannot be confidently classified](#known-gap-pi-cannot-be-confidently-classified).
 - The transport probe cannot distinguish a denied socket from an absent server, and reports both as no route; see [Transport reachability](#transport-reachability).
+
+<!-- fm-authority: captain-decision 2026-09-11 - review-r4-tmux-capture-scope accepts this limitation and retains single-row capture -->
+- **Accepted cursor-row acknowledgement limit (captain decision, 2026-09-11):** `fm_tmux_composer_state` reads only the cursor row.
+  If a human types exactly `Press up to edit queued messages` as the cursor line of a multiline draft in a firstmate-launched worker pane, the captured line is indistinguishable from the harness's own acknowledgement row.
+  The draft therefore reads as delivered (`empty`) rather than `pending`.
+  With away mode active, the daemon can treat the pane as a safe injection target and submit the human's draft with the escalation.
+  The captain accepted this residual risk and retained single-row capture to avoid passing bulk pane content with escape sequences through the detector.
+  The separate tmux-only `cursor_y` row-selection gap is recorded under "Residual gap, tmux-only (unfixed)" in the grok section of [harness-adapters](../.agents/skills/harness-adapters/SKILL.md).
+<!-- /fm-authority -->
