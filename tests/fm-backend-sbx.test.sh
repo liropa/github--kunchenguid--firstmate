@@ -166,6 +166,47 @@ test_agent_alive_dispatcher_routes_sbx() {
   pass "fm_backend_agent_alive: routes sbx to the adapter"
 }
 
+# The pin is validated on shape alone - a nonzero integer plus one binary-unit
+# letter, the form `sbx create --help` documents - because the accepted RANGE
+# is sbx's own and a hard-coded ceiling here would refuse a value a later sbx
+# accepts. A malformed pin must refuse rather than reach `sbx create`.
+
+test_memory_pin_resolves_documented_sizes() {
+  local w fb out value
+  w=$(new_sbx_world memory-pin); fb=$(make_fake_sbx "$w")
+
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_memory_pin')
+  [ -z "$out" ] || fail "an unset FM_SBX_MEMORY must resolve to no pin, got '$out'"
+  # An EMPTY pin is not a pin: the liveness sweep passes FM_SBX_MEMORY="" for
+  # every meta with no recorded cap, exactly as it does for the template.
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_memory_pin' FM_SBX_MEMORY=)
+  [ -z "$out" ] || fail "an empty FM_SBX_MEMORY must resolve exactly like an unset one, got '$out'"
+
+  for value in 2g 4096m 1024M 8G 512k 1t; do
+    out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_memory_pin' "FM_SBX_MEMORY=$value")
+    [ "$out" = "$value" ] || fail "$value is a documented binary-unit size and must resolve unchanged, got '$out'"
+  done
+
+  pass "fm_backend_sbx_memory_pin: unset and empty mean no cap, binary-unit sizes pass through verbatim"
+}
+
+test_memory_pin_refuses_unusable_values() {
+  local w fb out rc value
+  w=$(new_sbx_world memory-refuse); fb=$(make_fake_sbx "$w")
+
+  # 2gb: a plausible spelling sbx does not document. 8: no unit, so which unit
+  # sbx would assume is guesswork. 0g: shape-valid but not a usable cap.
+  for value in 2gb 8 0g g -2g '2 g' 2g$'\n'evil; do
+    rc=0
+    out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_memory_pin' "FM_SBX_MEMORY=$value" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "'$value' is not a usable sbx memory limit and must be refused, got '$out'"
+    assert_contains "$out" "is not a usable sbx memory limit" \
+      "the refusal should name the problem, not just fail"
+  done
+
+  pass "fm_backend_sbx_memory_pin: an undocumented, unitless, zero, or line-bearing value refuses"
+}
+
 # --- agent flavor vs driver harness (docs/sbx-backend.md) -------------------
 #
 # The sandbox's agent FLAVOR decides which vendor credential the guest can
@@ -3567,6 +3608,8 @@ fi
 test_state_probe_classifies
 test_agent_alive_matrix
 test_agent_alive_dispatcher_routes_sbx
+test_memory_pin_resolves_documented_sizes
+test_memory_pin_refuses_unusable_values
 test_agent_flavor_defaults_to_the_driver
 test_agent_flavor_pin_is_independent_of_the_driver
 test_agent_flavor_refuses_pairings_it_cannot_serve

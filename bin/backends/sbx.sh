@@ -1466,19 +1466,62 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
 
 # --- provisioning (fm-spawn.sh's sbx branch) ---------------------------------
 
+# fm_backend_sbx_memory_pin: print the validated `sbx create -m` value for this
+# spawn, or nothing when FM_SBX_MEMORY is unset or empty. Empty is today's
+# behavior: no flag, so the guest keeps sbx's own default of 50% of host
+# memory (docs/sbx-backend.md "Guest memory cap" owns why a cap is worth
+# setting). Shape only - a positive integer plus one binary-unit letter, the
+# form `sbx create --help` documents ("1024m, 8g") - because the accepted
+# RANGE is sbx's to own and hard-coding its 32 GiB ceiling here would refuse a
+# value a later sbx accepts. A malformed value refuses at the top of create,
+# before any sandbox exists, rather than letting `sbx create` fail after the
+# signal directory and guest state are already half-built.
+fm_backend_sbx_memory_pin() {
+  local mem=${FM_SBX_MEMORY:-}
+  [ -n "$mem" ] || return 0
+  if ! fm_backend_sbx_memory_valid "$mem"; then
+    echo "error: FM_SBX_MEMORY='$mem' is not a usable sbx memory limit; use a binary-unit size such as 2g or 4096m (a nonzero integer followed by one of b k m g t), or unset it to keep sbx's default of 50% of host memory" >&2
+    return 1
+  fi
+  printf '%s' "$mem"
+}
+
+# fm_backend_sbx_memory_valid: 0 when <s> is a nonzero integer followed by one
+# binary-unit letter. A bare number is refused deliberately: `sbx create
+# --help` documents the unit form, and an unsuffixed size would be guesswork
+# about which unit sbx assumes.
+fm_backend_sbx_memory_valid() {  # <s>
+  local digits=${1%?} unit
+  unit=${1#"$digits"}
+  case "$unit" in
+    [bkmgtBKMGT]) ;;
+    *) return 1 ;;
+  esac
+  case "$digits" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$digits" in
+    *[1-9]*) ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_sbx_create_task: create the secondmate's clone-mode sandbox with
 # the signal-bridge mount, verify the guest can host the stack, and start the
 # in-guest tmux session the launch lands in. The home must be a git checkout
 # (clone mode clones it into the VM at the SAME absolute path; only committed
 # files arrive - the brief copy and signal wiring are fm-spawn's job).
 # FM_SBX_TEMPLATE optionally pins a template image (stock agent images may
-# lack tmux, which is refused loudly here) and FM_SBX_AGENT optionally pins
-# the agent flavor independently of the driver harness (above). Resolution
-# runs FIRST so an unusable flavor/driver pairing refuses before any sandbox,
-# signal directory, or guest state exists.
+# lack tmux, which is refused loudly here), FM_SBX_AGENT optionally pins the
+# agent flavor independently of the driver harness (above), and FM_SBX_MEMORY
+# optionally caps the guest's memory. Resolution runs FIRST so an unusable
+# flavor/driver pairing, or a malformed memory cap, refuses before any
+# sandbox, signal directory, or guest state exists.
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
-  local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent gate_line gate_rc
+  local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent memory gate_line gate_rc
+  local -a create_args
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1
+  memory=$(fm_backend_sbx_memory_pin) || return 1
   # sbx clone mode refuses linked git worktrees outright ("--clone is not
   # supported when run from a Git worktree", verified live) - and secondmate
   # homes can be exactly that (treehouse-leased homes). Refuse first with the
@@ -1493,11 +1536,14 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
     return 1
   fi
   mkdir -p "$signals_dir" || return 1
-  if [ -n "${FM_SBX_TEMPLATE:-}" ]; then
-    sbx create --clone --name "$name" -t "$FM_SBX_TEMPLATE" "$agent" "$home_abs" "$signals_dir" >&2 || return 1
-  else
-    sbx create --clone --name "$name" "$agent" "$home_abs" "$signals_dir" >&2 || return 1
-  fi
+  # Built as a vector so each optional pin adds only its own flag: an unset
+  # pin leaves the argv byte-identical to the unpinned form it had before that
+  # pin existed.
+  create_args=(create --clone --name "$name")
+  [ -z "${FM_SBX_TEMPLATE:-}" ] || create_args+=(-t "$FM_SBX_TEMPLATE")
+  [ -z "$memory" ] || create_args+=(-m "$memory")
+  create_args+=("$agent" "$home_abs" "$signals_dir")
+  sbx "${create_args[@]}" >&2 || return 1
   # Right after create, prove the clone-mode RO source mount is where the
   # guest-home provisioning pass expects it: the path is an sbx
   # implementation detail, so version drift must be a loud refusal here, not

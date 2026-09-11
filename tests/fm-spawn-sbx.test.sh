@@ -374,6 +374,76 @@ test_untemplated_spawn_records_no_template_key() {
   pass "spawn: no FM_SBX_TEMPLATE means no sbx_template= meta key"
 }
 
+# sbx's own default is 50% of host memory, and the hypervisor never returns a
+# page the guest has touched, so an unbounded guest grows into the host's
+# budget for the rest of the fleet (measured 2026-09-10). FM_SBX_MEMORY caps
+# it at create; absent means the default, byte-for-byte the argv that shipped
+# before this knob existed.
+
+test_memory_pin_is_forwarded_and_recorded() {
+  local w fb out meta
+  w=$(new_world memory-pin); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(FM_SBX_MEMORY=2g run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "a memory-capped sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx -m 2g claude $w/sm $w/signals/smx" \
+    "sbx create should carry the requested cap as -m"
+  meta=$(cat "$w/home/state/smx.meta")
+  assert_contains "$meta" "sbx_memory=2g" \
+    "meta must record the cap so a respawn or recreate reproduces the same allocation"
+
+  pass "spawn: FM_SBX_MEMORY is forwarded to sbx create and recorded in meta"
+}
+
+test_memory_pin_rides_beside_the_template_pin() {
+  local w fb out
+  w=$(new_world memory-and-template); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(FM_SBX_TEMPLATE=adf-claude:v99 FM_SBX_MEMORY=4096m \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "a templated, memory-capped sbx secondmate spawn failed: $out"
+  assert_contains "$(cat "$w/sbx.log")" "create --clone --name fm-smx -t adf-claude:v99 -m 4096m claude $w/sm $w/signals/smx" \
+    "both pins must appear as their own flags, before the create positionals"
+
+  pass "spawn: a memory cap and a template pin compose into one create argv"
+}
+
+test_uncapped_spawn_passes_no_memory_flag() {
+  local w fb out
+  w=$(new_world no-memory-meta); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) \
+    || fail "an uncapped sbx secondmate spawn failed: $out"
+  assert_not_contains "$(cat "$w/sbx.log")" " -m " \
+    "with no cap the create argv must stay byte-identical to the pre-knob form"
+  assert_not_contains "$(cat "$w/home/state/smx.meta")" "sbx_memory=" \
+    "an uncapped spawn must not write an empty sbx_memory= key (meta shape stays stable)"
+
+  pass "spawn: no FM_SBX_MEMORY means no -m flag and no sbx_memory= meta key"
+}
+
+test_spawn_refuses_malformed_memory_before_create() {
+  local w fb out rc=0
+  w=$(new_world memory-refuse); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+
+  out=$(FM_SBX_MEMORY=2gb run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a malformed memory cap must be refused, not handed to sbx create"
+  assert_contains "$out" "FM_SBX_MEMORY='2gb'" \
+    "the refusal should name the offending value"
+  assert_contains "$out" "2g or 4096m" \
+    "the refusal should name the accepted form, so the operator can fix it without reading the source"
+  assert_not_contains "$(cat "$w/sbx.log")" "create" \
+    "the refusal must land before any sandbox is created"
+  [ ! -d "$w/signals/smx" ] || fail "the refusal must land before the signal directory is created"
+  [ ! -f "$w/home/state/smx.meta" ] || fail "a refused spawn must leave no task metadata behind"
+
+  pass "spawn: a malformed FM_SBX_MEMORY refuses before sbx create is reached"
+}
+
 # --- guest-home provisioning (design doc firstmate-sbx-guest-home-provisioning.md §4)
 
 test_spawn_provisions_guest_home() {
@@ -943,6 +1013,10 @@ test_default_spawn_creates_and_records_the_driver_flavor
 test_agent_flavor_pin_creates_and_records_the_pinned_flavor
 test_spawn_refuses_flavor_that_cannot_serve_the_driver
 test_untemplated_spawn_records_no_template_key
+test_memory_pin_is_forwarded_and_recorded
+test_memory_pin_rides_beside_the_template_pin
+test_uncapped_spawn_passes_no_memory_flag
+test_spawn_refuses_malformed_memory_before_create
 test_spawn_provisions_guest_home
 test_spawn_seeds_guest_shell_profile_env
 test_spawn_read_through_and_absence_semantics

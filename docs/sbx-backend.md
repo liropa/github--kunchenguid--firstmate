@@ -98,6 +98,30 @@ What the adapter does with that matrix:
 Verified against the fixtures in `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, and `tests/fm-secondmate-liveness.test.sh` for resolution, refusal, the meta record, and respawn re-entry.
 The credential matrix itself is the live measurement above; a codex-flavor sandbox driven by claude through firstmate's own spawn path was subsequently verified end to end by the retained gate-vendor proof below.
 
+## Guest memory cap (`FM_SBX_MEMORY`, measured 2026-09-10)
+
+`sbx create -m, --memory` takes a size in binary units and defaults, in sbx's own words, to "50% of host memory, max 32 GiB" (`sbx create --help`, sbx v0.35.0).
+Firstmate passed no memory flag until this knob existed, so every guest took that default.
+
+<!-- fm-authority: firstmate-observation 2026-09-10 - host-side VM measurement taken outside any checkout; the diff cannot support it -->
+Why a cap is worth setting, measured on a 16 GB host whose guest therefore got the 8 GB default:
+the VM's host-side `containerd-shim-nerdbox-v1` process showed 5.05 GB in Activity Monitor (1.4 GB resident by host `ps`; Activity Monitor's larger figure counts compressed and virtual pages) while the host was short enough of memory to kill firstmate's own background tasks twice in ninety minutes.
+Inside the guest, `free -m` reported 8063 MB total with 4.0 GB of it page cache, and `sysctl -w vm.drop_caches=3` released that cache (4019 -> 539 MB buff/cache) **without** the host shim's resident size falling (1.4 -> 1.6 GB ten seconds later).
+The hypervisor keeps every page the guest has ever touched, so freeing memory inside a guest never returns it to the host.
+Stopping the VM does return it, because the whole guest process tree dies with the stop - but the guest comes back under the same allocation and grows into it again, so the create-time cap is the only durable lever.
+<!-- /fm-authority -->
+
+- `FM_SBX_MEMORY` on a spawn is forwarded to `sbx create` as `-m <size>`.
+  Unset or empty is the previous behavior exactly: no flag, so sbx's own default applies and the create argv is unchanged.
+- The value is validated on **shape** before any sandbox exists - a nonzero integer followed by one binary-unit letter (`2g`, `4096m`), the form `sbx create --help` documents.
+  A malformed value refuses the spawn with a message naming the accepted form, rather than letting `sbx create` fail once the signal directory and guest state are half-built.
+  The accepted **range** stays sbx's own: firstmate does not re-encode the 32 GiB ceiling, so a later sbx that raises it needs no change here.
+- **The flag is honored at create only.** An existing guest keeps the allocation it was created with, so lowering a live secondmate's cap means recreating its VM ("Recreating a secondmate's VM" below).
+- The cap is recorded as `sbx_memory=` in task meta, so the liveness sweep's respawn and a manual recreate reproduce it instead of silently reverting to the default.
+  [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that meta field.
+
+Verified against the fixtures in `tests/fm-backend-sbx.test.sh` (shape resolution and refusal), `tests/fm-spawn-sbx.test.sh` (flag forwarded, absent when unpinned, malformed refused before create, meta recorded), and `tests/fm-secondmate-liveness.test.sh` (respawn re-entry).
+
 ## Agent liveness probe (`fm_backend_sbx_agent_alive`)
 
 Upstream three-valued contract (`bin/fm-backend.sh`; the session-start secondmate-liveness sweep acts only on a confident `dead`).
@@ -1312,7 +1336,7 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
 
 2. **Verify, remove the old VM, and spawn with restoration enabled.**
    Fill in the parent home, task ID, archive path, and new template.
-   This block preserves the recorded harness, agent flavor, model, effort, and signal bridge.
+   This block preserves the recorded harness, agent flavor, memory cap, model, effort, and signal bridge.
    It stops on any failure.
 
    ```sh
@@ -1332,6 +1356,9 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
    signals=$(fm_meta_get "$meta" sbx_signals_dir)
    harness=$(fm_meta_get "$meta" harness)
    agent=$(fm_meta_get "$meta" sbx_agent)
+   # Empty keeps sbx's own default allocation; put a size here to cap or
+   # re-cap the replacement VM ("Guest memory cap" above).
+   memory=$(fm_meta_get "$meta" sbx_memory)
    test -d "$home_path"
    test -n "$signals"
    test -n "$harness"
@@ -1348,7 +1375,7 @@ Read `<id>`, `home=` and `sbx_signals_dir=` from the parent home's `state/<id>.m
    (cd "$(dirname "$archive")" && shasum -a 256 -c home-private.tgz.sha256)
    test "$(fm_backend_sbx_state "fm-$task_id")" = stopped
    sbx rm --force "fm-$task_id"
-   FM_SBX_TEMPLATE="$new_template" FM_SBX_AGENT="$agent" \
+   FM_SBX_TEMPLATE="$new_template" FM_SBX_AGENT="$agent" FM_SBX_MEMORY="$memory" \
      FM_SBX_SIGNALS_ROOT="${signals%/*}" FM_SBX_RESTORE_PRIVATE="$archive" \
      bin/fm-spawn.sh "$task_id" "$home_path" --secondmate --backend sbx \
        "${profile[@]}"

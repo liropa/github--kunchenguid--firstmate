@@ -524,7 +524,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out recorded_template recorded_agent
+  local meta id window harness backend target verdict out recorded_template recorded_agent recorded_memory
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -556,7 +556,10 @@ secondmate_liveness_sweep() {
         # AGENT FLAVOR - a flavor change needs a full VM destroy and
         # recreate, so a respawn that silently reverted to the default map
         # would strand the guest without the vendor credential its work needs
-        # (docs/sbx-backend.md "Agent flavor vs driver harness"). The HARNESS
+        # (docs/sbx-backend.md "Agent flavor vs driver harness") - and so does
+        # the recorded MEMORY CAP, which sbx honors at create only: a respawn
+        # that dropped it would hand the replacement guest the default
+        # half-the-host allocation the cap exists to avoid. The HARNESS
         # is deliberately NOT pinned here: respawns re-resolve it through
         # config/secondmate-harness -> config/crew-harness -> own
         # (fm-secondmate-harness.test.sh's durable-mode contract); an
@@ -565,10 +568,12 @@ secondmate_liveness_sweep() {
         # serve - a loud refusal beats a guest that 401s on first use.
         recorded_template=$(fm_meta_get "$meta" sbx_template)
         recorded_agent=$(fm_meta_get "$meta" sbx_agent)
+        recorded_memory=$(fm_meta_get "$meta" sbx_memory)
         set -- "$id" --secondmate
         set -- "$@" --backend "$backend"
         if out=$(FM_SPAWN_NO_GUARD=1 FM_SBX_TEMPLATE="${recorded_template:-}" \
             FM_SBX_AGENT="${recorded_agent:-}" \
+            FM_SBX_MEMORY="${recorded_memory:-}" \
             "$FM_ROOT/bin/fm-spawn.sh" "$@" 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           :
