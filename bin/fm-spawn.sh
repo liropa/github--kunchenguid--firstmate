@@ -30,20 +30,20 @@
 #   state/<id>.turn-ended become host symlinks onto it); supported harnesses
 #   are claude and codex, and ship/scout sbx spawns are refused
 #   (docs/sbx-backend.md).
-#   An sbx spawn that fails, refuses, or is interrupted ANY time after its own
-#   `sbx create` destroys the sandbox again, and with it the signal directory
-#   and the task metadata THIS spawn wrote - never a bridge, archive, folded
-#   status history, or metadata record that was already there. The backend
-#   publishes each resource as it creates it and this script's EXIT trap reads
-#   that, so an interrupt mid-backend is covered too. The claim is released
-#   only once the launch nonce confirms an agent started, because a guest whose
-#   launch never landed is the same stranded VM: running, agentless, and read
-#   as `alive` by every liveness probe.
-#   FM_SBX_RESTORE_PRIVATE names a verified home-private.tgz on this secondmate's
-#   signal bridge. An sbx spawn checks its host-side sha256 sidecar before VM
-#   creation, then restores data/ and state/ into the new guest before provisioning
-#   and launch. A verification or extraction failure stops the spawn and removes
-#   the guest; the archive it could not read stays on the bridge.
+#   On sbx abort, the EXIT trap checks the launch nonce before removal or
+#   rollback; a match preserves the sandbox, bridge, and task metadata while
+#   the spawn still fails. Otherwise, cleanup attempts to remove only this
+#   spawn's sandbox, signal directory, and new task record, restoring prior
+#   metadata. Pre-existing bridges, archives, and folded history survive.
+#   The backend publishes ownership at creation so interrupts are covered.
+#   Confirmed launch releases ownership explicitly, so a later abort preserves
+#   the live sandbox even if its nonce file is gone.
+#   Every backend refuses before runtime creation if it cannot back up an
+#   existing regular task record.
+#   FM_SBX_RESTORE_PRIVATE names a home-private.tgz on the signal bridge.
+#   The host checks its sha256 sidecar before VM creation, then the guest
+#   extracts data/ and state/ before provisioning and launch. Failure stops
+#   the spawn; the archive stays on the bridge and its path is reported.
 #   A claude sbx spawn fail-soft reconciles ~/.claude.json to firstmate's
 #   intended workspace-trust shape (revoke the guest-wide grant sbx's own
 #   claude-flavor create writes, grant the roots a guest launches under);
@@ -111,8 +111,9 @@
 #   instead of leaking it. The launch is then submitted as ONE command line
 #   through the backend's own run-a-command primitive, and this script waits for
 #   the pane to write a nonce into state/<id>.launched (the signal-bridge mount
-#   for sbx) before it treats the task as started. An undelivered launch prints
-#   the pane's last lines, restores the pre-spawn metadata, and exits non-zero.
+#   for sbx) before it treats the task as started. Delivery failure exits
+#   non-zero; timeouts also print any captured pane tail. sbx cleanup follows
+#   the abort contract above; other backends restore the pre-spawn metadata.
 #   Tunable, with defaults that only ever need raising on a very slow pane:
 #     FM_SPAWN_LAUNCH_WAIT        seconds to wait for the nonce after each submit (20)
 #     FM_SPAWN_LAUNCH_TRIES       submissions before giving up (3)
@@ -357,9 +358,6 @@ parse_orca_worktree_result() {
   fi
 }
 
-# spawn_restore_prespawn_meta: undo this spawn's metadata write - put the
-# pre-spawn record back, or remove the one this spawn created where there was
-# none - so a failed spawn never leaves a record that reads as a started task.
 # Idempotent on purpose: an abort path and the EXIT trap can both reach it, and
 # the second call must not delete what the first one just restored.
 spawn_restore_prespawn_meta() {
@@ -1641,6 +1639,8 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Arm rollback before redirection can truncate a prior record, so an interrupt
+# during the write can still restore it.
 SPAWN_META_WRITTEN=1
 {
   echo "window=$META_WINDOW"

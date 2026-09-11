@@ -178,9 +178,8 @@ A failed private-record restore left a guest with the bare tmux session create m
 The second is the worse half: a running sandbox reads as `alive` (see "Agent liveness probe" above), so the session-start liveness sweep would never have respawned that guest and the home read as staffed forever.
 <!-- /fm-authority -->
 
-Both are cleaned up at the point they fail now.
-The two script headers own the mechanics.
-Regression coverage is the abort-cleanup group in `tests/fm-spawn-sbx.test.sh`, starting at `test_post_create_refusal_removes_what_the_spawn_created`.
+The [`bin/backends/sbx.sh`](../bin/backends/sbx.sh) and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) headers own creation ownership and abort cleanup.
+Regression coverage is the abort-cleanup group in [`tests/fm-spawn-sbx.test.sh`](../tests/fm-spawn-sbx.test.sh).
 
 ## Guest-home provisioning (read-through inheritance)
 
@@ -1007,7 +1006,7 @@ Verdicts, and the caller that acts on each:
 | same vendor (proven) | 1 | **REFUSES** | reports, delivers anyway | `GATE_VENDOR:` line |
 | indeterminate (no gate binary, unparseable report, failed exec, no recorded harness) | 2 | reports, proceeds | reports, delivers anyway | `GATE_VENDOR:` line |
 
-The refusal is scoped to a **proven match**, matching the tmux and source-mount refusals in the same function, whose comment already carries the reasoning: half-provisioned is worse than no sandbox, and create is the one point in the lifecycle where refusing strands no work.
+The create-time refusal and cleanup contract is owned by `fm_backend_sbx_create_task` in [`bin/backends/sbx.sh`](../bin/backends/sbx.sh) and the [`bin/fm-spawn.sh` header](../bin/fm-spawn.sh).
 Refusing an indeterminate reading instead would make firstmate an enforcer of what the guest image ships - the other half of this split - and would refuse guests carrying no gate at all, which have no gate that could review on the wrong vendor.
 It is never swallowed: the reason is printed at every call site, and the assertion re-runs at each later convergence point, so a guest that gains a gate afterwards is still caught.
 
