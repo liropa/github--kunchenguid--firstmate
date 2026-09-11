@@ -159,10 +159,9 @@ fm_composer_strip_ghost() {
   '
 }
 
-# A harness that accepts a mid-turn Enter replaces the composer content with
+# Claude accepts a mid-turn Enter and replaces the composer content with
 # its own "I took that line and will run it when this turn ends" text. That
-# is a POSITIVE delivery acknowledgement, not merely an idle row, so it is
-# tested fleet-wide rather than opted into per harness through <idle_re>.
+# is a POSITIVE delivery acknowledgement, not merely an idle row.
 # Without it a queued steer reads as real unsubmitted text, and
 # bin/fm-send.sh reports a swallowed Enter for a line the harness already
 # holds - inviting the caller to re-send and act twice. Verified 2026-09-10
@@ -205,8 +204,9 @@ fm_composer_idle_matches() {
   esac
 }
 
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [recorded-harness]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+  local harness=${6:-}
   plain_content=${5:-$content}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
@@ -229,7 +229,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Harness-authored queued acknowledgement: the typed line was accepted, so the
   # row holds no unsubmitted text (matched with the leading glyph still present).
-  if fm_composer_queued_matches "$content"; then
+  if [ "$harness" = claude ] && fm_composer_queued_matches "$content"; then
     printf 'empty'; return 0
   fi
   # Known idle placeholder (matched before a leading glyph is stripped).

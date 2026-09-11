@@ -1686,8 +1686,8 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+fm_backend_herdr_composer_state() {  # <target> [recorded-harness] -> empty|pending|unknown
+  local target=$1 harness=${2:-} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
@@ -1798,7 +1798,7 @@ EOF
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE" sensitive '' "$harness"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -1862,8 +1862,9 @@ EOF
 # already branches on for tmux ("empty" means "confirmed submitted" for every
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local harness=${7:-}
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -1877,7 +1878,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$harness")
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;

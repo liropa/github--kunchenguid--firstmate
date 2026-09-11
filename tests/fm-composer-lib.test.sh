@@ -132,7 +132,7 @@ test_queued_acknowledgement_is_empty() {
   for bordered in 0 1; do
     for prefix in '' '❯ ' '› ' $'❯\t' $'›\t'; do
       for padding in '' $' \t'; do
-        out=$(classify "$bordered" "${padding}${prefix}Press up to edit queued messages${padding}")
+        out=$(classify "$bordered" "${padding}${prefix}Press up to edit queued messages${padding}" '' sensitive '' claude)
         [ "$out" = empty ] \
           || fail "queued acknowledgement (bordered=$bordered, prefix='$prefix', padding='$padding') should read empty, got '$out'"
       done
@@ -145,11 +145,11 @@ test_queued_acknowledgement_does_not_swallow_real_text() {
   local out bordered prefix
   # Only the harness's own whole row acknowledges a queue; a steer that merely
   # mentions it is still unsubmitted text the caller must not consider sent.
-  out=$(classify 0 '❯ tell them to Press up to edit queued messages later')
+  out=$(classify 0 '❯ tell them to Press up to edit queued messages later' '' sensitive '' claude)
   [ "$out" = pending ] || fail "text past the acknowledgement should stay pending, got '$out'"
   for bordered in 0 1; do
     for prefix in '' '❯ ' '› '; do
-      out=$(classify "$bordered" "${prefix}explain Press up to edit queued messages")
+      out=$(classify "$bordered" "${prefix}explain Press up to edit queued messages" '' sensitive '' claude)
       [ "$out" = pending ] \
         || fail "text before the acknowledgement (bordered=$bordered, prefix='$prefix') should stay pending, got '$out'"
     done
@@ -162,15 +162,32 @@ test_queued_acknowledgement_in_multiline_draft_is_pending() {
   for bordered in 0 1; do
     for content in \
       $'Explain this hint:\nPress up to edit queued messages' \
+      $'Explain this hint:\n❯ Press up to edit queued messages' \
       $'Press up to edit queued messages\nExplain this hint:' \
       $'❯ Press up to edit queued messages\nExplain this hint:' \
       $'Press up to edit queued messages\nPress up to edit queued messages'; do
-      out=$(classify "$bordered" "$content")
+      out=$(classify "$bordered" "$content" '' sensitive '' claude)
       [ "$out" = pending ] \
         || fail "a multiline draft containing the acknowledgement (bordered=$bordered) should stay pending, got '$out'"
     done
   done
   pass "fm_composer_classify_content: a queued phrase within a multiline draft stays pending"
+}
+
+test_queued_phrase_requires_recorded_claude_harness() {
+  local out bordered harness prefix
+  for bordered in 0 1; do
+    for prefix in '' '❯ ' '› '; do
+      for harness in pi codex grok opencode unknown ''; do
+        out=$(classify "$bordered" "${prefix}Press up to edit queued messages" '' sensitive '' "$harness")
+        [ "$out" = pending ] \
+          || fail "queued phrase on harness '$harness' (bordered=$bordered) should stay pending, got '$out'"
+      done
+      out=$(classify "$bordered" "${prefix}Press up to edit queued messages")
+      [ "$out" = pending ] || fail "queued phrase without a harness should stay pending, got '$out'"
+    done
+  done
+  pass "fm_composer_classify_content: only recorded claude panes accept the queued phrase"
 }
 
 test_bare_shell_glyphs_are_unknown
@@ -185,3 +202,4 @@ test_real_text_is_pending
 test_queued_acknowledgement_is_empty
 test_queued_acknowledgement_does_not_swallow_real_text
 test_queued_acknowledgement_in_multiline_draft_is_pending
+test_queued_phrase_requires_recorded_claude_harness

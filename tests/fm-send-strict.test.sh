@@ -50,6 +50,9 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    for arg in "$@"; do
+      case "$arg" in *cursor_y*) printf '0\n'; exit 0 ;; esac
+    done
     target=
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -63,7 +66,7 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '\xe2\x94\x82 \xe2\x94\x82\n'
+    printf '%s\n' "${FM_FAKE_COMPOSER_ROW:-│ │}"
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -176,9 +179,36 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_queued_acknowledgement_uses_recorded_harness() {
+  local dir fb home err log rc harness target
+  for harness in claude pi codex unknown unset unrecorded; do
+    dir="$TMP_ROOT/queued-$harness"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); home=$(setup_home "queued-$harness"); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+    target=queued
+    if [ "$harness" = unrecorded ]; then
+      target=sess:fm-queued
+    else
+      fm_write_meta "$home/state/queued.meta" "window=sess:fm-queued" "kind=ship"
+      [ "$harness" = unset ] || printf 'harness=%s\n' "$harness" >> "$home/state/queued.meta"
+    fi
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_TMUX_LOG="$log" FM_FAKE_COMPOSER_ROW='❯ Press up to edit queued messages' \
+      FM_SEND_SETTLE=0 FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
+      "$SEND" "$target" 'test queued delivery' >/dev/null 2>"$err"; rc=$?
+    if [ "$harness" = claude ]; then
+      expect_code 0 "$rc" "recorded claude queued acknowledgement should confirm delivery"
+    else
+      [ "$rc" -ne 0 ] || fail "queued phrase on '$harness' should not confirm delivery"
+      assert_contains "$(cat "$err")" 'Enter swallowed' "non-claude or unknown pane should retain the pending verdict"
+    fi
+  done
+  pass "fm-send: queued acknowledgement confirms delivery only for recorded claude targets"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_queued_acknowledgement_uses_recorded_harness

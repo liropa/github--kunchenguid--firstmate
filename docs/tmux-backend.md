@@ -332,10 +332,15 @@ That fallback lives only in `fm_tmux_submit_enter_core`; the herdr adapter obser
 
 **Shape two, claude:** claude clears the composer and replaces it with its own acknowledgement row, `❯ Press up to edit queued messages`.
 It also prints no busy text, so the shape-one fallback cannot rescue it.
-The acknowledgement is therefore read as "no unsubmitted text on this row" by the shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`), which every backend adapter delegates to, so the verdict is `empty` on the first read and no Enter retry is spent.
-On tmux, this acknowledgement has an [accepted cursor-row limitation](#limitations) for human multiline drafts.
+The shared classifier `fm_composer_classify_content` (`bin/fm-composer-lib.sh`) reads the acknowledgement as `empty` only for a pane whose recorded harness is `claude`, on any adapter that uses this classifier.
+Backend dispatch reads `harness=` from this home's task metadata for the matching backend and endpoint, then passes it through the adapter to the classifier.
+Other, unknown, and unset harnesses retain the previous verdict, so this phrase stays `pending` instead of authorizing injection.
+A Claude pane reached without recorded harness metadata can therefore report the old false swallow.
+Direct adapter or classifier calls must receive the recorded harness through their optional argument; pane content never supplies identity.
+On tmux, this acknowledgement has an [accepted cursor-row limitation](#limitations) for human multiline drafts in recorded Claude panes.
 
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios, plus claude queued -> `empty` with no busy footer and claude idle-holding-the-steer -> `pending`) and `tests/fm-composer-lib.test.sh` (the acknowledgement row reads `empty` bordered and bare, and stays anchored so a steer that merely quotes the phrase is still `pending`).
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios, plus recorded claude queued -> `empty` with no busy footer and claude idle-holding-the-steer -> `pending`) and `tests/fm-composer-lib.test.sh` (only recorded claude acknowledges the complete content, with prefix, trailing-text, and multiline drafts kept `pending`).
+`tests/fm-send-strict.test.sh` and the Herdr, Orca, and cmux backend tests exercise recorded-harness dispatch, including the Pi draft containing `❯ Press up to edit queued messages` on its second line.
 
 ### Measurement: claude 2.1.268 queues mid-turn Enter and shows no busy text (2026-09-10)
 
@@ -561,9 +566,9 @@ The reference path has these probe and composer limitations:
 - The agent-liveness probe cannot confidently classify `pi`'s generic `node` process name; see [Known gap: `pi` cannot be confidently classified](#known-gap-pi-cannot-be-confidently-classified).
 - The transport probe cannot distinguish a denied socket from an absent server, and reports both as no route; see [Transport reachability](#transport-reachability).
 
-<!-- fm-authority: captain-decision 2026-09-11 - review-r4-tmux-capture-scope accepts this limitation and retains single-row capture -->
+<!-- fm-authority: captain-decision 2026-09-11 - review-r4-tmux-capture-scope accepts single-row capture; review-r5-herdr-row-scope narrows the acknowledgement to recorded Claude panes -->
 - **Accepted cursor-row acknowledgement limit (captain decision, 2026-09-11):** `fm_tmux_composer_state` reads only the cursor row.
-  If a human types exactly `Press up to edit queued messages` as the cursor line of a multiline draft in a firstmate-launched worker pane, the captured line is indistinguishable from the harness's own acknowledgement row.
+  If a human types exactly `Press up to edit queued messages` as the cursor line of a multiline draft in a firstmate-launched worker pane recorded as `claude`, the captured line is indistinguishable from the harness's own acknowledgement row.
   The draft therefore reads as delivered (`empty`) rather than `pending`.
   With away mode active, the daemon can treat the pane as a safe injection target and submit the human's draft with the escalation.
   The captain accepted this residual risk and retained single-row capture to avoid passing bulk pane content with escape sequences through the detector.

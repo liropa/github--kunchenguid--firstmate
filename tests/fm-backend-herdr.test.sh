@@ -1798,27 +1798,42 @@ test_composer_state_pi_separator_real_text_is_pending() {
 }
 
 test_composer_state_pi_multiline_queued_phrase_is_pending() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/composer-pi-multiline-queued-phrase"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nExplain this hint:\nPress up to edit queued messages\x1b[7m \x1b[0m\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
-  [ "$out" = pending ] || fail "a Pi draft ending with the queued phrase should stay pending, got '$out'"
+  local dir log resp fb out prefix harness idx=0
+  for harness in pi unknown unset; do
+    for prefix in '' '❯ ' '› '; do
+      idx=$((idx + 1))
+      dir="$TMP_ROOT/composer-pi-multiline-queued-$idx"; mkdir -p "$dir/responses" "$dir/state"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+      fm_write_meta "$dir/state/draft.meta" 'window=lab:w1:p2' 'backend=herdr'
+      [ "$harness" = unset ] || printf 'harness=%s\n' "$harness" >> "$dir/state/draft.meta"
+      printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nExplain this hint:\n%sPress up to edit queued messages\x1b[7m \x1b[0m\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' "$prefix" > "$resp/1.out"
+      printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+      fb=$(make_herdr_fakebin "$dir")
+      out=$( PATH="$fb:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr lab:w1:p2' "$ROOT" )
+      [ "$out" = pending ] || fail "a Pi draft ending with '$prefix' and the queued phrase (harness=$harness) should stay pending, got '$out'"
+    done
+  done
   pass "fm_backend_herdr_composer_state: a multiline Pi draft ending with the queued phrase remains pending"
 }
 
-test_composer_state_pi_single_row_queued_acknowledgement_is_empty() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/composer-pi-single-row-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nPress up to edit queued messages\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
-  [ "$out" = empty ] || fail "a single-row queued acknowledgement in the Pi composer should read empty, got '$out'"
-  pass "fm_backend_herdr_composer_state: a single-row queued acknowledgement reads empty"
+test_composer_state_queued_acknowledgement_uses_recorded_harness() {
+  local dir log resp fb out row harness expected idx=0
+  for harness in claude pi unknown unset; do
+    expected=pending
+    [ "$harness" != claude ] || expected=empty
+    for row in '❯ Press up to edit queued messages' '│ Press up to edit queued messages │'; do
+      idx=$((idx + 1))
+      dir="$TMP_ROOT/composer-recorded-queued-$idx"; mkdir -p "$dir/responses" "$dir/state"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+      fm_write_meta "$dir/state/draft.meta" 'window=lab:w1:p2' 'backend=herdr'
+      [ "$harness" = unset ] || printf 'harness=%s\n' "$harness" >> "$dir/state/draft.meta"
+      printf '%s\n' "$row" > "$resp/1.out"
+      fb=$(make_herdr_fakebin "$dir")
+      out=$( PATH="$fb:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr lab:w1:p2' "$ROOT" )
+      [ "$out" = "$expected" ] || fail "queued phrase for recorded harness '$harness' should read '$expected', got '$out'"
+    done
+  done
+  pass "fm_backend_herdr_composer_state: only recorded claude panes accept the queued acknowledgement"
 }
 
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
@@ -3168,7 +3183,7 @@ test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_multiline_queued_phrase_is_pending
-test_composer_state_pi_single_row_queued_acknowledgement_is_empty
+test_composer_state_queued_acknowledgement_uses_recorded_harness
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty

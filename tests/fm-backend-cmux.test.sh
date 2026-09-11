@@ -698,6 +698,25 @@ test_composer_state_ghost_placeholder_is_empty() {
   pass "fm_backend_cmux_composer_state: the ghost placeholder text reads empty, not pending"
 }
 
+test_composer_state_queued_phrase_uses_recorded_harness() {
+  local dir fb out harness expected
+  local target='aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111'
+  for harness in claude pi unset; do
+    dir="$TMP_ROOT/composer-queued-$harness"; mkdir -p "$dir/responses" "$dir/state"
+    fm_write_meta "$dir/state/draft.meta" 'backend=cmux' "window=$target"
+    [ "$harness" = unset ] || printf 'harness=%s\n' "$harness" >> "$dir/state/draft.meta"
+    cmux_panes_response "$dir" 1 'bbbbbbbb-1111-1111-1111-111111111111'
+    cmux_read_screen_response "$dir" 2 '│ ❯ Press up to edit queued messages │'
+    fb=$(make_cmux_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state cmux "$1"' "$ROOT" "$target" )
+    expected=pending
+    [ "$harness" != claude ] || expected=empty
+    [ "$out" = "$expected" ] || fail "queued phrase on cmux harness '$harness' should read '$expected', got '$out'"
+  done
+  pass "fm_backend_cmux_composer_state: only recorded claude panes accept the queued phrase"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"
@@ -1047,6 +1066,7 @@ test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
+test_composer_state_queued_phrase_uses_recorded_harness
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
