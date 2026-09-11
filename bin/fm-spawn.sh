@@ -1968,6 +1968,12 @@ spawn_launch_failed() {  # <exit-status-to-use>
 spawn_deliver_launch || {
   spawn_deliver_status=$?
   if [ "$spawn_deliver_status" -eq 1 ]; then
+    if [ "$BACKEND" = sbx ] && spawn_launch_delivered; then
+      SBX_ABORT_CLEANUP=0
+      SBX_ABORT_SIGNALS=
+      echo "error: $ID launch send to $META_WINDOW failed, but the launch nonce confirms delivery; preserving the sandbox, signal bridge, and task record" >&2
+      exit 1
+    fi
     echo "error: $ID launch could not be sent to $META_WINDOW at all; the runtime refused the send. The task is NOT recorded as started, and worktree $WT is still held for $ID" >&2
     spawn_restore_prespawn_meta
     exit 1
