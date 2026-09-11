@@ -1001,6 +1001,118 @@ seed_unreadable_restore() {
   printf '%s\n' "$archive"
 }
 
+test_signal_path_collisions_are_preserved() {
+  local w fb out rc kind
+  for kind in file broken-symlink file-symlink fifo; do
+    w=$(new_world "signal-collision-$kind"); fb=$(make_fake_sbx "$w")
+    printf 'existing record\n' > "$w/keep-me"
+    case "$kind" in
+      file) cp "$w/keep-me" "$w/signals/smx" ;;
+      broken-symlink) ln -s "$w/missing" "$w/signals/smx" ;;
+      file-symlink) ln -s "$w/keep-me" "$w/signals/smx" ;;
+      fifo) mkfifo "$w/signals/smx" ;;
+    esac
+    rc=0
+
+    out=$(run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+    [ "$rc" -ne 0 ] || fail "a $kind signal-path collision must refuse the spawn: $out"
+    case "$kind" in
+      file) cmp -s "$w/keep-me" "$w/signals/smx" || fail "the existing signal file must survive unchanged" ;;
+      broken-symlink) [ "$(readlink "$w/signals/smx")" = "$w/missing" ] || fail "the broken signal symlink must survive" ;;
+      file-symlink) [ "$(readlink "$w/signals/smx")" = "$w/keep-me" ] || fail "the signal symlink to a file must survive" ;;
+      fifo) [ -p "$w/signals/smx" ] || fail "the existing signal FIFO must survive" ;;
+    esac
+    assert_contains "$out" "signal path is not a directory: $w/signals/smx" \
+      "the refusal must identify the signal-path collision"
+    assert_not_contains "$(cat "$w/sbx.log")" "create --clone" "a collision must not create a sandbox"
+    assert_not_contains "$(cat "$w/sbx.log")" "rm --force" "a collision must not remove a sandbox"
+    pass "spawn: a $kind signal-path collision is refused and preserved"
+  done
+}
+
+test_signal_directory_created_by_another_process_is_preserved() {
+  local w fb out rc=0
+  w=$(new_world signal-directory-race); fb=$(make_fake_sbx "$w")
+  cat > "$fb/mkdir" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEST_SIGNAL_DIR" ] && [ ! -d "$arg" ]; then
+    /bin/mkdir "$arg" || exit 1
+    printf 'another process wrote this\n' > "$arg/keep-me"
+  fi
+done
+exec /bin/mkdir "$@"
+SH
+  chmod +x "$fb/mkdir"
+
+  out=$(FM_TEST_SIGNAL_DIR="$w/signals/smx" FM_FAKE_SBX_SOURCE_RC=1 \
+    run_spawn "$w" "$fb" smx "$w/sm" claude --secondmate) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a concurrent signal-directory creation must refuse the spawn: $out"
+  assert_grep "another process wrote this" "$w/signals/smx/keep-me" \
+    "a directory this spawn did not create must survive"
+  assert_not_contains "$(cat "$w/sbx.log")" "create --clone" "failed directory creation must precede sandbox creation"
+  pass "spawn: a concurrent signal-directory creator retains its directory"
+}
+
+test_metadata_backup_failure_preserves_the_record_on_every_backend() {
+  local w fb out rc backend archive tool node_bin
+  for backend in sbx tmux herdr zellij orca cmux; do
+    w=$(new_world "metadata-backup-$backend"); fb=$(make_fake_sbx "$w")
+    if [ "$backend" = orca ]; then
+      node_bin=$(command -v node) || fail "the Orca metadata backup test requires Node.js"
+      ln -s "$node_bin" "$fb/node"
+    fi
+    archive=$(seed_unreadable_restore "$w")
+    fm_write_meta "$w/home/state/smx.meta" \
+      "window=old-window" "project=$w/sm" "harness=claude" "backend=$backend"
+    cp "$w/home/state/smx.meta" "$w/meta-before"
+    cat > "$fb/cp" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_TEST_META_PATH" ]; then
+  printf 'partial backup\n' > "$2"
+  exit 1
+fi
+exec /bin/cp "$@"
+SH
+    cat > "$fb/runtime-stop" <<'SH'
+#!/usr/bin/env bash
+if [ "${0##*/}" = orca ] && [ "${1:-}" = status ]; then
+  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+  exit 0
+fi
+printf '%s %s\n' "${0##*/}" "$*" >> "$FM_TEST_BACKEND_LOG"
+exit 97
+SH
+    chmod +x "$fb/cp" "$fb/runtime-stop"
+    for tool in tmux herdr zellij orca cmux treehouse; do
+      ln -s runtime-stop "$fb/$tool"
+    done
+    rc=0
+
+    if [ "$backend" = sbx ]; then
+      out=$(FM_TEST_META_PATH="$w/home/state/smx.meta" FM_TEST_BACKEND_LOG="$w/runtime.log" \
+        FM_SBX_RESTORE_PRIVATE="$archive" FM_FAKE_SBX_GUEST_HOME="$w/guest" \
+        run_spawn "$w" "$fb" smx "$w/sm" --backend "$backend" --harness claude --secondmate) || rc=$?
+    else
+      out=$(FM_TEST_META_PATH="$w/home/state/smx.meta" FM_TEST_BACKEND_LOG="$w/runtime.log" \
+        run_spawn "$w" "$fb" smx "$w/sm" --backend "$backend" --harness claude) || rc=$?
+    fi
+
+    [ "$rc" -ne 0 ] || fail "a failed metadata backup must refuse the $backend spawn: $out"
+    cmp -s "$w/meta-before" "$w/home/state/smx.meta" || fail "$backend must preserve metadata when backup fails"
+    assert_contains "$out" "cannot back up task record $w/home/state/smx.meta" \
+      "the $backend refusal must identify the failed backup"
+    assert_absent "$w/home/state/.smx.meta.prespawn" "an incomplete backup must not remain"
+    assert_absent "$w/home/state/smx.launched" "failed backup must prevent launch delivery"
+    [ ! -s "$w/runtime.log" ] || fail "failed backup must precede $backend resource creation"
+    [ ! -s "$w/sbx.log" ] || fail "failed backup must precede sandbox creation"
+    assert_present "$archive" "failed backup must preserve the existing bridge archive"
+    pass "spawn: $backend preserves metadata and refuses runtime creation when backup fails"
+  done
+}
+
 test_post_create_refusal_removes_what_the_spawn_created() {
   local w fb nmbin out rc case_name
   for case_name in source-mount tmux-probe gate-vendor guest-session; do
@@ -1231,6 +1343,9 @@ test_spawn_read_through_and_absence_semantics
 test_refuses_projects_bearing_home
 test_refuses_missing_source_mount
 test_spawn_fails_when_provision_exec_fails
+test_signal_path_collisions_are_preserved
+test_signal_directory_created_by_another_process_is_preserved
+test_metadata_backup_failure_preserves_the_record_on_every_backend
 test_post_create_refusal_removes_what_the_spawn_created
 test_post_create_abort_reports_failed_sandbox_removal
 test_failed_restore_does_not_claim_failed_sandbox_removal_succeeded

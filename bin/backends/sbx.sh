@@ -1519,14 +1519,15 @@ fm_backend_sbx_memory_valid() {  # <s>
 # flavor/driver pairing, or a malformed memory cap, refuses before any
 # sandbox, signal directory, or guest state exists.
 # Return values are a CONTRACT, because they say what the caller has to clean
-# up: 0 created and ready; 1 refused BEFORE `sbx create`, so no sandbox, no
-# signal directory and no guest state exist; 2 refused AFTER it, so the
-# sandbox is running and the CALLER owns destroying it. Every post-create
-# refusal below returns 2, and bin/fm-spawn.sh's sbx abort-cleanup arm is what
-# consumes it.
+# up: 0 created and ready; 1 failed without creating a sandbox; 2 refused after
+# `sbx create`, so the sandbox is running and the CALLER owns destroying it.
+# Every post-create refusal returns 2, consumed by bin/fm-spawn.sh's sbx
+# abort-cleanup arm.
+# FM_SBX_CREATED_SIGNALS_DIR names the directory created by this call, or is empty.
 fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
   local name=$1 home_abs=$2 harness=$3 signals_dir=$4 agent memory gate_line gate_rc
   local -a create_args
+  FM_SBX_CREATED_SIGNALS_DIR=
   agent=$(fm_backend_sbx_agent_for_harness "$harness") || return 1
   memory=$(fm_backend_sbx_memory_pin) || return 1
   # sbx clone mode refuses linked git worktrees outright ("--clone is not
@@ -1542,7 +1543,15 @@ fm_backend_sbx_create_task() {  # <name> <home-abs> <harness> <signals-dir>
     echo "error: sandbox $name already exists (or sbx state is unreadable); refusing to create over it" >&2
     return 1
   fi
-  mkdir -p "$signals_dir" || return 1
+  if [ ! -d "$signals_dir" ]; then
+    if [ -e "$signals_dir" ] || [ -L "$signals_dir" ]; then
+      echo "error: signal path is not a directory: $signals_dir" >&2
+      return 1
+    fi
+    mkdir -p "$(dirname "$signals_dir")" || return 1
+    mkdir "$signals_dir" || return 1
+    FM_SBX_CREATED_SIGNALS_DIR=$signals_dir
+  fi
   # Built as a vector so each optional pin adds only its own flag: an unset
   # pin leaves the argv byte-identical to the unpinned form it had before that
   # pin existed.

@@ -566,6 +566,15 @@ SPAWN_TASK_LOCK_HELD=1
 # same captured value, and the Orca abort path fires only before the main write,
 # so it never reads back a file this run already rewrote.
 spawn_read_pr_identity "$STATE/$ID.meta"
+# Keep the pre-spawn record so an undeliverable launch can put it back rather
+# than leaving a record that reads as a started task (spawn_launch_failed).
+if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  SPAWN_META_BACKUP="$STATE/.$ID.meta.prespawn"
+  if ! cp "$STATE/$ID.meta" "$SPAWN_META_BACKUP"; then
+    echo "error: cannot back up task record $STATE/$ID.meta; spawn refused" >&2
+    exit 1
+  fi
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1377,14 +1386,10 @@ EOF
         exit 1
       fi
     fi
-    # Claim the bridge for cleanup only when it does not exist yet: the
-    # restore path above already refused unless the archive sits on an
-    # existing one, so a bridge that is here now is a bridge this spawn must
-    # leave alone.
-    [ -d "$SIG_DIR" ] || SBX_ABORT_SIGNALS="$SIG_DIR"
     set +e
     fm_backend_sbx_create_task "$W" "$PROJ_ABS" "$HARNESS" "$SIG_DIR"
     SBX_CREATE_STATUS=$?
+    SBX_ABORT_SIGNALS=$FM_SBX_CREATED_SIGNALS_DIR
     set -e
     if [ "$SBX_CREATE_STATUS" -ne 0 ]; then
       # rc 2 is create's "the sandbox is up and it is yours to remove" (see
@@ -1644,12 +1649,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-# Keep the pre-spawn record so an undeliverable launch can put it back rather
-# than leaving a record that reads as a started task (spawn_launch_failed).
-if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-  SPAWN_META_BACKUP="$STATE/.$ID.meta.prespawn"
-  cp "$STATE/$ID.meta" "$SPAWN_META_BACKUP" 2>/dev/null || SPAWN_META_BACKUP=
-fi
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
