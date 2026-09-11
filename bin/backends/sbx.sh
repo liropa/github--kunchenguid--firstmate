@@ -30,6 +30,18 @@
 #     relaunch tmux + the agent in its harness's resume mode - before
 #     delivering (fm_backend_sbx_ensure_stack).
 #
+# FM_SBX_MEMORY optionally caps memory for `bin/fm-spawn.sh --backend sbx`.
+# The value is passed unchanged to `sbx create` as `-m <size>`; unset or empty
+# adds no flag and leaves sbx's default unchanged.
+# Accept a nonzero decimal integer followed by one binary-unit letter
+# (b, k, m, g, or t, case-insensitive), such as 2g or 4096m.
+# Refuse malformed values before creating the sandbox or signal directory.
+# External constraint: `sbx create --help` documents the unit form; leave
+# range enforcement to sbx so a later release can change its limits without
+# an adapter change.
+# docs/sbx-backend.md "Guest memory cap" owns the measurement and create-only
+# lifecycle; docs/configuration.md owns the environment and metadata schema.
+#
 # The v2 event layer (events_capable / wait_transition / commit/clear) is
 # deliberately absent; when its latency trigger fires, those functions slot in
 # below fm_backend_sbx_ensure_stack without touching the v1 surface (see the
@@ -1466,16 +1478,8 @@ fm_backend_sbx_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
 
 # --- provisioning (fm-spawn.sh's sbx branch) ---------------------------------
 
-# fm_backend_sbx_memory_pin: print the validated `sbx create -m` value for this
-# spawn, or nothing when FM_SBX_MEMORY is unset or empty. Empty is today's
-# behavior: no flag, so the guest keeps sbx's own default of 50% of host
-# memory (docs/sbx-backend.md "Guest memory cap" owns why a cap is worth
-# setting). Shape only - a positive integer plus one binary-unit letter, the
-# form `sbx create --help` documents ("1024m, 8g") - because the accepted
-# RANGE is sbx's to own and hard-coding its 32 GiB ceiling here would refuse a
-# value a later sbx accepts. A malformed value refuses at the top of create,
-# before any sandbox exists, rather than letting `sbx create` fail after the
-# signal directory and guest state are already half-built.
+# fm_backend_sbx_memory_pin: print the validated cap, or nothing if unpinned.
+# The adapter header owns the input contract.
 fm_backend_sbx_memory_pin() {
   local mem=${FM_SBX_MEMORY:-}
   [ -n "$mem" ] || return 0
@@ -1486,10 +1490,7 @@ fm_backend_sbx_memory_pin() {
   printf '%s' "$mem"
 }
 
-# fm_backend_sbx_memory_valid: 0 when <s> is a nonzero integer followed by one
-# binary-unit letter. A bare number is refused deliberately: `sbx create
-# --help` documents the unit form, and an unsuffixed size would be guesswork
-# about which unit sbx assumes.
+# fm_backend_sbx_memory_valid: return 0 when <s> meets the header's contract.
 fm_backend_sbx_memory_valid() {  # <s>
   local digits=${1%?} unit
   unit=${1#"$digits"}

@@ -66,8 +66,9 @@ A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herd
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-An sbx task additionally records `sbx_signals_dir=`, the resolved `sbx_agent=`, and, when `FM_SBX_TEMPLATE` or `FM_SBX_MEMORY` was set, `sbx_template=` or `sbx_memory=`, with `window=sbx:fm-<id>` naming the sandbox target.
-`sbx_memory=` is the guest's memory cap as passed to `sbx create -m`; it is absent when the sandbox took sbx's own default, and [`docs/sbx-backend.md`](sbx-backend.md) owns the accepted form and the measurement behind the knob.
+An sbx task additionally records `sbx_signals_dir=`, the resolved `sbx_agent=`, and, when `FM_SBX_TEMPLATE` is non-empty, `sbx_template=`, with `window=sbx:fm-<id>` naming the sandbox target.
+`sbx_memory=` records the validated `FM_SBX_MEMORY` value unchanged and is absent when that variable is unset or empty.
+The [`bin/backends/sbx.sh` header](../bin/backends/sbx.sh) owns the memory flag's input contract; [`docs/sbx-backend.md`](sbx-backend.md#guest-memory-cap-fm_sbx_memory-measured-2026-09-10) owns its measurement and create-only scope.
 `sbx_agent=` is the sandbox's agent flavor - the credential wiring available to the guest, chosen independently of the driver harness via `FM_SBX_AGENT` and always recorded so operators can inspect the wiring actually used without re-deriving defaults.
 [`docs/sbx-backend.md`](sbx-backend.md#agent-liveness-probe-fm_backend_sbx_agent_alive) owns how the liveness sweep re-enters that recorded placement on respawn.
 An sbx task also carries `sbx_guest_synced=`, the guest clone's last verified HEAD, recorded only from the guest's own report and maintained by the tracked-file sync (`docs/sbx-backend.md` "Tracked-file sync"); its absence means the next sync verifies in-guest instead of trusting a cache.
@@ -369,7 +370,7 @@ FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity r
 FM_HARNESS_PID=          # optional launcher-provided live harness pid for fm-lock.sh when its ps ancestry walk finds no harness; checked before Claude's CLAUDE_PID
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, sbx is secondmate-only, codex-app is not accepted
 FM_SBX_AGENT=           # sbx-only: optional agent-flavor pin for a spawn; unset or empty defaults to the driver harness's own flavor; docs/sbx-backend.md owns the supported flavor/driver matrix and durable respawn behavior
-FM_SBX_MEMORY=          # sbx-only: optional guest memory cap for a spawn, forwarded to `sbx create -m`; unset or empty keeps sbx's own default; binary-unit form such as 2g or 4096m, validated before the sandbox is created; docs/sbx-backend.md owns the measurement behind it and its create-only scope
+FM_SBX_MEMORY=          # sbx-only: optional guest memory cap for a spawn; bin/backends/sbx.sh's header owns flag syntax, validation, and default behavior
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
