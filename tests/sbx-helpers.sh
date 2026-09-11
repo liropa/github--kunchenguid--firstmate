@@ -134,6 +134,18 @@
 #                            That exec reuses FM_FAKE_SBX_NM_BIN and the same
 #                            hermetic-PATH rule - a suite must never run the
 #                            developer's real `no-mistakes doctor`.
+#   FM_FAKE_SBX_INTERRUPT_ON substring of the joined invocation; on a match the
+#                            fake sends SIGINT to its own parent, which is the
+#                            spawn under test, and then to itself. This is
+#                            the only way to interrupt a spawn INSIDE a backend
+#                            call: the caller cannot reach that window, and a
+#                            helper spawned from here would signal the fake
+#                            rather than the spawn.
+#   FM_FAKE_SBX_INTERRUPT_WITNESS
+#                            file touched when that signal is sent, so a suite
+#                            asserts the interrupt actually landed where it
+#                            meant to rather than passing on a signal that never
+#                            fired.
 make_fake_sbx() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -145,6 +157,19 @@ make_fake_sbx() {
 [ -z "${FM_TEST_LAUNCH_ACK:-}" ] || "$FM_TEST_LAUNCH_ACK" "$@"
 set -u
 [ -n "${FM_FAKE_SBX_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_SBX_LOG"
+if [ -n "${FM_FAKE_SBX_INTERRUPT_ON:-}" ]; then
+  case "$*" in
+    *"$FM_FAKE_SBX_INTERRUPT_ON"*)
+      [ -z "${FM_FAKE_SBX_INTERRUPT_WITNESS:-}" ] || : > "$FM_FAKE_SBX_INTERRUPT_WITNESS"
+      kill -INT "$PPID" 2>/dev/null || true
+      # Die from the same signal. Bash waiting on a foreground child keeps
+      # going if that child exits normally, however the shell itself was
+      # signalled, so a fake that returned 0 here would model no interrupt at
+      # all.
+      kill -INT "$$" 2>/dev/null || true
+      ;;
+  esac
+fi
 # Retry ordinals still need per-fake persistence when a caller does not log.
 fake_state=${FM_FAKE_SBX_LOG:-$0.state}
 cmd=${1:-}

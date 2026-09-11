@@ -178,7 +178,8 @@ A failed private-record restore left a guest with the bare tmux session create m
 The second is the worse half: a running sandbox reads as `alive` (see "Agent liveness probe" above), so the session-start liveness sweep would never have respawned that guest and the home read as staffed forever.
 <!-- /fm-authority -->
 
-Both are cleaned up at the point they fail now, and the two script headers own the mechanics.
+Both are cleaned up at the point they fail now.
+The two script headers own the mechanics.
 Regression coverage is the abort-cleanup group in `tests/fm-spawn-sbx.test.sh`, starting at `test_post_create_refusal_removes_what_the_spawn_created`.
 
 ## Guest-home provisioning (read-through inheritance)
