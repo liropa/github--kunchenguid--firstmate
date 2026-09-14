@@ -734,10 +734,14 @@ fm_backend_sbx_launch_template() {  # <harness>
 # agent's conversation state survives on the VM disk. claude's Stop hook
 # survives in the clone's .claude/settings.local.json, so resume needs no
 # re-wiring; codex's notify= must be re-supplied on the resume command.
+# Every env prefix the launch template carries must be repeated here, because
+# a resurrected agent is a NEW guest process that inherits nothing from the
+# one auto-stop killed - claude's CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+# (rationale in fm-spawn.sh's launch_template) included.
 fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
   local harness=$1 turnend=$2 beat=$3 cmd
   case "$harness" in
-    claude) printf '%s' 'claude --continue --dangerously-skip-permissions' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --continue --dangerously-skip-permissions' ;;
     codex)
       # Built by placeholder substitution into a single-quoted literal, with
       # the signal paths shell-quoted - never via a printf FORMAT string:
