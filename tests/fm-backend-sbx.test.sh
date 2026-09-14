@@ -400,6 +400,20 @@ test_resume_template_quoting() {
   pass "fm_backend_sbx_resume_template: notify quoting intact, paths shell-quoted, hook trust bypassed"
 }
 
+test_resume_template_carries_the_launch_env_prefix() {
+  local w fb out
+  w=$(new_sbx_world resume-env); fb=$(make_fake_sbx "$w")
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_resume_template claude /sig/x.turn-ended /sig/x.beat')
+  case "$out" in
+    'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --continue'*) : ;;
+    *) fail "a resurrected claude must carry the same prompt-suggestion env prefix its launch does, or the resumed pane renders ghost text firstmate reads as typed input"$'\n'"--- output ---"$'\n'"$out" ;;
+  esac
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_resume_template codex /sig/x.turn-ended /sig/x.beat')
+  assert_not_contains "$out" 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION' \
+    "the claude-only env prefix must not leak into codex's resume command"
+  pass "fm_backend_sbx_resume_template: claude resume carries launch's prompt-suggestion prefix, codex resume unchanged"
+}
+
 test_resurrection_waits_for_stable_pane() {
   local w fb home log resume_line ready_line steer_line
   w=$(new_sbx_world resurrect-ready); fb=$(make_fake_sbx "$w")
@@ -3619,6 +3633,7 @@ test_target_exists_never_execs
 test_capture_gated_on_running
 test_send_resurrects_dead_guest_stack
 test_resume_template_quoting
+test_resume_template_carries_the_launch_env_prefix
 test_resurrection_waits_for_stable_pane
 test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
