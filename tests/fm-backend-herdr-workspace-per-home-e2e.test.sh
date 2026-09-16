@@ -17,6 +17,10 @@
 # ONLY herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
 # stop`.
 #
+# Both scratch projects' treehouse pools are confined to TMP_ROOT by
+# tests/treehouse-pool-helpers.sh; without it each run orphaned two pool
+# directories under the captain's ~/.treehouse.
+#
 # Covers, at minimum (per the task brief):
 #   - a primary-shaped home (no .fm-secondmate-home marker) spawning a
 #     crewmate into the "firstmate" workspace
@@ -53,6 +57,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=tests/treehouse-pool-helpers.sh
+. "$ROOT/tests/treehouse-pool-helpers.sh"
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) for the same
 # low-noise scratch fixture shape used by
@@ -61,12 +67,15 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
+POOL_PARENT="$TMP_ROOT/treehouse-pool"
+treehouse_pool_baseline
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
+  treehouse_pool_sweep
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
@@ -95,7 +104,8 @@ make_scratch_project() {  # <dir>
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# scratch\n' > "$dir/README.md"
-  git -C "$dir" add README.md
+  treehouse_pool_confine "$dir" "$POOL_PARENT" || fail "could not confine $dir's treehouse pool"
+  git -C "$dir" add README.md treehouse.toml
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
@@ -233,6 +243,11 @@ if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
 fi
 WT2=
 pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
+
+LEAKED=$(treehouse_pool_leaked)
+[ -z "$LEAKED" ] || fail "a scratch project left a treehouse pool under ~/.treehouse"$'\n'"$LEAKED"
+[ -d "$POOL_PARENT/.treehouse" ] || fail "the scratch projects' treehouse pools were not created under $POOL_PARENT"
+pass "real herdr E2E: both scratch projects' treehouse pools stayed in TMP_ROOT, leaving ~/.treehouse untouched"
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
