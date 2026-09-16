@@ -24,6 +24,10 @@
 # bin/fm-herdr-lab.sh, which appends the named session flag and verifies the
 # default fleet session is unchanged after teardown. Never replace the helper
 # with an ambient HERDR_SESSION-only command.
+#
+# The scratch project's treehouse pool is confined to TMP_ROOT by
+# tests/treehouse-pool-helpers.sh; without it each run orphaned a pool directory
+# under the captain's ~/.treehouse.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +45,9 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
+# shellcheck source=tests/treehouse-pool-helpers.sh
+. "$ROOT/tests/treehouse-pool-helpers.sh"
+
 export FM_GATE_REFUSE_BYPASS=1
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) to keep this
@@ -51,6 +58,8 @@ export FM_GATE_REFUSE_BYPASS=1
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
+POOL_PARENT="$TMP_ROOT/treehouse-pool"
+treehouse_pool_baseline
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
@@ -62,6 +71,7 @@ WT=
 cleanup_all() {
   local cleanup_status=0
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
+  treehouse_pool_sweep
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=$?
   rm -rf "$TMP_ROOT"
   return "$cleanup_status"
@@ -85,7 +95,8 @@ PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
 git -C "$PROJ" init -q
 printf '# scratch\n' > "$PROJ/README.md"
-git -C "$PROJ" add README.md
+treehouse_pool_confine "$PROJ" "$POOL_PARENT" || fail "could not confine the scratch project's treehouse pool"
+git -C "$PROJ" add README.md treehouse.toml
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
@@ -154,6 +165,11 @@ if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$PANE" >/dev/null 2>&1
 fi
 WT=
 pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, pane closed)"
+
+LEAKED=$(treehouse_pool_leaked)
+[ -z "$LEAKED" ] || fail "the scratch project left a treehouse pool under ~/.treehouse"$'\n'"$LEAKED"
+[ -d "$POOL_PARENT/.treehouse" ] || fail "the scratch project's treehouse pool was not created under $POOL_PARENT"
+pass "real herdr: the scratch project's treehouse pool stayed in TMP_ROOT, leaving ~/.treehouse untouched"
 
 if ! cleanup_all; then
   trap - EXIT
