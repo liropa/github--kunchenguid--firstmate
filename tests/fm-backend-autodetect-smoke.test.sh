@@ -41,12 +41,61 @@ assert_contains_local() {  # <haystack> <needle> <msg>
   esac
 }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
 # shellcheck source=tests/treehouse-pool-helpers.sh
 . "$ROOT/tests/treehouse-pool-helpers.sh"
+
+test_treehouse_pool_cleanup_ownership() (
+  local status=$1 dir repo name pool baseline_pool foreign_pool rc
+  dir=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-treehouse-cleanup.XXXXXX") || fail "could not create pool cleanup fixture"
+  trap 'rm -rf "$dir"' EXIT
+  TREEHOUSE_POOL_HOME_ROOT="$dir/shared/.treehouse"
+
+  make_pool_fixture() {
+    local digest
+    mkdir -p "$1" || return 1
+    git -C "$1" init -q || return 1
+    treehouse_pool_confine "$1" "$dir/shared" || return 1
+    digest=$(printf '%s' "$1" | shasum -a 256) || return 1
+    pool="$TREEHOUSE_POOL_HOME_ROOT/${1##*/}-${digest:0:6}"
+    mkdir -p "$pool"
+  }
+
+  make_pool_fixture "$dir/existing/scratch-project" || fail "could not create baseline fixture"
+  baseline_pool=$pool
+  treehouse_pool_baseline
+
+  (
+    trap treehouse_pool_sweep EXIT
+    for name in scratch-project scratch-project-1 scratch-project-2; do
+      repo="$dir/own/$name"
+      make_pool_fixture "$repo" || exit 1
+      printf '%s\n' "$pool" >> "$dir/owned-pools"
+    done
+    (make_pool_fixture "$dir/other/scratch-project" &&
+      printf '%s\n' "$pool" > "$dir/foreign-pool") || exit 1
+    treehouse_pool_leaked > "$dir/leaked-pools"
+    exit "$status"
+  )
+  rc=$?
+
+  [ "$rc" -eq "$status" ] || fail "pool fixture exited with $rc instead of $status"
+  foreign_pool=$(cat "$dir/foreign-pool")
+  [ -d "$foreign_pool" ] || fail "cleanup removed another run's active pool"
+  [ -d "$baseline_pool" ] || fail "cleanup removed a pool that predates the run"
+  while IFS= read -r pool; do
+    [ ! -d "$pool" ] || fail "cleanup left this run's pool: $pool"
+  done < "$dir/owned-pools"
+  [ "$(cat "$dir/leaked-pools")" = "$(cat "$dir/owned-pools")" ] || fail "leak detection did not select exactly this run's pools"
+  pass "treehouse pool cleanup preserves concurrent and pre-existing pools (exit $status)"
+)
+
+test_treehouse_pool_cleanup_ownership 0 || exit 1
+test_treehouse_pool_cleanup_ownership 37 || exit 1
+
+command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
 export FM_GATE_REFUSE_BYPASS=1
 
@@ -134,6 +183,8 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   fail "auto-detected spawn did not report a real worktree path"
 fi
+[ "$(TREEHOUSE_POOL_HOME_ROOT="$POOL_PARENT/.treehouse" treehouse_pool_leaked)" = "${WT%/*/*}" ] ||
+  fail "registered pool identity does not match the acquired worktree"
 
 PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 [ -n "$PANE" ] || fail "auto-detected spawn meta is missing herdr_pane_id"
