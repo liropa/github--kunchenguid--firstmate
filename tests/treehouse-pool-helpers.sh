@@ -15,7 +15,7 @@ set -u
 
 TREEHOUSE_POOL_HOME_ROOT="${HOME}/.treehouse"
 TREEHOUSE_POOL_BASELINE=
-TREEHOUSE_POOL_FIXTURES=
+TREEHOUSE_POOL_NAMES=
 
 # Snapshot ~/.treehouse before any treehouse call. Nothing recorded here can
 # ever be swept, so a pool that predates the test is never at risk.
@@ -24,20 +24,21 @@ treehouse_pool_baseline() {
 }
 
 treehouse_pool_confine() { # <fixture-repo> <pool-parent>
-  local repo=$1 parent=$2
+  local repo=$1 parent=$2 hash
+  repo=$(git -C "$repo" rev-parse --show-toplevel) || return 1
+  hash=$(printf '%s' "$repo" | shasum -a 256) || return 1
   mkdir -p "$parent" || return 1
   printf 'root = "%s"\n' "$parent" > "$repo/treehouse.toml" || return 1
-  TREEHOUSE_POOL_FIXTURES="${TREEHOUSE_POOL_FIXTURES}$(basename "$repo")
+  TREEHOUSE_POOL_NAMES="${TREEHOUSE_POOL_NAMES}${repo##*/}-${hash:0:6}
 "
 }
 
-# The hash test rejects a dash, so fixture "scratch-project" never claims
-# "scratch-project-1"'s pool.
 treehouse_pool_leaked() {
-  local entry fixture suffix
+  local entry
   [ -d "$TREEHOUSE_POOL_HOME_ROOT" ] || return 0
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    [ -d "$TREEHOUSE_POOL_HOME_ROOT/$entry" ] || continue
     case "
 $TREEHOUSE_POOL_BASELINE
 " in
@@ -45,22 +46,9 @@ $TREEHOUSE_POOL_BASELINE
 $entry
 "*) continue ;;
     esac
-    while IFS= read -r fixture; do
-      [ -n "$fixture" ] || continue
-      case "$entry" in
-        "$fixture"-*) suffix=${entry#"$fixture"-} ;;
-        *) continue ;;
-      esac
-      case "$suffix" in
-        ''|*[!0-9a-f]*) continue ;;
-      esac
-      printf '%s\n' "$TREEHOUSE_POOL_HOME_ROOT/$entry"
-      break
-    done <<EOF
-$TREEHOUSE_POOL_FIXTURES
-EOF
+    printf '%s\n' "$TREEHOUSE_POOL_HOME_ROOT/$entry"
   done <<EOF
-$(ls -1 "$TREEHOUSE_POOL_HOME_ROOT" 2>/dev/null)
+$TREEHOUSE_POOL_NAMES
 EOF
 }
 
