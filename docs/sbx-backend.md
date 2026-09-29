@@ -195,7 +195,7 @@ Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idem
 - `.fm-secondmate-home` is seeded as a **regular file** (content = the id): `fm_root_is_secondmate_home` hard-refuses symlinks, and with the marker present hometag and the is-secondmate predicates read the guest as what it is.
 - Right after `sbx create`, spawn probes `test -r $FM_SBX_SOURCE_MOUNT/AGENTS.md` in-guest and refuses loudly when the mount is not readable there: the mount path is an sbx implementation detail, not a documented contract, so upstream drift must fail the spawn instead of leaving inheritance dangling forever (a half-provisioned secondmate is worse than none).
 - **Projects-bearing homes are refused before `sbx create`** (`data/projects.md` registry entries or `projects/` clones, the same two signals `fm-home-seed.sh --no-projects` guards): sub-project clones are independent gitignored repos clone mode structurally cannot carry, and a secondmate whose charter references projects that silently don't exist in-guest would burn turns discovering it. Seed sbx homes with `--no-projects`; in-guest re-cloning is a designable v2.
-- Resurrection re-runs the same pass before relaunching the agent, healing guest-side link/marker damage and picking up `FM_INHERITABLE_CONFIG` items declared since spawn - a list addition reaches existing guests at their next resurrect or respawn, not at the next push (`docs/configuration.md`).
+- Resurrection re-runs the same pass before relaunching the agent, healing guest-side link/marker damage and creating links for `FM_INHERITABLE_CONFIG` items declared since spawn.
 - Teardown is unaffected: links and marker live under gitignored paths, so the landed-work probe's `git status --porcelain` stays clean.
 
 Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
@@ -234,7 +234,7 @@ Properties that carry over unchanged from the read-through design:
 - The delivery copy is published at mode 444 and is never authored by anyone but the host.
   The signal bridge is read-write at the mount level, unlike the RO source mount, so this is a permission posture rather than a mount-level guarantee; the guest-side comparison below is what reports bytes that disagree.
 - Absence still converges by dangling the link: withdrawing clears the delivery copy, `[ -f ]` fails, and `bin/fm-session-start.sh`'s `print_file_or_absent` renders `ABSENT` - byte-for-byte the inherit lib's absence mirroring.
-- The `FM_INHERITABLE_CONFIG` items keep their read-through-only path. Inheritance that converges at the next launch is enough for them; this file is scoped out on its own because its delivery has to be proven.
+- For live inherited config updates, see [Config reread delivery](#config-reread-delivery-2026-09-29).
 
 | primary `data/captain-shared.md` | secondmate **host** home | guest reads | verdict |
 | --- | --- | --- | --- |
@@ -315,15 +315,15 @@ It covered publish, persistence across a stop and resurrection, and withdrawal; 
 ### Config reread delivery (2026-09-29)
 
 The `FM_INHERITABLE_CONFIG` links still read through the RO source mount, so a running guest can hold stale config until a lifecycle event.
-The config-reread generation (the `secondmate-provisioning` skill owns its contract) is therefore the only live delivery of new config bytes, and its pointer must name a file the guest can open.
+The config-reread generation (the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns its contract) is therefore the only live delivery of new config bytes, and its pointer must name a file the guest can open.
 The host-home generation under `state/` is not such a file: clone mode puts the guest clone at the same absolute path on the VM's own disk, so that path names the guest's own `state/`, which never holds it.
 
 For a home whose meta records `backend=sbx`, both convergence callers resolve `sbx_signals_dir=` through `fm_backend_guest_delivery_dir` (`bin/fm-backend.sh`).
 `fm_config_send_reread_nudge` then copies each generation's exact bytes to `<sbx_signals_dir>/config-reread/<generation name>` at mode 0444, checks the copy byte-for-byte, and sends the pointer to that copy.
 Publication and pruning reject links at the bridge directory and its `config-reread` child, then work relative to an open directory handle so a guest cannot redirect host writes or deletions by replacing either directory with a link.
-The host-home generation stays the authoritative record: pending markers, the retry queue, per-home lock ordering, sent-history retention, and the post-launch discard all still act on it, and copies whose generation is gone are pruned at the next reread.
+The host-home generation stays the authoritative record under that contract; bridge copies whose host generation is gone are pruned at the next reread.
 A failed copy is a failed send and keeps the generation pending for retry.
-An sbx record without `sbx_signals_dir=` is skipped with a `CONFIG_REREAD:` error before propagation, so the change stays pending rather than being consumed with no deliverable pointer.
+An sbx record without `sbx_signals_dir=` is skipped with a config-reread error before propagation, so the change stays pending rather than being consumed with no deliverable pointer.
 Every other backend passes no delivery directory and keeps its host-home pointer unchanged.
 
 <!-- fm-authority: firstmate-observation 2026-09-29 - live host reading taken read-only from the primary home and the agent-dotfiles secondmate host home; the gate cannot reproduce it from its checkout -->
