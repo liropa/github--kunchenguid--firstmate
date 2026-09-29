@@ -885,6 +885,39 @@ test_codex_spawn_seeds_no_claude_gate_trust() {
   pass "spawn: a codex spawn seeds codex trust only, never claude's"
 }
 
+test_spawn_provisions_guest_git_identity_from_host_home() {
+  local w fb out gcfg
+  w=$(new_world git-identity); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  # Host identity comes from a fixture global config, never the developer's.
+  printf '[user]\n\tname = Host Person\n\temail = host@example.invalid\n' > "$w/host.gitconfig"
+  out=$(GIT_CONFIG_GLOBAL="$w/host.gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+    run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) \
+    || fail "codex sbx secondmate spawn failed: $out"
+  gcfg="$w/guest-user-home/.gitconfig"
+  [ "$(git config --file "$gcfg" user.name 2>/dev/null)" = "Host Person" ] \
+    || fail "spawn must give the guest the host home's user.name"
+  [ "$(git config --file "$gcfg" user.email 2>/dev/null)" = "host@example.invalid" ] \
+    || fail "spawn must give the guest the host home's user.email"
+  assert_not_contains "$out" "resolves no git" \
+    "a guest that resolves both keys must not be reported"
+  pass "spawn: the guest's global git identity is copied from the host home"
+}
+
+test_spawn_reports_missing_host_git_identity_without_failing() {
+  local w fb out rc=0
+  w=$(new_world git-identity-none); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  out=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a host home with no git identity must not fail the spawn: $out"
+  assert_contains "$out" "sandbox fm-smx guest resolves no git user.name" \
+    "the spawn output must report the identity the guest lacks"
+  [ ! -e "$w/guest-user-home/.gitconfig" ] \
+    || fail "no identity may be invented when the host home resolves none"
+  pass "spawn: a host home with no git identity is reported, not refused"
+}
+
 test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
   local w fb out rc=0
   w=$(new_world gate-trust-soft); fb=$(make_fake_sbx "$w")
@@ -1539,6 +1572,8 @@ test_claude_gate_trust_seed_merges_into_the_shared_config
 test_claude_gate_trust_seed_uses_an_exclusive_tempfile
 test_claude_gate_trust_seed_is_idempotent
 test_codex_spawn_seeds_no_claude_gate_trust
+test_spawn_provisions_guest_git_identity_from_host_home
+test_spawn_reports_missing_host_git_identity_without_failing
 test_claude_gate_trust_seed_failure_does_not_fail_the_spawn
 test_claude_spawn_wires_signal_bridge
 test_codex_launch_carries_mount_notify

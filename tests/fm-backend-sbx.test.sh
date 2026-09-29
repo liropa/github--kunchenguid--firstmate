@@ -538,6 +538,78 @@ test_resurrection_reasserts_claude_trust() {
   pass "send path: resurrection re-asserts the claude workspace-trust shape before relaunch"
 }
 
+# Host git config is pinned to <host-gitconfig> and system config is off, so
+# the host identity the adapter reads is the fixture's, never the developer's.
+resurrect_for_identity() {  # <world> <fakebin> <home> <guest-user-home> <host-gitconfig>
+  local w=$1 fb=$2 home=$3 guest_user=$4 host_cfg=$5
+  fm_write_meta "$w/state/x.meta" \
+    "window=sbx:fm-x" "worktree=$home" "project=$home" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=sbx" "home=$home" "sbx_signals_dir=$w/signals/x"
+  sbx_ls_json fm-x running > "$w/ls.json"
+  : > "$w/sbx.log"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_send_text_line sbx:fm-x "steer text"' \
+    FM_STATE_OVERRIDE="$w/state" FM_FAKE_SBX_TMUX_HAS_RC=1 \
+    FM_FAKE_SBX_GUEST_USER_HOME="$guest_user" \
+    GIT_CONFIG_GLOBAL="$host_cfg" GIT_CONFIG_NOSYSTEM=1
+}
+
+test_resurrection_copies_host_git_identity_into_guest() {
+  local w fb home guest_user err
+  w=$(new_sbx_world identity-copy); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  git -C "$home" init -q
+  git -C "$home" config user.name "Host Person"
+  git -C "$home" config user.email "host@example.invalid"
+  # A recreated guest: no ~/.gitconfig at all, so its gate cannot commit
+  # (observed 2026-09-24, "empty ident name").
+  err=$(resurrect_for_identity "$w" "$fb" "$home" "$guest_user" /dev/null 2>&1) \
+    || fail "a steer of a resurrectable sandbox should succeed: $err"
+  [ "$(git config --file "$guest_user/.gitconfig" user.name 2>/dev/null)" = "Host Person" ] \
+    || fail "resurrection must copy the host home's user.name into the guest's global config"
+  [ "$(git config --file "$guest_user/.gitconfig" user.email 2>/dev/null)" = "host@example.invalid" ] \
+    || fail "resurrection must copy the host home's user.email into the guest's global config"
+  assert_not_contains "$err" "resolves no git" \
+    "a guest that now resolves both keys must not be reported"
+  pass "send path: resurrection copies the host home's git identity into a guest that has none"
+}
+
+test_resurrection_keeps_existing_guest_git_identity() {
+  local w fb home guest_user err
+  w=$(new_sbx_world identity-keep); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  printf '[user]\n\tname = Host Person\n\temail = host@example.invalid\n' > "$w/host.gitconfig"
+  # The guest already set its own name (by hand, or a template), but no email.
+  printf '[user]\n\tname = Guest Person\n' > "$guest_user/.gitconfig"
+  err=$(resurrect_for_identity "$w" "$fb" "$home" "$guest_user" "$w/host.gitconfig" 2>&1) \
+    || fail "a steer of a resurrectable sandbox should succeed: $err"
+  [ "$(git config --file "$guest_user/.gitconfig" user.name)" = "Guest Person" ] \
+    || fail "a user.name the guest already resolves must be left untouched"
+  [ "$(git config --file "$guest_user/.gitconfig" --get-all user.name | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the pass must not add a second user.name beside the guest's own"
+  [ "$(git config --file "$guest_user/.gitconfig" user.email)" = "host@example.invalid" ] \
+    || fail "a key the guest lacks must still be copied from the host home"
+  pass "send path: resurrection keeps a guest's own git identity and fills only the missing key"
+}
+
+test_resurrection_reports_missing_host_git_identity() {
+  local w fb home guest_user err
+  w=$(new_sbx_world identity-none); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  err=$(resurrect_for_identity "$w" "$fb" "$home" "$guest_user" /dev/null 2>&1) \
+    || fail "a host home with no git identity must never block the steer: $err"
+  [ ! -e "$guest_user/.gitconfig" ] \
+    || fail "no identity may be invented when the host home resolves none"
+  assert_contains "$err" "sandbox fm-x guest resolves no git user.name (the host home $home resolves none); user.email (the host home $home resolves none)" \
+    "the missing identity must be reported as one line naming both keys and why"
+  assert_contains "$(cat "$w/sbx.log")" "codex resume" \
+    "the agent must still be relaunched after the report"
+  pass "send path: a host home with no git identity is reported, not refused"
+}
+
 test_resurrection_skips_claude_trust_for_a_codex_guest() {
   local w fb home guest_user
   w=$(new_sbx_world reassert-trust-codex); fb=$(make_fake_sbx "$w")
@@ -3639,6 +3711,9 @@ test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
 test_resurrection_reasserts_claude_trust
 test_resurrection_skips_claude_trust_for_a_codex_guest
+test_resurrection_copies_host_git_identity_into_guest
+test_resurrection_keeps_existing_guest_git_identity
+test_resurrection_reports_missing_host_git_identity
 test_resurrection_restores_dead_gate_daemon_with_stale_socket
 test_resurrection_never_unlinks_the_guest_daemon_socket
 test_resurrection_restores_dead_gate_daemon_with_no_socket

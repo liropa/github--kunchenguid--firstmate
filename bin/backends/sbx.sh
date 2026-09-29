@@ -1251,6 +1251,9 @@ fm_backend_sbx_ensure_stack() {  # <target>
   # #40): harness-gated inside, fail-soft, and never a reason to abandon a
   # steer. Resurrect-only, like the pass above.
   fm_backend_sbx_reconcile_claude_trust "$name" "$home" "$harness"
+  # Re-assert the guest's global git identity at the same point, so a guest
+  # recreated since spawn can still commit. Fail-soft; reports only.
+  fm_backend_sbx_provision_git_identity "$name" "$home"
   # Cross-vendor gate assertion, re-asserted at the same pre-relaunch point so
   # a guest that drifted after create is caught without waiting for a session
   # start. NEVER blocks, for the same reason the tracked-file sync below never
@@ -1993,6 +1996,69 @@ finally:
 FMPY
   ' _ "$home_abs" \
     || echo "firstmate sbx: the claude gate-trust reconcile did not complete in sandbox $name (the guest keeps whatever trust sbx left it)" >&2
+  return 0
+}
+
+# fm_backend_sbx_provision_git_identity: give the guest a global git identity
+# copied from the host home's resolved `user.name` / `user.email`, then assert
+# the guest resolves both. docs/sbx-backend.md "Guest-home provisioning" owns
+# the contract.
+#
+# A recreated guest starts with no global identity, and the in-guest gate then
+# cannot commit its review fixes ("empty ident name", observed 2026-09-24 on a
+# recreated adf-codex:v8 guest). Clone mode carries no host git config, so the
+# host home - the checkout the guest was cloned from - is the source of truth.
+#
+# Per key: a value the guest already resolves outside any repo (its own global
+# or a template-baked system config) is left alone; otherwise the host value is
+# written with `git config --global`. A key the host does not resolve is never
+# invented. Run from BOTH spawn and resurrection, like the passes above.
+#
+# Fail-soft by contract, so this always returns 0: a guest without an identity
+# still runs everything but a commit, while a refused spawn or steer strands the
+# whole task. A key still unresolved afterwards is reported as one line.
+fm_backend_sbx_provision_git_identity() {  # <name> <home-abs>
+  local name=$1 home_abs=$2 host_name host_email missing rc=0 key why reasons=''
+  host_name=$(git -C "$home_abs" config --get user.name 2>/dev/null) || host_name=
+  host_email=$(git -C "$home_abs" config --get user.email 2>/dev/null) || host_email=
+  fm_backend_sbx_guest_args_ok "$name" "git identity provisioning" _ \
+    "${host_name:-$FM_SBX_NO_VALUE}" "${host_email:-$FM_SBX_NO_VALUE}" || return 0
+  # shellcheck disable=SC2016  # single quotes deliberate: $1, $2 and the loop expand in the guest sh, not here
+  missing=$(sbx exec "$name" -- sh -c '
+    # fm-git-identity
+    command -v git >/dev/null 2>&1 || { echo nogit; exit 0; }
+    cd / || exit 1
+    out=
+    for key in user.name user.email; do
+      case $key in user.name) want=$1 ;; *) want=$2 ;; esac
+      [ "$want" != - ] || want=
+      have=$(git config --get "$key" 2>/dev/null) || have=
+      if [ -z "$have" ] && [ -n "$want" ]; then
+        git config --global "$key" "$want" 2>/dev/null || :
+        have=$(git config --get "$key" 2>/dev/null) || have=
+      fi
+      [ -n "$have" ] || out="$out $key"
+    done
+    printf "%s\n" "${out# }"
+  ' _ "${host_name:-$FM_SBX_NO_VALUE}" "${host_email:-$FM_SBX_NO_VALUE}") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "firstmate sbx: could not provision a git identity in sandbox $name; commits inside the guest may fail with 'empty ident name' (docs/sbx-backend.md \"Guest-home provisioning\")" >&2
+    return 0
+  fi
+  [ -n "$missing" ] || return 0
+  if [ "$missing" = nogit ]; then
+    reasons="identity (the guest has no git binary)"
+  else
+    for key in $missing; do
+      why="the host home $home_abs resolves none"
+      case $key in
+        user.name) [ -z "$host_name" ] || why="copying the host value failed" ;;
+        *) [ -z "$host_email" ] || why="copying the host value failed" ;;
+      esac
+      reasons="${reasons:+$reasons; }$key ($why)"
+    done
+  fi
+  echo "firstmate sbx: sandbox $name guest resolves no git $reasons; commits inside the guest, the gate's review fixes included, fail ('empty ident name') until this is fixed (docs/sbx-backend.md \"Guest-home provisioning\")" >&2
   return 0
 }
 
