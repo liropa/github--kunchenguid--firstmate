@@ -1144,8 +1144,6 @@ window_for_task() {  # <task-key> [state]
 #     after Enter. For tmux that means a cleared composer or a harness that
 #     holds the text until its turn ends; for herdr's normal idle-baseline
 #     path it means native agent-state observed a real turn start.
-#     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting

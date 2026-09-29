@@ -11,9 +11,7 @@
 # input box with box-drawing borders ("│ > … │"), so every idle claude pane read
 # as "pending input" and the away-mode daemon deferred 100% of escalations for
 # 9.5 hours with no escape. The detector below strips the box borders before
-# deciding, so a bordered-but-empty composer is correctly seen as empty. The same
-# corrected detector backs the submit acknowledgement (a submit "landed" iff the
-# composer is empty afterward), fixing the parallel false "Enter swallowed".
+# deciding, so a bordered-but-empty composer is correctly seen as empty.
 #
 # Ghost text (incident composer-robust): claude renders a predicted-next-prompt
 # "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
@@ -31,25 +29,8 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
-# Busy-queued Enter, shape one (opencode 1.18.4, on the tmux backend only for
-# now): when the agent is mid-turn, opencode accepts Enter as a "send when the
-# turn ends" keystroke but does NOT clear the composer until then, so the
-# composer keeps showing the typed text the whole time. The plain "empty iff
-# composer cleared" acknowledgement above false-positives on a swallowed Enter
-# for every steer sent to a busy opencode pane, and `fm-send` exits non-zero on
-# a normal captain instruction. The submit core now falls back to
-# `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
-# harness accepted and queued the Enter (report `queued` so the caller does not
-# re-send), while an idle pane keeps the `pending` verdict (a genuine swallow).
-# The herdr backend observes the same opencode behavior but needs a separate
-# fix; it is recorded as a known gap in `docs/herdr-backend.md` rather than
-# patched here, so the tmux adapter does not paper over a herdr-specific shape.
-#
-# Busy-queued Enter, shape two (claude): claude instead REPLACES the composer
-# with its own "queued" acknowledgement, and prints no busy text for the fallback
-# above to find, so that fallback cannot reach this shape at all. Reading the
-# acknowledgement is owned by bin/fm-composer-lib.sh, and the submit core
-# reports it as `queued`; docs/tmux-backend.md records the measurement.
+# Submit verdicts, queued-Enter handling, and redraw limits are owned by
+# docs/tmux-backend.md, "Submit acknowledgement: delivered, queued, or swallowed".
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -169,33 +150,8 @@ fm_pane_is_busy() {  # <target>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
-# fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
-# verifying the composer cleared. Retries Enter ONLY — never retypes, because a
-# swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout so callers can pick their own success
-# policy:
-#   empty       - the composer cleared: delivered.
-#   queued      - the harness accepted the text and holds it until its current
-#                 turn ends: delivered, and the caller must not re-send.
-#   pending     - the text is still in the composer: a genuine swallow.
-#   unknown     - the pane could not be read.
-#   send-failed - the text could not be typed.
-# The daemon counts only empty and queued as delivered (strict: an unknown pane
-# must not be mistaken for a delivered escalation). fm-send fails only on
-# pending (lenient), so an unreadable pane never turns a steer into a false error.
-# Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
-# and queues it for after the current turn, but keeps the typed text visible in
-# the composer. Once the Enter-retry budget is spent and the composer still
-# reads "pending", the submit core falls back to `fm_pane_is_busy`: a busy pane
-# means the Enter was accepted and queued (report `queued`), while an idle pane
-# goes on to the redraw wait below.
-# Redraw lag: a slow pane can take longer than the Enter-retry budget to redraw
-# after an accepted Enter. Until it redraws, the cursor row still shows the
-# typed text. A long multi-line paste leaves the paste's last line there. The
-# core therefore re-reads the composer FM_SUBMIT_REDRAW_POLLS more times
-# (default 10) at the Enter interval before it reports `pending`. It sends no
-# further Enter in this window: the budget's Enters are already waiting in the
-# harness input. docs/tmux-backend.md records the measurement.
+# fm_tmux_submit_enter_core: retry Enter without retyping pending text, which
+# would duplicate it. Prints the verdict from the submit contract above on stdout.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harness]
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do

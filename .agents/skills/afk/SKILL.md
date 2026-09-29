@@ -117,14 +117,10 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
 herdr - both literal, non-submitting sends), then submitted with Enter and
 **verified** through the selected backend's submit primitive.
-Enter is retried (Enter only, never a retype) until the backend confirms the
-submit landed.
 For tmux confirmation and queued-Enter limits, see [Submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-delivered-queued-or-swallowed).
 For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
-`fm-send.sh` uses the same primitive and exits non-zero
-when a steer's Enter is positively swallowed, so firstmate learns an instruction
-did not land instead of leaving it unsubmitted.
+For steer exit status and verdict lines, see [fm-send's usage header](../../../bin/fm-send.sh).
 
 ## Classification policy
 
