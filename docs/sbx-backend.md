@@ -320,6 +320,7 @@ The host-home generation under `state/` is not such a file: clone mode puts the 
 
 For a home whose meta records `backend=sbx`, both convergence callers resolve `sbx_signals_dir=` through `fm_backend_guest_delivery_dir` (`bin/fm-backend.sh`).
 `fm_config_send_reread_nudge` then copies each generation's exact bytes to `<sbx_signals_dir>/config-reread/<generation name>` at mode 0444, checks the copy byte-for-byte, and sends the pointer to that copy.
+Publication and pruning reject links at the bridge directory and its `config-reread` child, then work relative to an open directory handle so a guest cannot redirect host writes or deletions by replacing either directory with a link.
 The host-home generation stays the authoritative record: pending markers, the retry queue, per-home lock ordering, sent-history retention, and the post-launch discard all still act on it, and copies whose generation is gone are pruned at the next reread.
 A failed copy is a failed send and keeps the generation pending for retry.
 An sbx record without `sbx_signals_dir=` is skipped with a `CONFIG_REREAD:` error before propagation, so the change stays pending rather than being consumed with no deliverable pointer.

@@ -889,34 +889,61 @@ fm_config_reread_send_failure() {
 # path. Mode 0444 matches the shared captain delivery copy the guest already
 # reads on the same bridge.
 fm_config_reread_publish_delivery() {
-  local instruction_path=$1 delivery_dir=$2 dir final tmp
-  dir="$delivery_dir/$FM_CONFIG_REREAD_BRIDGE_SUBDIR"
-  mkdir -p "$dir" 2>/dev/null || return 1
-  final="$dir/${instruction_path##*/}"
-  tmp=$(umask 077; mktemp "$dir/.fm-config-reread-delivery.XXXXXX" 2>/dev/null) || return 1
-  if ! cat "$instruction_path" > "$tmp" || ! chmod 0444 "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$final" 2>/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
-  if ! cmp -s "$instruction_path" "$final"; then
-    rm -f "$final"
-    return 1
-  fi
-  printf '%s\n' "$final"
+  local instruction_path=$1 delivery_dir=$2
+  fm_config_reread_delivery publish "$instruction_path" "$delivery_dir" || return 1
+  printf '%s/%s/%s\n' "$delivery_dir" "$FM_CONFIG_REREAD_BRIDGE_SUBDIR" "${instruction_path##*/}"
+}
+
+fm_config_reread_delivery() {
+  local operation=$1 source_path=$2 delivery_dir=$3
+  perl -MFcntl=:DEFAULT -MFile::Temp=tempfile -MFile::Copy=copy -MFile::Spec -e '
+    use strict;
+    use warnings;
+    my ($operation, $source, $dir, $subdir, $prefix) = @ARGV;
+    $source = File::Spec->rel2abs($source);
+    $dir =~ s{/+\z}{};
+    sysopen(my $root, $dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "$!\n";
+    chdir $root or die "$!\n";
+    if ($operation eq "publish") {
+      mkdir($subdir) || $!{EEXIST} or die "$!\n";
+    }
+    sysopen(my $bridge, $subdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "$!\n";
+    chdir $bridge or die "$!\n";
+    if ($operation eq "prune") {
+      opendir(my $copies, ".") or die "$!\n";
+      while (my $name = readdir($copies)) {
+        next unless index($name, "$prefix.") == 0;
+        next if -l $name || ! -f $name;
+        unlink $name unless -f "$source/$name";
+      }
+      exit 0;
+    }
+    my ($file, $tmp) = tempfile(".fm-config-reread-delivery.XXXXXX", DIR => ".");
+    if (!copy($source, $file) || !chmod(0444, $file) || !close($file)) {
+      unlink $tmp;
+      exit 1;
+    }
+    (my $final = $source) =~ s{.*/}{};
+    if (!rename($tmp, $final)) {
+      unlink $tmp;
+      exit 1;
+    }
+    if (system("cmp", "-s", $source, $final) != 0) {
+      unlink $final;
+      exit 1;
+    }
+  ' "$operation" "$source_path" "$delivery_dir" "$FM_CONFIG_REREAD_BRIDGE_SUBDIR" \
+    "${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL##*/}" 2>/dev/null
 }
 
 # fm_config_reread_prune_delivery <dest-home> <delivery-dir>
 # Keep the delivery copies in step with the host-home generations, which own
 # retention: a copy whose generation was pruned, discarded, or quarantined goes.
 fm_config_reread_prune_delivery() {
-  local dest_home=$1 delivery_dir=$2 state copy
+  local dest_home=$1 delivery_dir=$2 state
   [ -n "$delivery_dir" ] || return 0
   state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
-  for copy in "$delivery_dir/$FM_CONFIG_REREAD_BRIDGE_SUBDIR"/.fm-inherited-config-reread.*; do
-    [ -f "$copy" ] && [ ! -L "$copy" ] || continue
-    [ -f "$state/${copy##*/}" ] || rm -f "$copy" 2>/dev/null || true
-  done
+  fm_config_reread_delivery prune "$state" "$delivery_dir" || true
 }
 
 # fm_config_reread_send_pointer <id> <instruction-path> [delivery-dir]
