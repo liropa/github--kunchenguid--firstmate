@@ -959,7 +959,7 @@ The herdr adapter was already safe here (its bare shape only matches the agent g
 
 **Consolidation.** The one glyph/idle/pending decision now lives in a single shared owner, `bin/fm-composer-lib.sh`'s `fm_composer_classify_content`, which every adapter delegates to: `fm_tmux_composer_state` (via `bin/fm-tmux-lib.sh`), `fm_backend_herdr_composer_state`, `fm_backend_orca_composer_state`, and `fm_backend_cmux_composer_state`.
 Each adapter still owns its own capture and structural row-finding; the shared classifier's arguments are documented in `bin/fm-composer-lib.sh`.
-The [queued-acknowledgement contract](tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes) owns the recorded-harness requirement.
+The [queued-acknowledgement contract](tmux-backend.md#submit-acknowledgement-delivered-queued-or-swallowed) owns the recorded-harness requirement.
 
 **The safety rule.** A bare shell prompt glyph is a genuine empty agent composer ONLY inside a bordered composer container (where the harness draws its own prompt glyph, e.g. claude's older `| > ... |`).
 On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a safe injection target), never `empty`.

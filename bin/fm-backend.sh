@@ -571,8 +571,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 
 # fm_backend_send_text_submit: submit and verify text according to the
 # backend's transport contract and bin/fm-send.sh's no-double-text rule.
-# Echoes empty|submitted|pending|unknown|send-failed; the adapter owns how it
-# confirms submission.
+# Echoes empty|submitted|queued|pending|unknown|send-failed; the adapter owns
+# how it confirms submission. Only the tmux adapter reports queued so far.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1 harness
   shift

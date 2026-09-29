@@ -317,15 +317,22 @@ It reads tmux's own `#{pane_current_command}`, which reports the pane's live for
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
-## Submit acknowledgement: "landed" is empty (with two busy-queue shapes)
+## Submit acknowledgement: delivered, queued, or swallowed
 
 The shared `fm_tmux_submit_core` (`bin/fm-tmux-lib.sh`) types the message once, then calls `fm_tmux_submit_enter_core` to retry Enter within the retry budget (Enter only, never a retype).
-The submit reports `empty` when the border-aware composer detector confirms no unsubmitted text or the busy fallback below confirms a queued Enter.
-A genuine swallowed Enter leaves the typed text in the composer and the function reports `pending`; `fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
+It reports one of three submit verdicts:
+
+- `empty` - the border-aware composer detector confirms no unsubmitted text: delivered.
+- `queued` - the harness accepted the text and holds it until its current turn ends: delivered, and the caller must not re-send.
+- `pending` - the typed text is still in the composer after the retry budget and the redraw wait below: a genuine swallowed Enter.
+
+`fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
+On success it prints one verdict line on stderr: `delivered:`, `queued:` (with "do not resend"), or `sent:` when the pane could not be read.
+The away-mode daemon counts `empty` and `queued` as delivered.
 
 **Shape one, opencode 1.18.4:** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
 After the Enter-retry budget is spent and the composer still reads `pending`, the submit core falls back to `fm_pane_is_busy`:
-a busy pane means the harness accepted and queued the Enter (reported as `empty`, so the caller does not re-send), and an idle pane keeps `pending` as a genuine swallow.
+a busy pane means the harness accepted and queued the Enter (reported as `queued`, so the caller does not re-send), and an idle pane goes on to the redraw wait.
 That fallback lives only in `fm_tmux_submit_enter_core`; the separate herdr gap is recorded in [herdr-backend.md](herdr-backend.md#known-gaps-and-follow-up-notes).
 
 **Shape two, claude:** claude clears the composer and replaces it with its own acknowledgement row, `❯ Press up to edit queued messages`.
@@ -338,9 +345,19 @@ Other, unknown, and unset harnesses retain the previous verdict, so this phrase 
 A Claude pane reached without recorded harness metadata can therefore report the old false swallow.
 Direct adapter or classifier calls must receive the recorded harness through their optional argument; pane content never supplies identity.
 On tmux, this acknowledgement has an [accepted cursor-row limitation](#limitations) for human multiline drafts in recorded Claude panes.
+The submit core reads the composer in `fm_tmux_composer_state`'s `submit` mode, which relabels that `empty` verdict as `queued` for a recorded Claude pane.
+It matches the plain row because claude draws the phrase dim, and the classifier must already have said `empty`, so the relabel can never turn pending text into a delivery.
+Every other reader, including the daemon's injection guard, still sees `empty`, the right answer for "no typed text here".
+The herdr, orca, and cmux adapters do not relabel yet, so they report a queued Claude steer as delivered.
 
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios, plus recorded claude queued -> `empty` with no busy footer and claude idle-holding-the-steer -> `pending`) and `tests/fm-composer-lib.test.sh` (only recorded claude acknowledges the complete content, with prefix, trailing-text, and multiline drafts kept `pending`).
-`tests/fm-send-strict.test.sh` and the Herdr, Orca, and cmux backend tests exercise recorded-harness dispatch, including the Pi draft containing `❯ Press up to edit queued messages` on its second line.
+**Redraw lag:** a pane can redraw later than the Enter-retry budget, which defaults to 3 Enters 0.4s apart.
+Until it redraws, the cursor row still shows the typed text, and for a long multi-line paste that row is the paste's last wrapped line.
+So after the budget, when the pane is not busy, the core re-reads the composer `FM_SUBMIT_REDRAW_POLLS` more times (default 10, at the Enter interval) before it reports `pending`.
+It sends no Enter in that window, because the budget's Enters are already waiting in the harness input.
+A pane that stays unredrawn past the window, about 6s after the first Enter at the defaults, still reports a swallow even when it later delivers; see the [2026-09-29 measurement](#measurement-a-long-paste-whose-redraw-lags-the-enter-budget-claude-21284-2026-09-29).
+
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh` (opencode's four scenarios; recorded claude queued -> `queued` with no busy footer; claude idle-holding-the-steer -> `pending`; and the measured 80-column long-paste frames: cleared -> `empty`, redraw lag then cleared -> `empty`, redraw lag then the dim acknowledgement -> `queued`, the dim acknowledgement at once -> `queued`, never cleared -> `pending`, each with no retype) and `tests/fm-composer-lib.test.sh` (only recorded claude acknowledges the complete content, with prefix, trailing-text, and multiline drafts kept `pending`).
+`tests/fm-send-strict.test.sh` checks the `delivered:` and `queued:` lines and exercises recorded-harness dispatch, as do the Herdr, Orca, and cmux backend tests, including the Pi draft containing `❯ Press up to edit queued messages` on its second line.
 
 ### Measurement: claude 2.1.268 queues mid-turn Enter and shows no busy text (2026-09-10)
 
@@ -426,6 +443,88 @@ $ tmux -S "$TMUX_SOCK" capture-pane -p -t m:nocolor -S 46 -E 46
 $ . bin/fm-tmux-lib.sh; fm_tmux_composer_state m:nocolor
 pending
 ```
+
+### Measurement: a long paste whose redraw lags the Enter budget, claude 2.1.284 (2026-09-29)
+
+<!-- fm-authority: firstmate-observation 2026-09-29 - the reported symptom this measurement answers, observed in another home and not reproducible from this checkout -->
+Reported from the agent-dotfiles second mate's sbx guest (tmux backend, claude worker panes): on 2026-09-15 three long multi-line steers across two panes each returned "Enter swallowed; text left in composer" yet were delivered and acted on, and on 2026-09-23 the same error fired on a steer that sat queued behind a busy worker and then ran.
+
+Measured on macOS (Darwin 25.5.0), tmux 3.7b, Claude Code 2.1.284 (`--model haiku`), in a throwaway tmux server (`TMUX_TMPDIR` set to a private directory).
+`bin/fm-send.sh` ran against that pane through a scratch `FM_HOME` whose only record was `window=m:w` and `harness=claude`, with a `tmux` wrapper first on `PATH` that logged every `send-keys`, `display-message`, and `capture-pane` call fm-send made together with its output.
+A separate loop captured the plain pane every 0.1s.
+The steer was seven lines and about 680 characters, and four of the lines were wider than both the 80-column and the 120-column pane.
+
+```sh
+$ tmux new-session -d -s m -n w -x 80 -y 30 -c "$PROJ" \
+    "zsh -ic 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model haiku --dangerously-skip-permissions'"
+$ PATH="$LOGGING_SHIM:$PATH" FM_HOME="$SCRATCH_HOME" bin/fm-send.sh m:w "$(long_steer PROBE-A)"
+```
+
+**The paste wraps, and the cursor row is its last line.**
+`send-keys -l` delivers the embedded newlines as line breaks inside claude's composer, not as submits.
+While the paste waits in the composer, `#{cursor_y}` is 26 and that row holds the last wrapped line with no prompt glyph, which the classifier reads as `pending`:
+
+```text
+17|❯ and the long lines below exist to wrap past the pane width so the composer
+18|  spans several rows.
+...
+25|  hundred and twenty columns in the worker pane under test.
+26|  Reply with exactly: ack PROBE-F
+27|────────────────────────────────────────────────────────────────────────────────
+```
+
+**On this host the redraw beats the first read.**
+Across six sends (idle and busy, 80 and 120 columns, seven and fourteen lines), the cursor row cleared or showed the queued acknowledgement at most 0.35s after Enter, as sampled by the 0.1s loop.
+fm-send's first read comes about 0.44s after Enter, so every send read `❯ ` (idle) or the acknowledgement (busy) on the first try, needed one Enter, and exited 0.
+The false swallow did not reproduce on this host without a slower pane.
+
+**Busy: the queued shape.**
+With claude streaming a reply, the composer row became the dim acknowledgement, and the queued steer was drawn above the composer with a `ctrl+x ctrl+s to send now` hint:
+
+```sh
+$ tmux capture-pane -e -p -t m:w -S -16 | sed -e 's/\x1b/<ESC>/g' | grep -E 'ctrl\+x|Press up'
+<ESC>[49m  <ESC>[38;5;246mctrl+x ctrl+s to send now<ESC>[39m
+<ESC>[38;5;246m❯ <ESC>[2m<ESC>[39mPress up to edit queued messages<ESC>[0m
+```
+
+While a Bash tool loop ran in the foreground, the first read returned the same acknowledgement row.
+A subagent did not produce a queue: this claude ran it in the background (`✻ Waiting for 1 background agent to finish`), took the steer at once, and the composer cleared.
+So the 2026-09-23 subagent case was not reproduced here.
+
+**A slow redraw reproduces the report.**
+The guest pane was not probed, since no live steer to it was allowed, so its redraw time is unmeasured.
+As a stand-in for a slow pane, the logging wrapper sent `SIGSTOP` to the claude process right after fm-send's first Enter and `SIGCONT` 2.5s later.
+Before the fix (base `69caea29`), all three reads saw the paste's last line and fm-send failed.
+The block below is condensed from the wrapper log, with times measured from the first Enter; the error line is fm-send's stderr, and `$S` is the scratch directory:
+
+```text
++0.00s Enter
++0.46s read:   Reply with exactly: ack PROBE-F
++0.48s Enter
++0.94s read:   Reply with exactly: ack PROBE-F
++0.97s Enter
++1.42s read:   Reply with exactly: ack PROBE-F
+error: text not submitted to m:w (Enter swallowed; text left in composer; tried explicit target 'm:w' matched $S/home/state/probe.meta; backend=tmux)
+```
+
+The pane then showed the opposite: the idle steer cleared from the composer and was answered once, and the same pause on a busy pane showed the queued acknowledgement and was answered once.
+The three Enters produced one delivery in both cases.
+
+**After the fix,** the same runs reported the following, condensed from the wrapper log and fm-send's stderr:
+
+```text
+F idle, 2.5s pause:  +1.94s, +2.40s reads still the paste; +2.86s read <ESC>[38;5;246m❯ <ESC>[39m
+                     delivered: text submitted to m:w                                       (exit 0, 3 Enters)
+G busy, 2.5s pause:  +2.85s read <ESC>[38;5;246m❯ <ESC>[2m<ESC>[39mPress up to edit queued messages<ESC>[0m
+                     queued: text accepted by m:w and held until its current turn ends; do not resend   (exit 0, 3 Enters)
+C busy, no pause:    queued: text accepted by m:w and held until its current turn ends; do not resend   (exit 0, 1 Enter)
+A idle, no pause:    delivered: text submitted to m:w                                       (exit 0, 1 Enter)
+H idle, 8s pause:    13 reads to +6.00s all "  Reply with exactly: ack PROBE-H"
+                     error: text not submitted to m:w (Enter swallowed; text left in composer; ...)   (exit 1)
+```
+
+Each of the five steers appears once in the transcript with exactly one `ack` reply.
+Run H is the window's limit: a pane that stays frozen past about 6s still reads as a swallow, even though it delivered once it resumed.
 
 ## Agent-liveness measurement (2026-07-07)
 

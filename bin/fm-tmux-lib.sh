@@ -39,7 +39,7 @@
 # for every steer sent to a busy opencode pane, and `fm-send` exits non-zero on
 # a normal captain instruction. The submit core now falls back to
 # `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
-# harness accepted and queued the Enter (report `empty` so the caller does not
+# harness accepted and queued the Enter (report `queued` so the caller does not
 # re-send), while an idle pane keeps the `pending` verdict (a genuine swallow).
 # The herdr backend observes the same opencode behavior but needs a separate
 # fix; it is recorded as a known gap in `docs/herdr-backend.md` rather than
@@ -48,8 +48,8 @@
 # Busy-queued Enter, shape two (claude): claude instead REPLACES the composer
 # with its own "queued" acknowledgement, and prints no busy text for the fallback
 # above to find, so that fallback cannot reach this shape at all. Reading the
-# acknowledgement is owned by bin/fm-composer-lib.sh;
-# docs/tmux-backend.md records the measurement.
+# acknowledgement is owned by bin/fm-composer-lib.sh, and the submit core
+# reports it as `queued`; docs/tmux-backend.md records the measurement.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -108,8 +108,16 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
-fm_tmux_composer_state() {  # <target> [recorded-harness] -> empty|pending|unknown
-  local target=$1 harness=${2:-} cy raw plain stripped bordered=0
+#
+# [submit] is the submit core's read mode. It reports a recorded claude pane's
+# queued acknowledgement as `queued` instead of `empty`. Other readers leave it
+# off because they treat `empty` as "safe to inject". The acknowledgement is
+# matched on the plain row because claude renders it dim, so the ghost-stripped
+# content is only the glyph. The classifier must already have said `empty`, so
+# this mode only relabels a delivered verdict and cannot turn pending text into
+# a delivery.
+fm_tmux_composer_state() {  # <target> [recorded-harness] [submit] -> empty|pending|unknown (|queued)
+  local target=$1 harness=${2:-} mode=${3:-} cy raw plain stripped bordered=0 state
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -137,7 +145,12 @@ fm_tmux_composer_state() {  # <target> [recorded-harness] -> empty|pending|unkno
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain" "$harness"
+  state=$(fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain" "$harness")
+  if [ "$state" = empty ] && [ "$mode" = submit ] && [ "$harness" = claude ] \
+     && fm_composer_queued_matches "$plain"; then
+    state=queued
+  fi
+  printf '%s' "$state"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
@@ -159,41 +172,51 @@ fm_pane_is_busy() {  # <target>
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
-# pick their own success policy:
-#   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
-#     not be mistaken for a delivered escalation).
-#   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
-#     so an unreadable pane never turns a normal steer into a false error.
+# it. Echoes the final verdict on stdout so callers can pick their own success
+# policy:
+#   empty       - the composer cleared: delivered.
+#   queued      - the harness accepted the text and holds it until its current
+#                 turn ends: delivered, and the caller must not re-send.
+#   pending     - the text is still in the composer: a genuine swallow.
+#   unknown     - the pane could not be read.
+#   send-failed - the text could not be typed.
+# The daemon counts only empty and queued as delivered (strict: an unknown pane
+# must not be mistaken for a delivered escalation). fm-send fails only on
+# pending (lenient), so an unreadable pane never turns a steer into a false error.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and the composer still
 # reads "pending", the submit core falls back to `fm_pane_is_busy`: a busy pane
-# means the Enter was accepted and queued (report `empty` so the caller does
-# not re-send), while an idle pane keeps `pending` as a genuine swallow. This
-# is the only place that exception lives, so the daemon's strict and
-# fm-send's lenient success policies both treat a busy-queued Enter as
-# delivered.
+# means the Enter was accepted and queued (report `queued`), while an idle pane
+# goes on to the redraw wait below.
+# Redraw lag: a slow pane can take longer than the Enter-retry budget to redraw
+# after an accepted Enter. Until it redraws, the cursor row still shows the
+# typed text. A long multi-line paste leaves the paste's last line there. The
+# core therefore re-reads the composer FM_SUBMIT_REDRAW_POLLS more times
+# (default 10) at the Enter interval before it reports `pending`. It sends no
+# further Enter in this window: the budget's Enters are already waiting in the
+# harness input. docs/tmux-backend.md records the measurement.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harness]
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    state=$(fm_tmux_composer_state "$target" "$harness")
+    state=$(fm_tmux_composer_state "$target" "$harness" submit)
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
-  # Retries exhausted, composer still shows pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
   if fm_pane_is_busy "$target"; then
-    printf 'empty'
-  else
-    printf 'pending'
+    printf 'queued'; return 0
   fi
+  i=0
+  while [ "$i" -lt "${FM_SUBMIT_REDRAW_POLLS:-10}" ]; do
+    sleep "$sleep_s"
+    state=$(fm_tmux_composer_state "$target" "$harness" submit)
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+    i=$((i + 1))
+  done
+  printf 'pending'
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness]

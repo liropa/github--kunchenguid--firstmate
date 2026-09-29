@@ -119,7 +119,7 @@ herdr - both literal, non-submitting sends), then submitted with Enter and
 **verified** through the selected backend's submit primitive.
 Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
-For tmux confirmation and queued-Enter limits, see [Submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes).
+For tmux confirmation and queued-Enter limits, see [Submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-delivered-queued-or-swallowed).
 For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
