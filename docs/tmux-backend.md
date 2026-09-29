@@ -320,14 +320,15 @@ During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shel
 ## Submit acknowledgement: delivered, queued, or swallowed
 
 The shared `fm_tmux_submit_core` (`bin/fm-tmux-lib.sh`) types the message once, then calls `fm_tmux_submit_enter_core` to retry Enter within the retry budget (Enter only, never a retype).
-It reports one of three submit verdicts:
+It reports these submit verdicts:
 
 - `empty` - the border-aware composer detector confirms no unsubmitted text: delivered.
 - `queued` - the harness accepted the text and holds it until its current turn ends: delivered, and the caller must not re-send.
-- `pending` - the typed text is still in the composer after the retry budget and the redraw wait below: a genuine swallowed Enter.
+- `pending` - the typed text is still visible after the retry budget and the redraw wait below: submission was not confirmed within that window.
+- `unknown` - the composer state could not be determined.
+- `send-failed` - the text could not be typed.
 
-`fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
-On success it prints one verdict line on stderr: `delivered:`, `queued:` (with "do not resend"), or `sent:` when the pane could not be read.
+For exit status and stderr verdict lines, see [fm-send's usage header](../bin/fm-send.sh).
 The away-mode daemon counts `empty` and `queued` as delivered.
 
 **Shape one, opencode 1.18.4:** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
@@ -350,7 +351,7 @@ It matches the plain row because claude draws the phrase dim, and the classifier
 Every other reader, including the daemon's injection guard, still sees `empty`, the right answer for "no typed text here".
 The herdr, orca, and cmux adapters do not relabel yet, so they report a queued Claude steer as delivered.
 
-**Redraw lag:** a pane can redraw later than the Enter-retry budget, which defaults to 3 Enters 0.4s apart.
+**Redraw lag:** a pane can redraw later than the Enter-retry budget (`fm-send` defaults to 3 Enters 0.4s apart).
 Until it redraws, the cursor row still shows the typed text, and for a long multi-line paste that row is the paste's last wrapped line.
 So after the budget, when the pane is not busy, the core re-reads the composer `FM_SUBMIT_REDRAW_POLLS` more times (default 10, at the Enter interval) before it reports `pending`.
 It sends no Enter in that window, because the budget's Enters are already waiting in the harness input.
