@@ -42,6 +42,8 @@ set -u
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$ROOT/bin/fm-config-inherit-lib.sh"
+# shellcheck source=tests/sbx-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sbx-helpers.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -1212,6 +1214,155 @@ test_config_push_rereads_after_partial_propagation() {
   pass "B14 config-push rereads completed config writes after partial propagation"
 }
 
+# Records the live sm worktree as an sbx-backed secondmate. Clone mode puts the
+# guest clone at the host home's absolute path on the VM's own disk, so a
+# pointer into the host home's state/ names a file the guest does not have;
+# only the signal bridge is the same directory on both sides.
+mark_sm_sbx_backed() {
+  local w=$1 id=$2 signals=${3-}
+  {
+    printf 'window=sbx:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'backend=sbx\n'
+    printf 'home=%s/%s\n' "$w" "$id"
+    [ -z "$signals" ] || printf 'sbx_signals_dir=%s\n' "$signals"
+  } > "$w/home/state/$id.meta"
+}
+
+run_config_push_sbx() {
+  local w=$1 fakebin
+  fakebin=$(make_fake_toolchain "$w")
+  make_fake_sbx "$w" >/dev/null
+  sbx_ls_json fm-sm running > "$w/ls.json"
+  : > "$w/pane.txt"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_SBX_LOG="$w/sbx.log" \
+    FM_FAKE_SBX_LS_FILE="$w/ls.json" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1 \
+    FM_SBX_KEEPALIVE_MAX=0 FM_SBX_RESURRECT_READY_TRIES=0 \
+    "$ROOT/bin/fm-config-push.sh"
+}
+
+test_config_push_sbx_pointer_names_guest_readable_bridge_copy() {
+  local w head signals out status host_instruction pointer_path json
+  w=$(new_world config-push-sbx)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  signals="$w/signals/sm"
+  mkdir -p "$signals"
+  mark_sm_sbx_backed "$w" sm "$signals"
+  json=$'{\n  "default": {"harness": "codex"}\n}'
+  printf '%s\n' "$json" > "$w/home/config/crew-dispatch.json"
+
+  out=$(run_config_push_sbx "$w" 2>&1); status=$?
+  expect_code 0 "$status" "sbx config push should deliver: $out"
+  assert_contains "$out" "config-reread: sent" "sbx config push did not send a reread"
+  host_instruction=$(reread_instruction_path "$w/sm") \
+    || fail "sbx config push wrote no host-home generation"
+  pointer_path=$(sed -n 's/.*CONFIG_REREAD: \([^ ]*\).*/\1/p' "$w/sbx.log" | head -n 1)
+  [ -n "$pointer_path" ] || fail "no CONFIG_REREAD pointer reached the sbx guest"
+  case "$pointer_path" in
+    "$signals/config-reread"/*) ;;
+    *) fail "sbx pointer names $pointer_path, which is not on the guest-visible signal bridge" ;;
+  esac
+  [ -f "$pointer_path" ] || fail "the sbx pointer names a missing file"
+  cmp -s "$host_instruction" "$pointer_path" \
+    || fail "the bridge copy does not hold the generation's exact bytes"
+  assert_contains "$(cat "$pointer_path")" "-----BEGIN config/crew-dispatch.json-----
+$json
+-----END config/crew-dispatch.json-----" "the bridge copy lost the delimited exact bytes"
+  pass "B27 sbx config reread points the guest at an exact bridge copy"
+}
+
+test_config_push_sbx_without_bridge_sends_no_unreadable_pointer() {
+  local w head out status
+  w=$(new_world config-push-sbx-no-bridge)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mark_sm_sbx_backed "$w" sm
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+
+  out=$(run_config_push_sbx "$w" 2>&1); status=$?
+  expect_code 1 "$status" "an sbx record without a bridge must not report success"
+  assert_contains "$out" "no recorded signal-bridge directory" \
+    "missing sbx bridge was not named"
+  assert_not_contains "$(cat "$w/sbx.log" 2>/dev/null || true)" "CONFIG_REREAD:" \
+    "a pointer the guest cannot read was sent"
+  [ ! -e "$w/sm/config/crew-dispatch.json" ] \
+    || fail "the change was consumed without a deliverable reread"
+  pass "B28 sbx record without a bridge sends no unreadable pointer"
+}
+
+test_config_push_non_sbx_pointer_unchanged() {
+  local w head log out status
+  w=$(new_world config-push-non-sbx)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  log="$w/config-push-non-sbx.tmux.log"
+
+  out=$(run_config_push "$w" "$log" 2>&1); status=$?
+  expect_code 0 "$status" "non-sbx config push should deliver"
+  assert_contains "$(cat "$log")" "CONFIG_REREAD: $(reread_instruction_path "$w/sm")" \
+    "non-sbx pointer no longer names the host-home generation"
+  [ ! -e "$w/sm/state/config-reread" ] && [ ! -e "$w/signals" ] \
+    || fail "non-sbx push published a bridge copy"
+  pass "B29 non-sbx config reread pointer is unchanged"
+}
+
+test_bootstrap_sbx_pointer_names_guest_readable_bridge_copy() {
+  local w head signals fakebin out host_instruction pointer_path
+  w=$(new_world boot-sbx)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  signals="$w/signals/sm"
+  mkdir -p "$signals"
+  mark_sm_sbx_backed "$w" sm "$signals"
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$w")
+  make_fake_sbx "$w" >/dev/null
+  sbx_ls_json fm-sm running > "$w/ls.json"
+  : > "$w/pane.txt"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_SBX_LOG="$w/sbx.log" \
+    FM_FAKE_SBX_LS_FILE="$w/ls.json" FM_FAKE_SBX_CAPTURE="$w/pane.txt" \
+    FM_FAKE_SBX_TYPE_ECHO=1 FM_FAKE_SBX_ENTER_BUSY=1 \
+    FM_SBX_KEEPALIVE_MAX=0 FM_SBX_RESURRECT_READY_TRIES=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$out" "CONFIG_REREAD: secondmate sm: send failed" \
+    "bootstrap sbx reread failed: $out"
+  host_instruction=$(reread_instruction_path "$w/sm") \
+    || fail "bootstrap wrote no host-home generation for the sbx home"
+  pointer_path=$(sed -n 's/.*CONFIG_REREAD: \([^ ]*\).*/\1/p' "$w/sbx.log" | head -n 1)
+  case "$pointer_path" in
+    "$signals/config-reread"/*) ;;
+    *) fail "bootstrap sbx pointer '$pointer_path' is not on the guest-visible signal bridge" ;;
+  esac
+  cmp -s "$host_instruction" "$pointer_path" \
+    || fail "bootstrap bridge copy does not hold the generation's exact bytes"
+  pass "B30 bootstrap sbx config reread points the guest at an exact bridge copy"
+}
+
+test_config_reread_delivery_copies_follow_host_retention() {
+  local w state delivery kept gone
+  w="$TMP_ROOT/reread-delivery-prune"
+  state="$w/sm/state"
+  delivery="$w/signals/sm"
+  mkdir -p "$state" "$delivery/config-reread"
+  kept=.fm-inherited-config-reread.20260929T000000.00000002.kept
+  gone=.fm-inherited-config-reread.20260929T000000.00000001.gone
+  printf 'kept\n' > "$state/$kept"
+  printf 'kept\n' > "$delivery/config-reread/$kept"
+  printf 'gone\n' > "$delivery/config-reread/$gone"
+
+  fm_config_reread_prune_delivery "$w/sm" "$delivery"
+  assert_present "$delivery/config-reread/$kept" "a copy of a retained generation was pruned"
+  [ ! -e "$delivery/config-reread/$gone" ] \
+    || fail "a copy of a discarded generation stayed on the bridge"
+  pass "B31 bridge reread copies follow host-home generation retention"
+}
+
 # ---------------------------------------------------------------------------
 # Literal-content config reread nudge (post-propagation live-agent wake)
 # ---------------------------------------------------------------------------
@@ -2090,6 +2241,11 @@ test_config_push_propagates_reports_without_ff_or_nudge
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_rereads_after_partial_propagation
+test_config_push_sbx_pointer_names_guest_readable_bridge_copy
+test_config_push_sbx_without_bridge_sends_no_unreadable_pointer
+test_config_push_non_sbx_pointer_unchanged
+test_bootstrap_sbx_pointer_names_guest_readable_bridge_copy
+test_config_reread_delivery_copies_follow_host_retention
 test_config_reread_per_home_changed_sets_and_exact_bytes
 test_config_reread_isolation_and_absent_and_send_failure
 test_config_reread_publication_failure_retries_exact_generation

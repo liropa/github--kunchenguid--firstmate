@@ -571,6 +571,12 @@ FM_CONFIG_REREAD_RETRY_ROOT_REL="state/.fm-inherited-config-reread-retry"
 FM_CONFIG_REREAD_MAX_PENDING=16
 FM_CONFIG_REREAD_MAX_QUARANTINE=16
 FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
+# Subdirectory of a caller-supplied delivery dir that carries a guest-readable
+# copy of each generation, for a home whose agent cannot read the host home's
+# state/ (fm_backend_guest_delivery_dir). The host-home generation stays the
+# authoritative record; the copy exists only so the pointer names a path the
+# agent can open.
+FM_CONFIG_REREAD_BRIDGE_SUBDIR="config-reread"
 
 # Framing lines for the config-reread instruction. Defaults/rules only - never
 # an enforcement claim, and never a parsed summary of file contents.
@@ -657,12 +663,12 @@ fm_config_reread_retry_queue_is_full() {
 }
 
 fm_config_reread_retry_pending() {
-  local id=$1 dest_home=$2 report retry_out rc
+  local id=$1 dest_home=$2 delivery_dir=${3:-} report retry_out rc
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-reread-retry.XXXXXX" 2>/dev/null) || {
     printf 'CONFIG_REREAD: secondmate %s: send failed: could not create retry report\n' "$id"
     return 1
   }
-  retry_out=$(fm_config_send_reread_nudge "$id" "$dest_home" "$report" 2>&1)
+  retry_out=$(fm_config_send_reread_nudge "$id" "$dest_home" "$report" "$delivery_dir" 2>&1)
   rc=$?
   rm -f "$report"
   [ -z "$retry_out" ] || printf '%s\n' "$retry_out"
@@ -878,9 +884,45 @@ fm_config_reread_send_failure() {
   return 1
 }
 
-# fm_config_reread_send_pointer <id> <instruction-path>
+# fm_config_reread_publish_delivery <instruction-path> <delivery-dir>
+# Copy one generation's exact bytes onto the delivery dir and print the copy's
+# path. Mode 0444 matches the shared captain delivery copy the guest already
+# reads on the same bridge.
+fm_config_reread_publish_delivery() {
+  local instruction_path=$1 delivery_dir=$2 dir final tmp
+  dir="$delivery_dir/$FM_CONFIG_REREAD_BRIDGE_SUBDIR"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  final="$dir/${instruction_path##*/}"
+  tmp=$(umask 077; mktemp "$dir/.fm-config-reread-delivery.XXXXXX" 2>/dev/null) || return 1
+  if ! cat "$instruction_path" > "$tmp" || ! chmod 0444 "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$final" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! cmp -s "$instruction_path" "$final"; then
+    rm -f "$final"
+    return 1
+  fi
+  printf '%s\n' "$final"
+}
+
+# fm_config_reread_prune_delivery <dest-home> <delivery-dir>
+# Keep the delivery copies in step with the host-home generations, which own
+# retention: a copy whose generation was pruned, discarded, or quarantined goes.
+fm_config_reread_prune_delivery() {
+  local dest_home=$1 delivery_dir=$2 state copy
+  [ -n "$delivery_dir" ] || return 0
+  state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
+  for copy in "$delivery_dir/$FM_CONFIG_REREAD_BRIDGE_SUBDIR"/.fm-inherited-config-reread.*; do
+    [ -f "$copy" ] && [ ! -L "$copy" ] || continue
+    [ -f "$state/${copy##*/}" ] || rm -f "$copy" 2>/dev/null || true
+  done
+}
+
+# fm_config_reread_send_pointer <id> <instruction-path> [delivery-dir]
 fm_config_reread_send_pointer() {
-  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
+  local id=$1 instruction_path=$2 delivery_dir=${3:-} pending_path selector out rc send_bin message pending_pointer
+  local pointer_path
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
@@ -889,6 +931,12 @@ fm_config_reread_send_pointer() {
   pending_pointer=$(cat "$pending_path" 2>/dev/null || true)
   if [ "$pending_pointer" != "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is mismatched\n' "$id"
+    return 1
+  fi
+  pointer_path="$instruction_path"
+  if [ -n "$delivery_dir" ] \
+    && ! pointer_path=$(fm_config_reread_publish_delivery "$instruction_path" "$delivery_dir"); then
+    fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "could not publish delivery copy under $delivery_dir"
     return 1
   fi
   selector="fm-$id"
@@ -901,7 +949,7 @@ fm_config_reread_send_pointer() {
     fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "FM_HOME is not set"
     return 1
   fi
-  message="CONFIG_REREAD: $instruction_path"
+  message="CONFIG_REREAD: $pointer_path"
   out=$(FM_HOME="$FM_HOME" \
     FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
@@ -1058,7 +1106,7 @@ fm_config_reread_quarantine_pending() {
   return "$rc"
 }
 
-# fm_config_send_reread_nudge <id> <dest-home> <report>
+# fm_config_send_reread_nudge <id> <dest-home> <report> [delivery-dir]
 # After successful propagation, if any allowlisted config item changed for this
 # home, write the exact-byte instruction under the destination home and send a
 # single-line pointers to those files through the routed secondmate path
@@ -1067,9 +1115,11 @@ fm_config_reread_quarantine_pending() {
 # SHA values, selected profiles, or data/captain-shared.md. No-op (return 0) when
 # nothing changed and no pending delivery exists. On publication or send
 # failure, print a concrete CONFIG_REREAD retry diagnostic to stdout and return
-# non-zero - never claim the live agent reread the values.
+# non-zero - never claim the live agent reread the values. A non-empty
+# delivery-dir (fm_backend_guest_delivery_dir) makes each pointer name a copy
+# there instead of the host-home path.
 fm_config_send_reread_nudge() {
-  local id=$1 dest_home=$2 report=$3
+  local id=$1 dest_home=$2 report=$3 delivery_dir=${4:-}
   local dest_home_abs state source_home_abs changed_items pending_paths stage_paths delivery_paths
   local stage_path instruction_path current_stage_path exact_tmp
   local send_failures retry_report_paths retry_report_path retry_stage_path retry_record_path
@@ -1137,6 +1187,7 @@ $retry_report_paths
 EOF
   if [ "$send_failures" -ne 0 ]; then
     fm_config_reread_cleanup_sent "$dest_home_abs"
+    fm_config_reread_prune_delivery "$dest_home_abs" "$delivery_dir"
     return 1
   fi
   if [ -n "$changed_items" ]; then
@@ -1197,13 +1248,14 @@ $stage_paths
 EOF
   if [ -z "$delivery_paths" ]; then
     fm_config_reread_cleanup_sent "$dest_home_abs"
+    fm_config_reread_prune_delivery "$dest_home_abs" "$delivery_dir"
     [ "${send_failures:-0}" = 1 ] && return 1
     return 0
   fi
   delivery_paths=$(printf '%s\n' "$delivery_paths" | LC_ALL=C sort)
   while IFS= read -r instruction_path; do
     [ -n "$instruction_path" ] || continue
-    if fm_config_reread_send_pointer "$id" "$instruction_path"; then
+    if fm_config_reread_send_pointer "$id" "$instruction_path" "$delivery_dir"; then
       while IFS= read -r stage_path; do
         [ -n "$stage_path" ] || continue
         [ "${stage_path##*/}" = "${instruction_path##*/}" ] || continue
@@ -1220,8 +1272,10 @@ $delivery_paths
 EOF
   if [ "$send_failures" -ne 0 ]; then
     fm_config_reread_cleanup_sent "$dest_home_abs"
+    fm_config_reread_prune_delivery "$dest_home_abs" "$delivery_dir"
     return 1
   fi
   fm_config_reread_cleanup_sent "$dest_home_abs"
+  fm_config_reread_prune_delivery "$dest_home_abs" "$delivery_dir"
   return 0
 }

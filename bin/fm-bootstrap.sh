@@ -368,10 +368,10 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  local id home meta home_real home_lock propagated_homes report reread_out reread_skip_pending reread_delivery
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
-  while IFS='|' read -r id home _window _meta; do
+  while IFS='|' read -r id home _window meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
@@ -382,6 +382,10 @@ secondmate_sync() {
       *" $home_real "*) continue ;;
     esac
     propagated_homes="$propagated_homes $home_real"
+    if ! reread_delivery=$(fm_backend_guest_delivery_dir "$meta"); then
+      echo "CONFIG_REREAD: secondmate $id: send failed: sbx home has no recorded signal-bridge directory in $meta"
+      continue
+    fi
     mkdir -p "$home_real/state" || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
       continue
@@ -411,7 +415,7 @@ secondmate_sync() {
     esac
     if [ "$reread_skip_pending" -eq 0 ] \
       && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-      fm_config_reread_retry_pending "$id" "$home_real" || true
+      fm_config_reread_retry_pending "$id" "$home_real" "$reread_delivery" || true
       if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
         echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
         fm_lock_release "$home_lock" || true
@@ -432,7 +436,7 @@ secondmate_sync() {
     if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
-      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" "$reread_delivery" 2>&1); then
       if [ -n "$reread_out" ]; then
         printf '%s\n' "$reread_out"
       else
