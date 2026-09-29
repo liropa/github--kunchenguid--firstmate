@@ -201,6 +201,17 @@ Spawn rebuilds that surface as a **read path, not a copy pipeline**, in one idem
 
 Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM backend) and `config/secondmate-harness` (a secondmate never spawns secondmates).
 
+### Guest git identity (2026-09-29)
+
+<!-- fm-authority: firstmate-observation 2026-09-24 - incident relayed by firstmate from the live agent-dotfiles secondmate; not reproducible from a gate checkout -->
+A recreated guest has no global git identity, so its in-guest gate cannot commit review fixes; the agent-dotfiles secondmate reported one validation run failing at the review step with `empty ident name` on 2026-09-24, after its sandbox was recreated on `adf-codex:v8`.
+Spawn and resurrection therefore run `fm_backend_sbx_provision_git_identity` right after the claude trust reconcile: it reads `git -C <home> config user.name` and `user.email` on the host, and in the guest writes each key with `git config --global` only when the guest does not already resolve it outside any repo, so an identity the guest or its template already set is left alone.
+A key the host home does not resolve is never invented, and a key the guest still cannot resolve afterwards is reported as one `firstmate sbx: sandbox <name> guest resolves no git ...` line; the pass never refuses a spawn or a steer.
+Hermetic coverage is `tests/fm-backend-sbx.test.sh` (resurrection: copy, keep an existing value, report a host home with none) and `tests/fm-spawn-sbx.test.sh` (spawn: copy, report without failing).
+<!-- fm-authority: firstmate-observation 2026-09-29 - read-only host reading of the live secondmate home; not reproducible from a gate checkout -->
+On 2026-09-29 the live agent-dotfiles secondmate home resolved both keys on the host, from the host user's global config.
+Live verification on a real sandbox recreate is outstanding: no guest was created or resurrected with this pass.
+
 ### What the mount actually does (corrected 2026-08-09)
 
 The RO source mount **does** carry post-creation host writes, but it does not refresh them without a VM lifecycle event; a stop plus a restart is enough - no fresh `sbx create` required.
@@ -641,7 +652,7 @@ Because auto-stop kills the guest process tree, the send path owns the resurrect
 
 1. Refuse a confirmed-absent sandbox, or one whose inventory this caller cannot read (the two are reported apart - see "Caller reachability" below).
 2. The tmux-ready check's `exec` starts a stopped VM as a side effect.
-3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then re-assert claude workspace trust when the harness is claude ("Guest claude workspace trust" above; fail-soft), run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), restore the guest's own no-mistakes daemon at that same safe point ("Guest no-mistakes daemon restore" below; fail-soft), then create a new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), and wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
+3. No guest tmux server → rebuild: first re-assert guest-home provisioning (above; idempotent, resurrect-only cost), then re-assert claude workspace trust when the harness is claude ("Guest claude workspace trust" above; fail-soft), re-assert the guest's global git identity ("Guest git identity" above; fail-soft), run the tracked-file sync at this pre-agent safe point ("Tracked-file sync" above; a skip never blocks the steer), restore the guest's own no-mistakes daemon at that same safe point ("Guest no-mistakes daemon restore" below; fail-soft), then create a new `fm` session at the recorded `home=`, relaunch the agent with its harness's **resume** command (`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --continue ...` / `codex resume --last ... --dangerously-bypass-hook-trust`, notify re-wired for codex), and wait `FM_SBX_RESURRECT_SETTLE` (default 8 s).
 4. **Verify the harness took the pane**: one `pane_current_command` read - a shell name means the resume died, and delivering there would execute the steer as a guest shell command (observed live before this check existed), so fail loudly instead.
 5. **Wait for the TUI to stop redrawing**: up to `FM_SBX_RESURRECT_READY_TRIES` (default 15) 2 s polls for two consecutive identical pane captures, then let the caller deliver.
 

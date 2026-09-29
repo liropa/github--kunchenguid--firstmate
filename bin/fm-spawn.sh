@@ -1770,6 +1770,9 @@ if [ "$BACKEND" = sbx ]; then
   # rather than in the claude* branch below so spawn and resurrection reconcile
   # through one call shape.
   fm_backend_sbx_reconcile_claude_trust "$W" "$PROJ_ABS" "$HARNESS"
+  # Global git identity from the host home, shared with resurrection's
+  # re-assert. Fail-soft: a missing identity is reported here, never refused.
+  fm_backend_sbx_provision_git_identity "$W" "$PROJ_ABS"
   case "$HARNESS" in
     claude*)
       # claude's turn-end signal cannot ride the launch command; write its

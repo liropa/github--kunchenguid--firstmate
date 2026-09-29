@@ -117,6 +117,11 @@
 #                            That exec writes the guest USER's ~/.claude.json,
 #                            so it uses FM_FAKE_SBX_GUEST_USER_HOME and the same
 #                            always-override $HOME rule.
+#   FM_FAKE_SBX_IDENTITY_RC  non-zero fails the guest git-identity exec (the
+#                            `sh -c` pass carrying `fm-git-identity`) instead
+#                            of executing it. That exec writes the guest USER's
+#                            ~/.gitconfig, so it uses FM_FAKE_SBX_GUEST_USER_HOME
+#                            and the same always-override $HOME rule.
 #   FM_FAKE_SBX_NM_BIN       directory prepended to PATH for the no-mistakes
 #                            daemon-restore exec (the `sh -c` pass naming
 #                            `no-mistakes daemon status`). Put a fake
@@ -354,6 +359,22 @@ case "$cmd" in
         # fm_backend_sbx_create_task's in-guest tmux probe. Without this arm
         # the catch-all below answers 0, so the refusal could never be driven.
         exit "${FM_FAKE_SBX_TMUX_PROBE_RC:-0}"
+        ;;
+      "sh -c "*"fm-git-identity"*)
+        # The guest git-identity pass (fm_backend_sbx_provision_git_identity),
+        # driven by both fm-spawn and resurrection. Executed for real against a
+        # fixture $HOME, so suites assert the resulting guest ~/.gitconfig.
+        # Global and system config are pinned to that fixture: a suite must
+        # never read or write the developer's own git identity.
+        [ "${FM_FAKE_SBX_IDENTITY_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_IDENTITY_RC}"
+        script=$3
+        shift 3
+        guest_user_home=${FM_FAKE_SBX_GUEST_USER_HOME:-${FM_FAKE_SBX_LOG:-/dev/null}.guest-user-home}
+        mkdir -p "$guest_user_home" 2>/dev/null || true
+        env -u GIT_CONFIG_GLOBAL HOME="$guest_user_home" \
+          XDG_CONFIG_HOME="$guest_user_home/.config" GIT_CONFIG_NOSYSTEM=1 \
+          sh -c "$script" "$@"
+        exit $?
         ;;
       "sh -c "*"fm-keepalive"*)
         # The keep-alive's guest activity loop (fm_backend_sbx_keepalive):
