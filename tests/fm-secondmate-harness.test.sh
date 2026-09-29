@@ -1363,6 +1363,102 @@ test_config_reread_delivery_copies_follow_host_retention() {
   pass "B31 bridge reread copies follow host-home generation retention"
 }
 
+test_config_reread_delivery_rejects_directory_links() {
+  local w delivery foreign generation link_at out status
+  generation=.fm-inherited-config-reread.20260929T000000.00000001.link
+  for link_at in bridge subdir; do
+    w="$TMP_ROOT/reread-delivery-link-$link_at"
+    delivery="$w/signals/sm"
+    foreign="$w/other/state"
+    mkdir -p "$w/sm/state" "$w/signals" "$foreign"
+    if [ "$link_at" = bridge ]; then
+      ln -s "$w/other" "$delivery"
+      foreign="$w/other/config-reread"
+      mkdir -p "$foreign"
+    else
+      mkdir -p "$delivery"
+      ln -s "$foreign" "$delivery/config-reread"
+    fi
+    printf 'other generation\n' > "$foreign/$generation"
+    printf '%s\n' "$foreign/$generation" > "$foreign/$generation.pending"
+    printf 'new generation\n' > "$w/sm/state/$generation.new"
+
+    fm_config_reread_prune_delivery "$w/sm" "$delivery"
+    [ "$(cat "$foreign/$generation")" = 'other generation' ] \
+      || fail "$link_at link let pruning remove another home's generation"
+    [ "$(cat "$foreign/$generation.pending")" = "$foreign/$generation" ] \
+      || fail "$link_at link let pruning remove another home's pending marker"
+
+    out=$(fm_config_reread_publish_delivery "$w/sm/state/$generation.new" "$delivery"); status=$?
+    expect_code 1 "$status" "$link_at link must block publication"
+    [ -z "$out" ] || fail "rejected publication returned a delivery pointer"
+    [ ! -e "$foreign/$generation.new" ] \
+      || fail "$link_at link let publication write into another home"
+  done
+  pass "B32 bridge directory links cannot redirect reread writes or pruning"
+}
+
+test_config_push_sbx_directory_link_retains_retry() {
+  local w head signals foreign generation out status instruction pointer_path
+  w=$(new_world config-push-sbx-directory-link)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  signals="$w/signals/sm"
+  foreign="$w/other/state"
+  generation=.fm-inherited-config-reread.20260929T000000.00000001.other
+  mkdir -p "$signals" "$foreign"
+  ln -s "$foreign" "$signals/config-reread"
+  printf 'other generation\n' > "$foreign/$generation"
+  printf '%s\n' "$foreign/$generation" > "$foreign/$generation.pending"
+  mark_sm_sbx_backed "$w" sm "$signals"
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+
+  out=$(run_config_push_sbx "$w" 2>&1); status=$?
+  expect_code 1 "$status" "a linked delivery directory must fail the push"
+  assert_contains "$out" "could not publish delivery copy" "unsafe publication was not reported"
+  instruction=$(reread_instruction_path "$w/sm") || fail "failed delivery lost its generation"
+  [ "$(cat "$instruction.pending")" = "$instruction" ] \
+    || fail "failed delivery lost its retry marker"
+  [ "$(cat "$foreign/$generation")" = 'other generation' ] \
+    || fail "failed delivery changed another home's generation"
+  [ "$(cat "$foreign/$generation.pending")" = "$foreign/$generation" ] \
+    || fail "failed delivery changed another home's pending marker"
+  [ ! -e "$foreign/${instruction##*/}" ] || fail "failed delivery wrote into another home"
+  assert_not_contains "$(cat "$w/sbx.log" 2>/dev/null || true)" "CONFIG_REREAD:" \
+    "failed delivery sent a pointer"
+
+  rm "$signals/config-reread"
+  out=$(run_config_push_sbx "$w" 2>&1); status=$?
+  expect_code 0 "$status" "a safe bridge must deliver the pending generation: $out"
+  pointer_path=$(sed -n 's/.*CONFIG_REREAD: \([^ ]*\).*/\1/p' "$w/sbx.log" | head -n 1)
+  [ "$pointer_path" = "$signals/config-reread/${instruction##*/}" ] \
+    || fail "retry did not deliver the same pending generation"
+  cmp -s "$instruction" "$pointer_path" || fail "retry changed the generation bytes"
+  [ "$(reread_mode "$pointer_path")" = 444 ] || fail "retry delivery is not read-only"
+  assert_no_reread_pending "$w/sm"
+  pass "B33 rejected sbx directory links retain the exact generation for retry"
+}
+
+test_config_reread_delivery_replaces_file_link_without_following_it() {
+  local w instruction delivery foreign pointer_path
+  w="$TMP_ROOT/reread-delivery-file-link"
+  instruction="$w/sm/state/.fm-inherited-config-reread.20260929T000000.00000001.link"
+  delivery="$w/signals/sm"
+  foreign="$w/other/state"
+  mkdir -p "$w/sm/state" "$delivery/config-reread" "$foreign"
+  printf 'generation\n' > "$instruction"
+  printf 'unchanged\n' > "$foreign/record"
+  ln -s "$foreign" "$delivery/config-reread/${instruction##*/}"
+
+  pointer_path=$(fm_config_reread_publish_delivery "$instruction" "$delivery") \
+    || fail "publication did not replace the file link"
+  [ ! -L "$pointer_path" ] || fail "publication retained a file link"
+  cmp -s "$instruction" "$pointer_path" || fail "published generation bytes differ"
+  [ "$(ls -A "$foreign")" = record ] || fail "publication wrote through the file link"
+  [ "$(cat "$foreign/record")" = unchanged ] || fail "publication changed a private record"
+  pass "B34 reread publication replaces file links without writing through them"
+}
+
 # ---------------------------------------------------------------------------
 # Literal-content config reread nudge (post-propagation live-agent wake)
 # ---------------------------------------------------------------------------
@@ -2246,6 +2342,9 @@ test_config_push_sbx_without_bridge_sends_no_unreadable_pointer
 test_config_push_non_sbx_pointer_unchanged
 test_bootstrap_sbx_pointer_names_guest_readable_bridge_copy
 test_config_reread_delivery_copies_follow_host_retention
+test_config_reread_delivery_rejects_directory_links
+test_config_push_sbx_directory_link_retains_retry
+test_config_reread_delivery_replaces_file_link_without_following_it
 test_config_reread_per_home_changed_sets_and_exact_bytes
 test_config_reread_isolation_and_absent_and_send_failure
 test_config_reread_publication_failure_retries_exact_generation
