@@ -354,6 +354,20 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${v:-tmux}"
 }
 
+# fm_backend_guest_delivery_dir: the host directory a secondmate's agent reads
+# live when its home is a separate copy of the host home. Prints nothing (rc 0)
+# when the recorded backend's agent reads the host home itself. sbx prints its
+# recorded signal bridge (docs/sbx-backend.md); an sbx record without
+# sbx_signals_dir= returns rc 1 so a caller refuses instead of pointing the
+# guest at a host path it cannot read.
+fm_backend_guest_delivery_dir() {  # <meta-file>
+  local meta=$1 dir
+  [ "$(fm_backend_of_meta "$meta")" = sbx ] || return 0
+  dir=$(fm_meta_get "$meta" sbx_signals_dir)
+  [ -n "$dir" ] || return 1
+  printf '%s\n' "$dir"
+}
+
 fm_backend_target_of_meta() {  # <meta-file>
   local meta=$1 backend terminal window
   backend=$(fm_backend_of_meta "$meta")

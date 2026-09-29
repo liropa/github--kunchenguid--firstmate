@@ -75,6 +75,8 @@ SECONDMATES_MD="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 print_item_report() {
   local report=$1 item status reason
@@ -130,6 +132,11 @@ while IFS='|' read -r id home _window meta; do
   seen_homes="$seen_homes $home_real"
 
   printf 'secondmate %s (%s):\n' "$id" "$home_real"
+  if ! reread_delivery=$(fm_backend_guest_delivery_dir "$meta"); then
+    echo "  config-reread: error - sbx home has no recorded signal-bridge directory in $meta; not pushing a change its agent could not be pointed at"
+    errors=1
+    continue
+  fi
   dirty=$(dirty_status "$home_real" yes || true)
   if [ -n "$dirty" ]; then
     echo "  home: dirty working tree - local-material push continuing"
@@ -151,7 +158,7 @@ while IFS='|' read -r id home _window meta; do
     continue
   }
   if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-    fm_config_reread_retry_pending "$id" "$home_real" || true
+    fm_config_reread_retry_pending "$id" "$home_real" "$reread_delivery" || true
     if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
       echo "  config-reread: error - retry instruction queue is full"
       errors=1
@@ -179,7 +186,7 @@ while IFS='|' read -r id home _window meta; do
   fi
   if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$STATE" \
-    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" "$reread_delivery" 2>&1); then
     if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
       printf '  config-reread: sent\n'
     fi

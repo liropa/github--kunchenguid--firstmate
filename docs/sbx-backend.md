@@ -312,6 +312,64 @@ No code change is proposed for it: making provisioning converge from the primary
 **Still not covered**: this exercised one guest, on the `codex` flavor and the `adf-codex:v6` template.
 It covered publish, persistence across a stop and resurrection, and withdrawal; it did **not** test changing the file's bytes while a guest already holds a copy, so the update path rests on the hermetic cases above rather than on a live reading.
 
+### Config reread delivery (2026-09-29)
+
+The `FM_INHERITABLE_CONFIG` links still read through the RO source mount, so a running guest can hold stale config until a lifecycle event.
+The config-reread generation (the `secondmate-provisioning` skill owns its contract) is therefore the only live delivery of new config bytes, and its pointer must name a file the guest can open.
+The host-home generation under `state/` is not such a file: clone mode puts the guest clone at the same absolute path on the VM's own disk, so that path names the guest's own `state/`, which never holds it.
+
+For a home whose meta records `backend=sbx`, both convergence callers resolve `sbx_signals_dir=` through `fm_backend_guest_delivery_dir` (`bin/fm-backend.sh`).
+`fm_config_send_reread_nudge` then copies each generation's exact bytes to `<sbx_signals_dir>/config-reread/<generation name>` at mode 0444, checks the copy byte-for-byte, and sends the pointer to that copy.
+The host-home generation stays the authoritative record: pending markers, the retry queue, per-home lock ordering, sent-history retention, and the post-launch discard all still act on it, and copies whose generation is gone are pruned at the next reread.
+A failed copy is a failed send and keeps the generation pending for retry.
+An sbx record without `sbx_signals_dir=` is skipped with a `CONFIG_REREAD:` error before propagation, so the change stays pending rather than being consumed with no deliverable pointer.
+Every other backend passes no delivery directory and keeps its host-home pointer unchanged.
+
+<!-- fm-authority: firstmate-observation 2026-09-29 - live host reading taken read-only from the primary home and the agent-dotfiles secondmate host home; the gate cannot reproduce it from its checkout -->
+**Observed** read-only on the host on 2026-09-29, after the 2026-09-23 push the secondmate reported it could not follow; no send and no `sbx` command was used:
+
+```
+$ cat <primary>/state/agent-dotfiles.meta
+...
+backend=sbx
+sbx_signals_dir=/Users/lp1/dev/fm-signals/agent-dotfiles
+...
+home=/Users/lp1/dev/repos/fm-2ndmate-agent-dotfiles
+$ ls -la /Users/lp1/dev/repos/fm-2ndmate-agent-dotfiles/state/ | grep -i reread
+...
+-rw-------@  1 lp1  staff   1135 Sep 23 14:57 .fm-inherited-config-reread.20260923T185704.00000001.8EYjlC
+$ ls -la /Users/lp1/dev/fm-signals/agent-dotfiles/inherit
+...
+-r--r--r--@  1 lp1  staff  943 Sep 12 17:57 captain-shared.md
+```
+
+Under the pre-change code, a pointer for that generation names exactly that host-home path, and the secondmate reported that no such file existed in its `state/`.
+That report was relayed by firstmate, not read here.
+<!-- /fm-authority -->
+
+**Verified** hermetically (2026-09-29, macOS 26.5.2 arm64, bash 3.2.57) in `tests/fm-secondmate-harness.test.sh` with the fake `sbx` from `tests/sbx-helpers.sh`.
+Against the pre-change scripts the new sbx cases fail, and the non-sbx case passes:
+
+```
+not ok - sbx pointer names .../config-push-sbx/sm/state/.fm-inherited-config-reread.20260929T135305.00000001.NZncXg, which is not on the guest-visible signal bridge
+not ok - an sbx record without a bridge must not report success: expected exit 1, got 0
+ok - B29 non-sbx config reread pointer is unchanged
+not ok - bootstrap sbx pointer '.../boot-sbx/sm/state/.fm-inherited-config-reread.20260929T135556.00000001.Nsljqi' is not on the guest-visible signal bridge
+```
+
+With the change:
+
+```
+ok - B27 sbx config reread points the guest at an exact bridge copy
+ok - B28 sbx record without a bridge sends no unreadable pointer
+ok - B29 non-sbx config reread pointer is unchanged
+ok - B30 bootstrap sbx config reread points the guest at an exact bridge copy
+ok - B31 bridge reread copies follow host-home generation retention
+```
+
+**Still not covered**: no live guest has yet opened a bridge reread copy.
+Readability rests on the same bridge, at the same mode, as the shared captain copy the guest was proven to read on 2026-08-09; the next live config push to an sbx secondmate is the first reading.
+
 ### The empty-cmd-element outage (2026-08-08)
 
 The reporting check above shipped with a defect in how it reached the guest, and the defect stopped resurrection outright for every sbx secondmate that had no `data/captain-shared.md` - which is the default state, and was the state of the whole fleet.
