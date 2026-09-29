@@ -29,6 +29,7 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
 - The stock `shell` agent image has **no tmux**.
   `fm_backend_sbx_create_task` verifies tmux inside the fresh sandbox and refuses loudly when the template lacks it; pin `FM_SBX_TEMPLATE` to a template image that ships tmux.
   Two tmux-capable templates verified as of 2026-07-20: **`adf-codex:v2`** (agent-dotfiles' `adf-codex:v1` + tmux 3.6, codex 0.142.5) and **`adf-claude:v3`** (agent-dotfiles' `adf-claude:v2` + tmux 3.6, claude 2.1.195).
+  agent-dotfiles retired the `adf-claude:v3` recipe on 2026-09-29 (agent-dotfiles PR 255) - `adf-claude:v4` and `v5` are the current claude templates, and the 2026-07-20 verification above stands as history for that image.
   <!-- fm-authority: firstmate-observation 2026-09-11 - read from a live guest's own gate resolution during that day's drill; nothing in this repo carries what a template image bakes -->
   The `adf-codex` family bakes a gate config that resolves to **codex**, so only a **claude** driver can be created on one: a codex driver hits the cross-vendor refusal in "Guest gate-vendor assertion" below (observed 2026-09-11).
   The template image and the sandbox's agent flavor are independent choices ("Agent flavor vs driver harness" below).
