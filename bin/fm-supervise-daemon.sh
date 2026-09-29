@@ -1140,8 +1140,9 @@ window_for_task() {  # <task-key> [state]
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     For tmux that means a cleared composer; for herdr's normal idle-baseline
+#   - SUBMIT ACK = the backend submit primitive reports `empty` or `queued`
+#     after Enter. For tmux that means a cleared composer or a harness that
+#     holds the text until its turn ends; for herdr's normal idle-baseline
 #     path it means native agent-state observed a real turn start.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
 #     this strict daemon path.
@@ -1208,9 +1209,11 @@ inject_msg() {  # <message> [state]
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
-  fi
+  case "$verdict" in
+    # queued: the harness holds the digest until its turn ends; re-sending
+    # would deliver it twice.
+    empty|queued) return 0 ;;  # Backend confirmed the submit.
+  esac
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
 }

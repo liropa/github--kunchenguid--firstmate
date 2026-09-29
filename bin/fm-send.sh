@@ -15,6 +15,9 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+# A successful text send prints one verdict line on stderr: `delivered:` (the
+# composer cleared), `queued:` (the harness holds the text until its current
+# turn ends - do not resend), or `sent:` (the pane could not be read).
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -323,6 +326,13 @@ else
       exit 1
     fi
   fi
+  # The verdict line goes to stderr: fm-send runs inside the watcher, whose
+  # stdout is read as wake lines.
+  case "$verdict" in
+    queued) echo "queued: text accepted by $T and held until its current turn ends; do not resend" >&2 ;;
+    empty|submitted) echo "delivered: text submitted to $T" >&2 ;;
+    *) echo "sent: text typed into $T and Enter pressed; the pane could not be read to confirm submission" >&2 ;;
+  esac
   # Submit landed (verdict was not pending/send-failed). Confirmation only proves
   # the text was accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

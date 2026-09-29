@@ -132,7 +132,7 @@ Natural language is acceptable if uncertain.
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-For Claude queued-Enter recognition, recorded-harness requirements, and the accepted cursor-row limit, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes).
+For Claude queued-Enter recognition, the `queued` submit verdict, redraw-lag handling for long pastes, recorded-harness requirements, and the accepted cursor-row limit, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-delivered-queued-or-swallowed).
 
 **Trust-gate scope (verified 2026-08-02, Claude Code v2.1.220, host/tmux path).**
 Two independent gates can park a claude launch, and a machine's first ever run may add a bypass-permissions confirmation on top of them.
@@ -219,7 +219,7 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-For OpenCode queued-Enter handling, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-landed-is-empty-with-two-busy-queue-shapes) and the separate [herdr gap](../../../docs/herdr-backend.md#known-gaps-and-follow-up-notes).
+For OpenCode queued-Enter handling, see [tmux submit acknowledgement](../../../docs/tmux-backend.md#submit-acknowledgement-delivered-queued-or-swallowed) and the separate [herdr gap](../../../docs/herdr-backend.md#known-gaps-and-follow-up-notes).
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.

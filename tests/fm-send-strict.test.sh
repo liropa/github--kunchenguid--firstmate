@@ -176,6 +176,7 @@ test_healthy_fm_id_send_still_works() {
   assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "healthy send should type literal text to the meta target"
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit with Enter"
   assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
+  assert_contains "$(cat "$err")" "delivered: text submitted to sess:fm-lane-ok" "a cleared composer should report delivered"
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
@@ -197,6 +198,8 @@ test_queued_acknowledgement_uses_recorded_harness() {
       "$SEND" "$target" 'test queued delivery' >/dev/null 2>"$err"; rc=$?
     if [ "$harness" = claude ]; then
       expect_code 0 "$rc" "recorded claude queued acknowledgement should confirm delivery"
+      assert_contains "$(cat "$err")" 'queued: text accepted by' "a queued steer should report queued, not delivered"
+      assert_contains "$(cat "$err")" 'do not resend' "a queued steer should warn against a resend"
     else
       [ "$rc" -ne 0 ] || fail "queued phrase on '$harness' should not confirm delivery"
       assert_contains "$(cat "$err")" 'Enter swallowed' "non-claude or unknown pane should retain the pending verdict"
