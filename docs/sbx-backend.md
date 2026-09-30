@@ -157,6 +157,7 @@ Mid-session, the watcher's beacon scan (below) consumes the same turn-end beacon
 5. Wires the turn-end hook to touch the mount's `<id>.turn-ended` **and** `<id>.beat`:
    claude via a Stop hook written into the guest clone's `.claude/settings.local.json` (git-excluded in-guest), codex via `-c notify=[...]` on the launch command.
 6. Reconciles harness-specific trust before launch: a claude harness gets the fail-soft workspace-trust reconcile owned by "Guest claude workspace trust" below, while a codex harness gets the guest home's project-trust entry and carries `--dangerously-bypass-hook-trust` for its separate hooks gate.
+   Git identity provisioning is described in ["Guest git identity"](#guest-git-identity-2026-09-29) below.
 7. Records the sbx-specific meta fields owned by [`docs/configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend).
 8. The launch delivery's send starts a **keep-alive** exec (below) pinning the VM through the launch turn.
 
@@ -205,8 +206,9 @@ Deliberately NOT inherited: `config/backend` (the guest detects its own in-VM ba
 <!-- fm-authority: firstmate-observation 2026-09-24 - incident relayed by firstmate from the live agent-dotfiles secondmate; not reproducible from a gate checkout -->
 A recreated guest has no global git identity, so its in-guest gate cannot commit review fixes; the agent-dotfiles secondmate reported one validation run failing at the review step with `empty ident name` on 2026-09-24, after its sandbox was recreated on `adf-codex:v8`.
 Spawn and resurrection therefore run `fm_backend_sbx_provision_git_identity` right after the claude trust reconcile: it reads `git -C <home> config user.name` and `user.email` on the host, and in the guest writes each key with `git config --global` only when the guest does not already resolve it outside any repo, so an identity the guest or its template already set is left alone.
-A key the host home does not resolve is never invented, and a key the guest still cannot resolve afterwards is reported as one `firstmate sbx: sandbox <name> guest resolves no git ...` line; the pass never refuses a spawn or a steer.
-Hermetic coverage is `tests/fm-backend-sbx.test.sh` (resurrection: copy, keep an existing value, report a host home with none) and `tests/fm-spawn-sbx.test.sh` (spawn: copy, report without failing).
+A key the host home does not resolve is never invented; the guest check reports keys that remain empty as one `firstmate sbx: sandbox <name> guest resolves no git ...` line, naming whether the host had no value or the copy failed.
+If the guest command fails, the pass instead reports `firstmate sbx: could not provision a git identity in sandbox ...`; neither warning blocks a spawn or a steer.
+Hermetic coverage is in `tests/fm-backend-sbx.test.sh` and `tests/fm-spawn-sbx.test.sh`, with git configuration isolated by `tests/sbx-helpers.sh`.
 <!-- fm-authority: firstmate-observation 2026-09-29 - read-only host reading of the live secondmate home; not reproducible from a gate checkout -->
 On 2026-09-29 the live agent-dotfiles secondmate home resolved both keys on the host, from the host user's global config.
 Live verification on a real sandbox recreate is outstanding: no guest was created or resurrected with this pass.
