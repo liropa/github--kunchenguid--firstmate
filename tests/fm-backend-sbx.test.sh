@@ -554,6 +554,31 @@ resurrect_for_identity() {  # <world> <fakebin> <home> <guest-user-home> <host-g
     GIT_CONFIG_GLOBAL="$host_cfg" GIT_CONFIG_NOSYSTEM=1
 }
 
+test_sbx_helpers_isolate_host_git_config() {
+  local w global out rc
+  w=$(new_sbx_world identity-isolation)
+  mkdir -p "$w/host-user/.config/git" "$w/host-home"
+  git -C "$w/host-home" init -q
+  printf '[user]\n\tname = Ambient Person\n' > "$w/host-user/.gitconfig"
+  printf '[user]\n\temail = ambient@example.invalid\n' > "$w/host-user/.config/git/config"
+  printf '[user]\n\tname = System Person\n\temail = system@example.invalid\n' > "$w/system.gitconfig"
+
+  for global in "$w/host-user/.gitconfig" unset; do
+    rc=0
+    out=$(HOME="$w/host-user" XDG_CONFIG_HOME="$w/host-user/.config" \
+      GIT_CONFIG_GLOBAL="$global" GIT_CONFIG_SYSTEM="$w/system.gitconfig" GIT_CONFIG_NOSYSTEM=0 \
+      bash -s -- "$ROOT" "$w/host-home" <<'SH'
+[ "$GIT_CONFIG_GLOBAL" != unset ] || unset GIT_CONFIG_GLOBAL
+. "$1/tests/sbx-helpers.sh"
+git -C "$2" config --get-regexp '^user\.'
+SH
+    ) || rc=$?
+    [ "$rc" -eq 1 ] || fail "shared sbx setup must hide ambient global and system identity: $out"
+    [ -z "$out" ] || fail "shared sbx setup must leave the host identity unresolved"
+  done
+  pass "shared sbx setup isolates host global and system git config"
+}
+
 test_resurrection_copies_host_git_identity_into_guest() {
   local w fb home guest_user err
   w=$(new_sbx_world identity-copy); fb=$(make_fake_sbx "$w")
@@ -608,6 +633,27 @@ test_resurrection_reports_missing_host_git_identity() {
   assert_contains "$(cat "$w/sbx.log")" "codex resume" \
     "the agent must still be relaunched after the report"
   pass "send path: a host home with no git identity is reported, not refused"
+}
+
+test_resurrection_continues_after_git_identity_transport_failure() {
+  local w fb home guest_user err log
+  w=$(new_sbx_world identity-transport); fb=$(make_fake_sbx "$w")
+  home="$w/sm"; guest_user="$w/guest-user-home"
+  mkdir -p "$home/config" "$home/data" "$guest_user"
+  printf '[user]\n\tname = Host Person\n\temail = host@example.invalid\n' > "$w/host.gitconfig"
+
+  err=$(FM_FAKE_SBX_IDENTITY_RC=17 \
+    resurrect_for_identity "$w" "$fb" "$home" "$guest_user" "$w/host.gitconfig" 2>&1) \
+    || fail "git identity transport failure must not block the steer: $err"
+
+  assert_contains "$err" "firstmate sbx: could not provision a git identity in sandbox fm-x;" \
+    "a failed identity exec must be reported"
+  assert_absent "$guest_user/.gitconfig" "a failed identity exec must not write guest config"
+  log=$(cat "$w/sbx.log")
+  assert_contains "$log" "codex resume" "the agent must relaunch after the identity exec fails"
+  assert_contains "$log" "send-keys -t fm:fm-x steer text Enter" \
+    "the steer must be delivered after the identity exec fails"
+  pass "send path: git identity transport failure is reported without blocking delivery"
 }
 
 test_resurrection_skips_claude_trust_for_a_codex_guest() {
@@ -3711,9 +3757,11 @@ test_resurrection_refuses_dead_pane_delivery
 test_resurrection_reasserts_guest_home
 test_resurrection_reasserts_claude_trust
 test_resurrection_skips_claude_trust_for_a_codex_guest
+test_sbx_helpers_isolate_host_git_config
 test_resurrection_copies_host_git_identity_into_guest
 test_resurrection_keeps_existing_guest_git_identity
 test_resurrection_reports_missing_host_git_identity
+test_resurrection_continues_after_git_identity_transport_failure
 test_resurrection_restores_dead_gate_daemon_with_stale_socket
 test_resurrection_never_unlinks_the_guest_daemon_socket
 test_resurrection_restores_dead_gate_daemon_with_no_socket

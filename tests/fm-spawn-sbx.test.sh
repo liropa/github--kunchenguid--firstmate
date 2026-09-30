@@ -918,6 +918,24 @@ test_spawn_reports_missing_host_git_identity_without_failing() {
   pass "spawn: a host home with no git identity is reported, not refused"
 }
 
+test_spawn_continues_after_git_identity_transport_failure() {
+  local w fb out
+  w=$(new_world git-identity-transport); fb=$(make_fake_sbx "$w")
+  mkdir -p "$w/guest-writes"
+  printf '[user]\n\tname = Host Person\n\temail = host@example.invalid\n' > "$w/host.gitconfig"
+
+  out=$(GIT_CONFIG_GLOBAL="$w/host.gitconfig" FM_FAKE_SBX_IDENTITY_RC=17 \
+    run_spawn "$w" "$fb" smx "$w/sm" codex --secondmate) \
+    || fail "git identity transport failure must not block spawn: $out"
+
+  assert_contains "$out" "firstmate sbx: could not provision a git identity in sandbox fm-smx;" \
+    "a failed identity exec must be reported in spawn output"
+  assert_absent "$w/guest-user-home/.gitconfig" "a failed identity exec must not write guest config"
+  assert_contains "$out" "spawned smx" "spawn must complete after the identity exec fails"
+  assert_present "$w/home/state/smx.meta" "the spawned task must retain its record"
+  pass "spawn: git identity transport failure is reported without blocking launch"
+}
+
 test_claude_gate_trust_seed_failure_does_not_fail_the_spawn() {
   local w fb out rc=0
   w=$(new_world gate-trust-soft); fb=$(make_fake_sbx "$w")
@@ -1574,6 +1592,7 @@ test_claude_gate_trust_seed_is_idempotent
 test_codex_spawn_seeds_no_claude_gate_trust
 test_spawn_provisions_guest_git_identity_from_host_home
 test_spawn_reports_missing_host_git_identity_without_failing
+test_spawn_continues_after_git_identity_transport_failure
 test_claude_gate_trust_seed_failure_does_not_fail_the_spawn
 test_claude_spawn_wires_signal_bridge
 test_codex_launch_carries_mount_notify
