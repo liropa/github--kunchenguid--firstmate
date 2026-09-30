@@ -391,26 +391,24 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
-# agent-dotfiles PR 257 put the --intent-from-acceptance-criteria rule in the
-# rendered agent-tooling boundaries rule; the ship scaffold points to it rather
-# than restating it, at the point where the worker is told to run /no-mistakes.
 test_ship_no_mistakes_intent_sentence() {
-  local home id brief
+  local home id brief intent_sentence
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  intent_sentence='The `--intent` you pass to /no-mistakes is written FROM the acceptance criteria in this brief and states nothing wider or narrower than them; when a review flags correct work, check the intent against the criteria before re-arguing the finding.'
   home="$TMP_ROOT/intent-sentence-home"
   mkdir -p "$home/data"
   id="brief-intent-e1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "ship brief was not scaffolded"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep 'The `--intent` you pass to /no-mistakes is written FROM the acceptance criteria in this brief and states nothing wider or narrower than them; when a review flags correct work, check the intent against the criteria before re-arguing the finding.' "$brief" \
+  assert_grep "$intent_sentence" "$brief" \
     "no-mistakes DOD missing the intent-from-acceptance-criteria sentence"
 
   id="brief-intent-scout-e2"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
-  assert_no_grep "acceptance criteria and states nothing wider or narrower than them" "$brief" \
+  assert_no_grep "$intent_sentence" "$brief" \
     "scout brief must not carry the ship-only intent-from-acceptance-criteria sentence"
   pass "fm-brief.sh: ship brief names acceptance criteria as the no-mistakes intent source, scout brief does not"
 }
