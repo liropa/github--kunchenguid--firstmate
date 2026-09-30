@@ -9,6 +9,8 @@
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 # make_fake_sbx <dir>: install a fake `sbx` into <dir>/fakebin (echoed), plus a
 # symlink to the REAL jq (the adapter's state probe parses `ls --json` with jq;
 # callers should skip their suite when jq is absent, mirroring the herdr
