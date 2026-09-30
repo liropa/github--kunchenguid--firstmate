@@ -1999,24 +1999,11 @@ FMPY
   return 0
 }
 
-# fm_backend_sbx_provision_git_identity: give the guest a global git identity
-# copied from the host home's resolved `user.name` / `user.email`, then assert
-# the guest resolves both. docs/sbx-backend.md "Guest-home provisioning" owns
-# the contract.
-#
-# A recreated guest starts with no global identity, and the in-guest gate then
-# cannot commit its review fixes ("empty ident name", observed 2026-09-24 on a
-# recreated adf-codex:v8 guest). Clone mode carries no host git config, so the
-# host home - the checkout the guest was cloned from - is the source of truth.
-#
-# Per key: a value the guest already resolves outside any repo (its own global
-# or a template-baked system config) is left alone; otherwise the host value is
-# written with `git config --global`. A key the host does not resolve is never
-# invented. Run from BOTH spawn and resurrection, like the passes above.
+# docs/sbx-backend.md "Guest git identity" owns the provisioning contract.
 #
 # Fail-soft by contract, so this always returns 0: a guest without an identity
 # still runs everything but a commit, while a refused spawn or steer strands the
-# whole task. A key still unresolved afterwards is reported as one line.
+# whole task.
 fm_backend_sbx_provision_git_identity() {  # <name> <home-abs>
   local name=$1 home_abs=$2 host_name host_email missing rc=0 key why reasons=''
   host_name=$(git -C "$home_abs" config --get user.name 2>/dev/null) || host_name=
