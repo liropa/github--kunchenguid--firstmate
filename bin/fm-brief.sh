@@ -341,6 +341,7 @@ This task has TWO stop points and they use DIFFERENT status verbs. Only the seco
 2. **Validation shipped a PR and CI is green.** Append \`done: PR {url} checks green\` and stop. You are finished.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
+The \`--intent\` you pass to /no-mistakes is written FROM the acceptance criteria in this brief and states nothing wider or narrower than them; when a review flags correct work, check the intent against the criteria before re-arguing the finding.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
