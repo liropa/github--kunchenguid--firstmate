@@ -71,6 +71,12 @@ FM_SBX_RESURRECT_READY_TRIES=${FM_SBX_RESURRECT_READY_TRIES:-15}
 # entirely (unit tests do).
 FM_SBX_KEEPALIVE_MAX=${FM_SBX_KEEPALIVE_MAX:-7200}
 
+# Absolute ceiling (seconds from a keeper's start) on renewing the cap: a
+# keeper that reaches FM_SBX_KEEPALIVE_MAX while arms 1-4 still read work keeps
+# pinning until this ceiling (fm_backend_sbx_keepalive_script). A value at or
+# below FM_SBX_KEEPALIVE_MAX disables renewal.
+FM_SBX_KEEPALIVE_CEILING=${FM_SBX_KEEPALIVE_CEILING:-28800}
+
 # Poll interval (seconds) for the keep-alive's in-guest activity loop.
 FM_SBX_KEEPALIVE_POLL=${FM_SBX_KEEPALIVE_POLL:-5}
 
@@ -770,6 +776,8 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #   $6 busy-pane regex          $7 sign-in-pane regex ('' never claims a sign-in
 #                                  park, so an older caller classifies nothing
 #                                  rather than everything)
+#   $8 renewal ceiling seconds (absent, non-numeric, or not above $2 disables
+#      renewal, so a caller that omits it gets the fixed cap)
 # Pin/release contract (docs/sbx-backend.md "Steering and resurrection"):
 #   - Pin at least until the turn-ended mount file advances past its delivery
 #     baseline (the original v1 condition: the delivered turn must not die).
@@ -842,11 +850,16 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     The fifth arm does not weaken that: it fires only on an OPEN decision, and
 #     the predicate reports none for a task whose newest event is done or
 #     failed, so a finished worker's unresolved decision line cannot pin either.
-#   - The cap bounds everything ("capped-active"/"capped-idle"): a wedged or
-#     forever-busy-looking guest can never pin the VM past the cap, and that
-#     includes a decision nobody ever answers. Nothing re-arms a keeper except a
-#     launch or a turn-submitting steer, so an unanswered decision holds the VM
-#     for at most FM_SBX_KEEPALIVE_MAX from the last steer and then caps out.
+#   - The cap bounds every pin ("capped-active"/"capped-idle"), with one
+#     renewal: a keeper that reaches the cap while arms 1-4 read work keeps
+#     pinning, up to the absolute ceiling ($8) from its own start. On
+#     2026-10-02 the 7200 s cap from the last delivery cut a guest that was
+#     still visibly busy (arm1=1) and the VM stopped on a paid foreground
+#     calibration. A wedged or forever-busy-looking guest still can never pin
+#     the VM past the ceiling. arm5 alone never renews: an unanswered decision
+#     is a wait, not work, so nothing but a launch or a turn-submitting steer
+#     re-arms it and it holds the VM for at most FM_SBX_KEEPALIVE_MAX from the
+#     last steer, then caps out.
 #   - While work is visible, touch the mount's <id>.guest-active breadcrumb so
 #     the HOST gets a pure-stat view of in-guest activity (the wrapper's
 #     mid-task-stop check below, and fm-watch.sh's stranding suppression).
@@ -901,9 +914,11 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # Plain POSIX sh, GNU-first portable stat (the guest is Linux; the BSD arm
 # exists so the host-side unit tests can run the same script on macOS).
 fm_backend_sbx_keepalive_script() {
-  # shellcheck disable=SC2016  # single quotes deliberate: $1..$7 expand in the guest sh loop, not here
+  # shellcheck disable=SC2016  # single quotes deliberate: $1..$8 expand in the guest sh loop, not here
   printf '%s' '
-    t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6 authre=$7
+    t=$1 max=$2 poll=$3 window=$4 home=$5 regex=$6 authre=$7 ceil=${8:-}
+    case $ceil in ""|*[!0-9]*) ceil=$max ;; esac
+    [ "$ceil" -gt "$max" ] || ceil=$max
     # Only an absolute path is a home; anything else means "no home", which is
     # how FM_SBX_NO_VALUE arrives. Testing the SHAPE rather than one literal
     # token keeps host and guest from drifting apart.
@@ -1021,7 +1036,10 @@ fm_backend_sbx_keepalive_script() {
       # deliberately does not (see the contract above). a5=1 only when the other
       # four read 0, so this test is exactly "the pin came from the park".
       if [ "$work" = 1 ] && [ "$a5" = 0 ]; then touch "$act" 2>/dev/null; fi
-      if [ $((now - start)) -ge "$max" ]; then
+      el=$((now - start))
+      renew=0
+      if [ "$work" = 1 ] && [ "$a5" = 0 ] && [ "$el" -lt "$ceil" ]; then renew=1; fi
+      if [ "$el" -ge "$max" ] && [ "$renew" = 0 ]; then
         if [ "$work" = 1 ]; then emit capped-active; else emit capped-idle; fi
         exit 0
       fi
@@ -1074,7 +1092,8 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 }
 
 # fm_backend_sbx_keepalive: hold ONE background `sbx exec` open until the
-# guest is done working or FM_SBX_KEEPALIVE_MAX elapses. Why this exists:
+# guest is done working or FM_SBX_KEEPALIVE_MAX elapses (renewed while busy up
+# to FM_SBX_KEEPALIVE_CEILING; see the loop contract). Why this exists:
 # Docker Sandboxes' auto-stop is HOST-CONNECTION-based, not guest-workload-
 # based - a VM with no live exec/attach stops ~35.4 s after the last
 # connection closes even with a CPU-busy guest process (verified live; a
@@ -1091,7 +1110,7 @@ fm_backend_sbx_keepalive_log() {  # <log> <verdict> <elapsed-seconds> [detail]
 # (fm_backend_sbx_keepalive_script above), self-terminating on the guest side,
 # so an idle VM still auto-stops.
 # Fire-and-forget: callers never wait on it, and a keeper left pinned by work
-# that never ends is bounded by the cap. Multiple keepers (one per steer) are
+# that never ends is bounded by the ceiling. Multiple keepers (one per steer) are
 # harmless - all release on the same idle reading.
 # The host-side wrapper then classifies how the pin ended: a clean idle
 # release or an idle cap expiry is silent, while a cap expiry with work still
@@ -1142,7 +1161,7 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
   # provisioning pass's hash, and the guest maps it back by SHAPE below.
   guest_args=(_ "$turnend" "$FM_SBX_KEEPALIVE_MAX" "$FM_SBX_KEEPALIVE_POLL" \
     "$FM_SBX_GUEST_ACTIVE_WINDOW" "${home:-$FM_SBX_NO_VALUE}" "$busy" \
-    "$FM_SBX_AUTH_REGEX")
+    "$FM_SBX_AUTH_REGEX" "$FM_SBX_KEEPALIVE_CEILING")
   # Checked before the keeper is armed, not inside it: a warning printed from
   # the background subshell would land in an unpredictable place.
   fm_backend_sbx_guest_args_ok "$name" "the keep-alive" "${guest_args[@]}" || return 0
@@ -1174,7 +1193,11 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
             why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while an in-guest worker was still parked on an unanswered decision"
             ;;
           *)
-            why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
+            if [ "$FM_SBX_KEEPALIVE_CEILING" -gt "$FM_SBX_KEEPALIVE_MAX" ] 2>/dev/null; then
+              why="the keep-alive ceiling (${FM_SBX_KEEPALIVE_CEILING}s, renewed past the ${FM_SBX_KEEPALIVE_MAX}s cap while busy) expired while in-guest work was still active"
+            else
+              why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
+            fi
             ;;
         esac
         ;;
