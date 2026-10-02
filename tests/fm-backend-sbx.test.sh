@@ -2147,12 +2147,6 @@ assert_log_lacks() {
   ! grep -qE -- "$2" "$1" || fail "$3"$'\n'"--- log ---"$'\n'"$(cat "$1" 2>/dev/null)"
 }
 
-# --- keep-alive arm2: a declared job lease (2026-10-02 stop) -----------------
-#
-# run_lease_keeper <fakebin> <world> <lease-age>: a REGISTERED in-guest worker
-# with a static pane and a stale status, plus a state/w1.active job lease that
-# is fresh or stale, run through the secondmate's turn-end advancing - the one
-# condition every release requires. Echoes the loop's raw output.
 run_lease_keeper() {  # <fakebin> <world> <fresh|stale>
   local fb=$1 w=$2 age=$3 script te pid i
   script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')

@@ -17,8 +17,6 @@ TMP_ROOT=$(fm_test_tmproot fm-keepawake)
 
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 
-# make_task <name>: a home whose state/w1.meta records a git worktree; echoes
-# the case directory (home at <dir>/home, worktree at <dir>/wt).
 make_task() {  # <name>
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/home/state"
