@@ -1569,14 +1569,15 @@ keepalive_auth_regex() {
 # run_keepalive_raw <fakebin> <pane-file> <args...>: execute the guest loop
 # synchronously with the fake tmux first in PATH; echoes its whole stdout - the
 # arm-detail line followed by the verdict line. The sign-in signature is appended
-# as the loop's last positional, exactly as the wrapper passes it, so no fixture
-# has to restate it.
+# as the loop's seventh positional, exactly as the wrapper passes it, so no fixture
+# has to restate it; KEEPALIVE_CEILING, when set, follows it as the renewal
+# ceiling, and is otherwise absent so the loop keeps its fixed cap.
 run_keepalive_raw() {
   local fakebin=$1 pane=$2 script
   shift 2
   script=$(run_adapter "$fakebin" "$TMP_ROOT" 'fm_backend_sbx_keepalive_script')
   PATH="$fakebin:$BASE_PATH" FAKE_TMUX_PANE="$pane" HOME="$(keepalive_home)" \
-    sh -c "$script" _ "$@" "$(keepalive_auth_regex)"
+    sh -c "$script" _ "$@" "$(keepalive_auth_regex)" ${KEEPALIVE_CEILING:+"$KEEPALIVE_CEILING"}
 }
 
 # run_keepalive_script <fakebin> <pane-file> <args...>: as above, echoing the
@@ -2206,6 +2207,107 @@ test_keepalive_script_releases_static_worker_with_stale_lease() {
   pass "keep-alive loop: a stale job lease releases (auto-stop preserved)"
 }
 
+# --- keep-alive cap renewal while busy (2026-10-02 third stop) --------------
+#
+# Each fixture runs with a 1 s cap and polls every second, so a pre-renewal loop
+# exits on the first poll past the cap - within 2 s of wall time - while a
+# renewing one holds until its ceiling or the guest goes idle.
+
+test_keepalive_script_renews_the_cap_while_busy() {
+  # The logged shape: capped-active pin=~7200s arm1=1 crew=1, and the VM stopped
+  # on a foreground calibration that was still visibly running. A busy guest at
+  # the cap keeps the pin, and once it goes idle the keeper exits as capped-idle,
+  # which the wrapper keeps silent like any idle exit.
+  local w fb script te pid i
+  w=$(new_sbx_world keeper-renew); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  printf 'calibrating (esc to interrupt)\n' > "$w/pane.txt"
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE="$w/pane.txt" HOME="$(keepalive_home)" \
+    sh -c "$script" _ "$te" 1 1 120 "" 'esc (to )?interrupt' "$(keepalive_auth_regex)" 60 > "$w/verdict.txt" &
+  pid=$!
+  sleep 3
+  kill -0 "$pid" 2>/dev/null \
+    || fail "a busy guest at the cap must keep pinning, got '$(cat "$w/verdict.txt")'"
+  printf 'done\n> \n' > "$w/pane.txt"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$(cat "$w/verdict.txt")" "fm-keepalive capped-idle" \
+    "a renewed pin should end as an idle exit once the guest goes idle"
+  pass "keep-alive loop: a busy guest at the cap renews and pins, then exits idle (2026-10-02 third stop)"
+}
+
+test_keepalive_script_ceiling_caps_a_busy_guest() {
+  # Renewal is bounded: a guest that looks busy forever still caps at the
+  # ceiling, as capped-active, so the wrapper's mid-task-stop alarm fires.
+  local w fb te out t0 t1
+  w=$(new_sbx_world keeper-ceiling); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  printf 'calibrating (esc to interrupt)\n' > "$w/pane.txt"
+  t0=$(date +%s)
+  out=$(KEEPALIVE_CEILING=4 run_keepalive_raw "$fb" "$w/pane.txt" "$te" 1 1 120 "" 'esc (to )?interrupt')
+  t1=$(date +%s)
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a guest still busy at the ceiling must cap as capped-active"
+  [ $((t1 - t0)) -ge 3 ] || fail "the busy guest should have pinned past the 1 s cap, held only $((t1 - t0)) s"
+  [ $((t1 - t0)) -le 8 ] || fail "the ceiling should have capped the pin near 4 s, held $((t1 - t0)) s"
+  pass "keep-alive loop: the ceiling still caps a guest that stays busy"
+}
+
+test_keepalive_script_renews_the_cap_for_a_job_lease() {
+  # A leased background job is work (arm2), so it renews like a busy pane.
+  local w fb te out t0 t1
+  w=$(new_sbx_world keeper-renew-lease); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  printf 'kind=ship\n' > "$w/home/state/w1.meta"
+  printf 'working: eval started\n' > "$w/home/state/w1.status"
+  touch -t 202001010000 "$w/home/state/w1.meta" "$w/home/state/w1.status"
+  : > "$w/home/state/w1.active"
+  t0=$(date +%s)
+  out=$(KEEPALIVE_CEILING=4 run_keepalive_raw "$fb" /dev/null "$te" 1 1 120 "$w/home" 'esc (to )?interrupt')
+  t1=$(date +%s)
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a lease-only guest at the ceiling must cap as capped-active"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=1 arm3=0 arm4=0 arm5=0" \
+    "the renewal should come from the job lease on arm 2"
+  [ $((t1 - t0)) -ge 3 ] || fail "a fresh job lease should renew past the 1 s cap, held only $((t1 - t0)) s"
+  pass "keep-alive loop: a lease-only guest renews the cap too"
+}
+
+test_keepalive_script_parked_worker_never_renews() {
+  # A wait is not work: a pin held only by arm5 caps at FM_SBX_KEEPALIVE_MAX
+  # even when a ceiling far above it is configured.
+  local w fb te out t0 t1
+  w=$(new_sbx_world keeper-renew-parked); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  mkdir -p "$w/signals/x" "$w/home/state"
+  make_guest_firstmate_bin "$w/home"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  park_worker "$w/home" w1
+  t0=$(date +%s)
+  out=$(KEEPALIVE_CEILING=60 run_keepalive_raw "$fb" /dev/null "$te" 1 1 120 "$w/home" 'esc (to )?interrupt')
+  t1=$(date +%s)
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a parked worker should still cap as capped-active"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=0 arm4=0 arm5=1" \
+    "the pin should come from the parked decision alone"
+  [ $((t1 - t0)) -le 3 ] || fail "a parked-only pin must cap at the 1 s cap, not renew; held $((t1 - t0)) s"
+  pass "keep-alive loop: a parked worker alone never renews the cap"
+}
+
 # --- keep-alive instrumentation: the arm detail line -------------------------
 #
 # Why these exist: a released pin used to leave no durable trace, so "the keeper
@@ -2672,6 +2774,8 @@ test_keepalive_wrapper_marks_midtask_stop_on_capped_active() {
     || fail "a cap expiry with active work and a stopped VM must record the mid-task-stop marker"
   assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "expired while in-guest work was still active" \
     "the marker should carry the cap-expiry reason"
+  assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "keep-alive ceiling (28800s" \
+    "busy work caps only at the renewal ceiling, so the marker should name it"
   pass "keep-alive wrapper: cap expiry with active work + stopped VM records the mid-task-stop marker"
 }
 
@@ -3893,6 +3997,10 @@ test_keepalive_script_parked_pin_leaves_the_breadcrumb_alone
 test_keepalive_script_parked_arm_fails_closed_without_the_predicate
 test_keepalive_script_pins_static_worker_with_fresh_job_lease
 test_keepalive_script_releases_static_worker_with_stale_lease
+test_keepalive_script_renews_the_cap_while_busy
+test_keepalive_script_ceiling_caps_a_busy_guest
+test_keepalive_script_renews_the_cap_for_a_job_lease
+test_keepalive_script_parked_worker_never_renews
 test_keepalive_script_detail_names_the_deciding_arm
 test_keepalive_script_detail_reports_panes_and_gate_freshness
 test_keepalive_script_detail_reports_the_pane_change_arm
