@@ -126,7 +126,7 @@ family_for_basename() {
     fm-cd-pretool-check.test.sh|fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-continuity-pretool-check.test.sh|fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
+    fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-keepawake.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
     fm-parked-decision.test.sh|fm-pi-primary-types.test.sh|fm-promote.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
