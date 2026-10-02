@@ -2147,6 +2147,71 @@ assert_log_lacks() {
   ! grep -qE -- "$2" "$1" || fail "$3"$'\n'"--- log ---"$'\n'"$(cat "$1" 2>/dev/null)"
 }
 
+# --- keep-alive arm2: a declared job lease (2026-10-02 stop) -----------------
+#
+# run_lease_keeper <fakebin> <world> <lease-age>: a REGISTERED in-guest worker
+# with a static pane and a stale status, plus a state/w1.active job lease that
+# is fresh or stale, run through the secondmate's turn-end advancing - the one
+# condition every release requires. Echoes the loop's raw output.
+run_lease_keeper() {  # <fakebin> <world> <fresh|stale>
+  local fb=$1 w=$2 age=$3 script te pid i
+  script=$(run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive_script')
+  mkdir -p "$w/signals/x" "$w/home/state"
+  te="$w/signals/x/x.turn-ended"
+  : > "$te"
+  touch -t 202001010000 "$te"
+  printf 'kind=ship\n' > "$w/home/state/w1.meta"
+  printf 'working: re-calibration started\n' > "$w/home/state/w1.status"
+  : > "$w/home/state/w1.active"
+  touch -t 202001010000 "$w/home/state/w1.meta" "$w/home/state/w1.status"
+  [ "$age" = fresh ] || touch -t 202001010000 "$w/home/state/w1.active"
+  printf 'eval running in the background\n> \n' > "$w/worker.txt"
+  PATH="$fb:$BASE_PATH" FAKE_TMUX_PANE=/dev/null FAKE_TMUX_PANE2="$w/worker.txt" HOME="$(keepalive_home)" \
+    sh -c "$script" _ "$te" 3 1 120 "$w/home" 'esc (to )?interrupt' "$(keepalive_auth_regex)" > "$w/verdict.txt" &
+  pid=$!
+  sleep 0.3
+  touch "$te"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  cat "$w/verdict.txt"
+}
+
+test_keepalive_script_pins_static_worker_with_fresh_job_lease() {
+  # THE 2026-10-02 stop, from the keeper's own verdict log: five released-idle
+  # verdicts with arm1..arm5 all 0, crew=1, park=unknown, while a registered
+  # worker's paid eval ran as a background job with a static pane and no fresh
+  # status. A fresh lease from bin/fm-keepawake.sh is how that job is seen.
+  local w fb out
+  w=$(new_sbx_world keeper-lease-fresh); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  out=$(run_lease_keeper "$fb" "$w" fresh)
+  assert_not_contains "$out" "fm-keepalive released-idle" \
+    "the keeper released on the turn-end while a leased background job was running"
+  assert_contains "$out" "fm-keepalive capped-active" \
+    "a fresh job lease must pin until the cap"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=1 arm3=0 arm4=0 arm5=0 crew=1" \
+    "the job lease should be reported as arm 2"
+  [ -e "$w/signals/x/x.guest-active" ] \
+    || fail "a leased job is work, so it must stamp the guest-active breadcrumb"
+  pass "keep-alive loop: a static-paned worker with a fresh job lease pins (2026-10-02 stop)"
+}
+
+test_keepalive_script_releases_static_worker_with_stale_lease() {
+  # A lease only counts while its job refreshes it: one left behind by a job
+  # that ended, or a wrapper that was killed, must not hold an idle guest awake.
+  local w fb out
+  w=$(new_sbx_world keeper-lease-stale); fb=$(make_fake_sbx "$w")
+  make_fake_guest_tmux "$fb"
+  out=$(run_lease_keeper "$fb" "$w" stale)
+  assert_contains "$out" "fm-keepalive released-idle" \
+    "a stale job lease must not pin the VM"
+  assert_contains "$(keepalive_detail_of "$out")" "arm1=0 arm2=0 arm3=0 arm4=0 arm5=0 crew=1" \
+    "a stale job lease should read as nothing on every arm"
+  pass "keep-alive loop: a stale job lease releases (auto-stop preserved)"
+}
+
 # --- keep-alive instrumentation: the arm detail line -------------------------
 #
 # Why these exist: a released pin used to leave no durable trace, so "the keeper
@@ -2614,6 +2679,26 @@ test_keepalive_wrapper_marks_midtask_stop_on_capped_active() {
   assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "expired while in-guest work was still active" \
     "the marker should carry the cap-expiry reason"
   pass "keep-alive wrapper: cap expiry with active work + stopped VM records the mid-task-stop marker"
+}
+
+test_keepalive_wrapper_names_a_parked_wait_on_capped_active() {
+  # 2026-10-02 stop 1: the cap ended a pin held only by a worker parked on an
+  # unanswered decision. The remedy is to resume a waiting worker, not to
+  # recover lost compute, so the marker must say which one it was.
+  local w fb
+  w=$(new_sbx_world keeper-capmark-parked); fb=$(make_fake_sbx "$w")
+  sbx_ls_json fm-x stopped > "$w/ls.json"
+  run_adapter "$fb" "$w" 'fm_backend_sbx_keepalive fm-x x ""; wait' \
+    FM_STATE_OVERRIDE="$w/state" FM_SBX_KEEPALIVE_MAX=60 FM_SBX_MIDTASK_STOP_SETTLE=0 \
+    FM_FAKE_SBX_KEEPALIVE_OUT=$'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=1 crew=1 panes=4 park=none nmlog=1790926739\nfm-keepalive capped-active' \
+    || fail "the keep-alive call itself should succeed"
+  [ -f "$w/state/.sbx-midtask-stop-x" ] \
+    || fail "a cap expiry over a parked worker and a stopped VM must still record the mid-task-stop marker"
+  assert_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "parked on an unanswered decision" \
+    "the marker should name the parked decision"
+  assert_not_contains "$(cat "$w/state/.sbx-midtask-stop-x")" "work was still active" \
+    "the marker must not claim active work for an arm5-only pin"
+  pass "keep-alive wrapper: a cap expiry held only by a parked decision says so"
 }
 
 test_keepalive_wrapper_skips_marker_when_vm_still_running() {
@@ -3812,6 +3897,8 @@ test_keepalive_script_releases_a_finished_worker_with_an_open_decision
 test_keepalive_script_parked_arm_needs_a_registered_crewmate
 test_keepalive_script_parked_pin_leaves_the_breadcrumb_alone
 test_keepalive_script_parked_arm_fails_closed_without_the_predicate
+test_keepalive_script_pins_static_worker_with_fresh_job_lease
+test_keepalive_script_releases_static_worker_with_stale_lease
 test_keepalive_script_detail_names_the_deciding_arm
 test_keepalive_script_detail_reports_panes_and_gate_freshness
 test_keepalive_script_detail_reports_the_pane_change_arm
@@ -3830,6 +3917,7 @@ test_keepalive_wrapper_log_carries_validated_guest_detail
 test_keepalive_wrapper_log_failure_cannot_affect_the_keeper
 test_keepalive_log_growth_is_bounded
 test_keepalive_wrapper_marks_midtask_stop_on_capped_active
+test_keepalive_wrapper_names_a_parked_wait_on_capped_active
 test_keepalive_wrapper_skips_marker_when_vm_still_running
 test_keepalive_wrapper_marks_dropped_connection_with_fresh_breadcrumb
 test_keepalive_wrapper_quiet_on_idle_death

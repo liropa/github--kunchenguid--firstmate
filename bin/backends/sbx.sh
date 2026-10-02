@@ -777,7 +777,8 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     independent arms: any tmux pane whose visible tail matches the busy regex
 #     (the same busy idiom the watcher and the submit verify use); a
 #     status/turn-ended file under the guest home's state/ (an in-guest child
-#     worker's signals) touched within the activity window; or, WHILE A
+#     worker's signals), or a state/<id>.active job lease, touched within the
+#     activity window; or, WHILE A
 #     CREWMATE TASK IS REGISTERED in the guest home's state/, any change in the
 #     captured pane set since the previous poll; or a file under the guest's
 #     own $HOME/.no-mistakes/logs/ touched within the activity window. An
@@ -822,6 +823,14 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     cleared by hand - the worker's own resolution line closes the pin, and a
 #     firstmate that dies mid-escalation leaves no marker behind to strand the
 #     guest awake. A pure in-guest read; no `sbx exec` is added to the poll path.
+#   - The job lease in arm2 exists because on 2026-10-02 five keepers logged
+#     released-idle with all five arms 0 and crew=1 while a registered worker's
+#     paid eval ran as a background job: a job outside the worker's turn moves
+#     no pane, writes no status, and is not a gate run. bin/fm-keepawake.sh
+#     refreshes the lease while a wrapped job runs and stops when it exits, so
+#     the pin ends within one activity window of the job. It folds into arm2's
+#     flag on purpose: a separate arm field would change the detail whitelist
+#     and every exact-shape fixture for a distinction no action depends on.
 #   - Arm precedence is arm1..arm5 - arm5 is evaluated last, so a poll the
 #     existing four already called work reports exactly the flag it reported
 #     before. Only arms 1-4 touch the guest-active breadcrumb (see below).
@@ -978,7 +987,7 @@ fm_backend_sbx_keepalive_script() {
         fi
       done
       if [ "$work" = 0 ] && [ -n "$home" ]; then
-        for f in "$home"/state/*.status "$home"/state/*.turn-ended; do
+        for f in "$home"/state/*.status "$home"/state/*.turn-ended "$home"/state/*.active; do
           [ -e "$f" ] || continue
           [ $((now - $(mt "$f"))) -le "$window" ] || continue
           work=1
@@ -1158,7 +1167,16 @@ fm_backend_sbx_keepalive() {  # <name> <id> [home]
     case "$outcome" in
       released-idle|capped-idle) exit 0 ;;
       capped-active)
-        why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
+        # An arm5-only pin is a wait, not work: firstmate's remedy is to resume
+        # a waiting worker, not to recover lost compute (2026-10-02 stop 1).
+        case "$detail" in
+          'fm-keepalive detail arm1=0 arm2=0 arm3=0 arm4=0 arm5=1 '*)
+            why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while an in-guest worker was still parked on an unanswered decision"
+            ;;
+          *)
+            why="the keep-alive cap (${FM_SBX_KEEPALIVE_MAX}s) expired while in-guest work was still active"
+            ;;
+        esac
         ;;
       *)
         # No verdict: the exec died under us. Only suspicious when in-guest
