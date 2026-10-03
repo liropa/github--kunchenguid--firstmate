@@ -57,6 +57,70 @@ test_lease_is_refreshed_until_the_command_exits() {
   pass "keepawake: the lease is refreshed until the command exits, then left to go stale"
 }
 
+test_term_reaches_background_job_and_lease_stops_after_it_exits() (
+  local dir lease pid= job= attempt rc=0
+  trap 'kill -KILL "$pid" "$job" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+  dir=$(make_task term)
+  lease="$dir/home/state/w1.active"
+  cat > "$dir/job.sh" <<'SH'
+set -eu
+dir=$1
+finish() {
+  : > "$dir/terminating"
+  while [ ! -e "$dir/finish" ]; do sleep 0.1; done
+  : > "$dir/ended"
+  exit 23
+}
+trap finish TERM
+printf '%s\n' "$$" > "$dir/job.pid"
+IFS= read -r input
+printf '%s\n' "$input"
+: > "$dir/ready"
+while :; do sleep 0.1; done
+SH
+  printf 'job input\n' > "$dir/input"
+  (
+    cd "$dir/wt" || exit 1
+    export FM_HOME="$dir/home" FM_KEEPAWAKE_INTERVAL=1
+    exec "$KEEPAWAKE" -- sh "$dir/job.sh" "$dir"
+  ) < "$dir/input" > "$dir/output" 2> "$dir/error" &
+  pid=$!
+  for attempt in {1..50}; do
+    [ ! -e "$dir/job.pid" ] || read -r job < "$dir/job.pid"
+    [ ! -e "$dir/ready" ] || break
+    sleep 0.1
+  done
+  [ -e "$dir/ready" ] || fail "the background job should read stdin and become ready"
+  [ "$(cat "$dir/output")" = 'job input' ] || fail "stdin and stdout should pass through"
+
+  kill -TERM "$pid" || fail "TERM should reach the wrapper pid"
+  for attempt in {1..50}; do
+    [ ! -e "$dir/terminating" ] || break
+    sleep 0.1
+  done
+  [ -e "$dir/terminating" ] || fail "TERM to the wrapper pid should reach the job"
+  kill -0 "$pid" 2>/dev/null || fail "the wrapper should wait for the job's shutdown"
+  touch -t 202001010000 "$lease"
+  sleep 2
+  [ $(($(date +%s) - $(mtime "$lease"))) -le 5 ] \
+    || fail "the lease should stay fresh while the job shuts down"
+  touch "$dir/finish"
+  for attempt in {1..50}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null && fail "the wrapper should end when the job exits"
+  wait "$pid" || rc=$?
+  [ "$rc" = 23 ] || fail "the job's signal-handler exit status should pass through, got $rc"
+  [ -e "$dir/ended" ] || fail "the job should finish its shutdown"
+  kill -0 "$job" 2>/dev/null && fail "the job should no longer be running"
+  touch -t 202001010000 "$lease"
+  sleep 2
+  [ "$(mtime "$lease")" -lt 1600000000 ] \
+    || fail "the lease must stop refreshing after the terminated job exits"
+  pass "keepawake: TERM reaches the background job and its lease stops after shutdown"
+)
+
 test_resolves_the_task_from_a_subdirectory() {
   local dir
   dir=$(make_task subdir)
@@ -98,6 +162,7 @@ test_refuses_without_a_command() {
   pass "keepawake: a missing command or separator refuses"
 }
 
+test_term_reaches_background_job_and_lease_stops_after_it_exits || exit $?
 test_lease_is_held_while_the_command_runs_and_status_passes_through
 test_lease_is_refreshed_until_the_command_exits
 test_resolves_the_task_from_a_subdirectory
