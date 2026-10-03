@@ -29,7 +29,7 @@
 # so a lease refreshed every 30 s pins the VM exactly while the job runs, and
 # releases within one window after it ends (docs/sbx-backend.md "Job lease").
 #
-# The refresher is tied to this wrapper's own pid, not the command's: if the
+# The refresher is tied to this wrapper's own pid: if the
 # wrapper is killed outright, the lease stops within one interval rather than
 # pinning the VM until the keep-alive cap.
 set -eu
@@ -80,14 +80,9 @@ touch "$lease" || { echo "error: cannot write the job lease $lease" >&2; exit 2;
 
 owner=$$
 (
-  while kill -0 "$owner" 2>/dev/null; do
+  while sleep "$interval" && kill -0 "$owner" 2>/dev/null; do
     touch "$lease" 2>/dev/null || true
-    sleep "$interval"
   done
 ) </dev/null >/dev/null 2>&1 &
-refresher=$!
-trap 'kill "$refresher" 2>/dev/null || true' EXIT
 
-rc=0
-"$@" || rc=$?
-exit "$rc"
+exec -- "$@"
