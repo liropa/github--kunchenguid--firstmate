@@ -58,7 +58,7 @@ test_lease_is_refreshed_until_the_command_exits() {
 }
 
 test_term_reaches_background_job_and_lease_stops_after_it_exits() (
-  local dir lease pid= job= attempt rc=0
+  local dir lease pid='' job='' _ rc=0
   trap 'kill -KILL "$pid" "$job" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
   dir=$(make_task term)
   lease="$dir/home/state/w1.active"
@@ -85,7 +85,7 @@ SH
     exec "$KEEPAWAKE" -- sh "$dir/job.sh" "$dir"
   ) < "$dir/input" > "$dir/output" 2> "$dir/error" &
   pid=$!
-  for attempt in {1..50}; do
+  for _ in {1..50}; do
     [ ! -e "$dir/job.pid" ] || read -r job < "$dir/job.pid"
     [ ! -e "$dir/ready" ] || break
     sleep 0.1
@@ -94,7 +94,7 @@ SH
   [ "$(cat "$dir/output")" = 'job input' ] || fail "stdin and stdout should pass through"
 
   kill -TERM "$pid" || fail "TERM should reach the wrapper pid"
-  for attempt in {1..50}; do
+  for _ in {1..50}; do
     [ ! -e "$dir/terminating" ] || break
     sleep 0.1
   done
@@ -105,7 +105,7 @@ SH
   [ $(($(date +%s) - $(mtime "$lease"))) -le 5 ] \
     || fail "the lease should stay fresh while the job shuts down"
   touch "$dir/finish"
-  for attempt in {1..50}; do
+  for _ in {1..50}; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
