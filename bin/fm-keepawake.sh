@@ -5,12 +5,12 @@
 # Usage:
 #   fm-keepawake.sh -- <cmd> [args...]
 #
-# Runs <cmd> in the foreground (stdin, signals, and output pass through
-# unchanged) and returns its exit status. While it runs, a background refresher
-# touches state/<task-id>.active in the active home every FM_KEEPAWAKE_INTERVAL
-# seconds (default 30). When the command exits, the refresher stops; the lease
-# file is left in place and simply goes stale, so two wrapped jobs of one task
-# never cut each other's lease short.
+# Replaces the wrapper with <cmd>, preserving its pid, stdin, signals, output,
+# and exit status. While it runs, a background refresher touches
+# state/<task-id>.active in the active home every FM_KEEPAWAKE_INTERVAL
+# seconds (default 30). When the command exits, the refresher stops within one
+# interval; the lease file is left in place and simply goes stale, so two
+# wrapped jobs of one task never cut each other's lease short.
 #
 # Resolution, the same as the other worker-side scripts:
 #   home     $FM_HOME, else $FM_ROOT_OVERRIDE, else this code root; the state
@@ -20,18 +20,12 @@
 # The command is never run when either cannot be resolved: the script prints
 # the reason and exits 2, so a job is never started believing it is covered.
 #
-# WHY. Docker Sandboxes stop a VM about 35 s after its last host connection.
-# bin/backends/sbx.sh's keep-alive holds that connection only while its arms see
-# work, and a job a worker backgrounded (`&`, nohup, a harness background task)
-# moves no pane, writes no status, and is not a gate run - so on 2026-10-02 five
-# keepers released on top of a running, paid eval and the VM stopped under it.
-# Keep-alive arm2 reads state/*.active within FM_SBX_GUEST_ACTIVE_WINDOW (120 s),
-# so a lease refreshed every 30 s pins the VM exactly while the job runs, and
-# releases within one window after it ends (docs/sbx-backend.md "Job lease").
+# A background job can outlive its worker's visible turn. The keep-alive needs
+# this lease to see that work; docs/sbx-backend.md "Job lease" owns the keeper's
+# release conditions and limits.
 #
-# The refresher is tied to this wrapper's own pid: if the
-# wrapper is killed outright, the lease stops within one interval rather than
-# pinning the VM until the keep-alive cap.
+# The refresher follows the pid retained by exec, so it cannot keep refreshing
+# after that process ends.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
