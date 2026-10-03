@@ -66,9 +66,8 @@ FM_SBX_RESURRECT_SETTLE=${FM_SBX_RESURRECT_SETTLE:-8}
 # fm_backend_sbx_ensure_stack; 0 disables the poll, unit tests do).
 FM_SBX_RESURRECT_READY_TRIES=${FM_SBX_RESURRECT_READY_TRIES:-15}
 
-# Cap (seconds) on how long a keep-alive exec pins the VM waiting for the
-# guest to go idle (fm_backend_sbx_keepalive). 0 disables keep-alives
-# entirely (unit tests do).
+# Initial keep-alive cap in seconds; 0 disables keep-alives (unit tests do).
+# docs/sbx-backend.md "Cap renewal while busy" owns the renewal rule.
 FM_SBX_KEEPALIVE_MAX=${FM_SBX_KEEPALIVE_MAX:-7200}
 
 # Absolute ceiling (seconds from a keeper's start) on renewing the cap: a
@@ -81,7 +80,7 @@ FM_SBX_KEEPALIVE_CEILING=${FM_SBX_KEEPALIVE_CEILING:-28800}
 FM_SBX_KEEPALIVE_POLL=${FM_SBX_KEEPALIVE_POLL:-5}
 
 # Horizon (seconds) within which an in-guest signal-file advance (a child
-# worker's status/turn-ended write under the guest home's state/) still counts
+# worker's signal or job lease under the guest home's state/) still counts
 # as live worker activity, and the freshness bound for the host-visible
 # <id>.guest-active breadcrumb the keep-alive maintains. Bridges a worker's
 # short between-turns gaps without pinning a genuinely idle guest.
@@ -771,7 +770,7 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 # fm_backend_sbx_keepalive_script: print the guest-side sh loop the keep-alive
 # exec runs, factored out so tests can exercise the pin/release logic directly
 # (a fake tmux plus real files) without a sandbox. Args after the _ argv0:
-#   $1 turn-ended mount file    $2 max pin seconds   $3 poll seconds
+#   $1 turn-ended mount file    $2 initial cap seconds   $3 poll seconds
 #   $4 activity window seconds  $5 guest home path ('' skips the state probes)
 #   $6 busy-pane regex          $7 sign-in-pane regex ('' never claims a sign-in
 #                                  park, so an older caller classifies nothing
@@ -831,14 +830,10 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     cleared by hand - the worker's own resolution line closes the pin, and a
 #     firstmate that dies mid-escalation leaves no marker behind to strand the
 #     guest awake. A pure in-guest read; no `sbx exec` is added to the poll path.
-#   - The job lease in arm2 exists because on 2026-10-02 five keepers logged
-#     released-idle with all five arms 0 and crew=1 while a registered worker's
-#     paid eval ran as a background job: a job outside the worker's turn moves
-#     no pane, writes no status, and is not a gate run. bin/fm-keepawake.sh
-#     refreshes the lease while a wrapped job runs and stops when it exits, so
-#     the pin ends within one activity window of the job. It folds into arm2's
-#     flag on purpose: a separate arm field would change the detail whitelist
-#     and every exact-shape fixture for a distinction no action depends on.
+#   - docs/sbx-backend.md "Job lease" owns the lease's release conditions.
+#     It folds into arm2's flag on purpose: a separate arm field would change
+#     the detail whitelist and every exact-shape fixture for a distinction no
+#     action depends on.
 #   - Arm precedence is arm1..arm5 - arm5 is evaluated last, so a poll the
 #     existing four already called work reports exactly the flag it reported
 #     before. Only arms 1-4 touch the guest-active breadcrumb (see below).
@@ -902,7 +897,7 @@ fm_backend_sbx_resume_template() {  # <harness> <turnend> <beat>
 #     1-4 and park are INSTRUMENTATION ONLY: the arms are assigned beside the
 #     existing work=1 assignments, park is computed inside emit immediately
 #     before exit, and no condition reads any of them.
-#     a5 is the one exception - the breadcrumb rule above reads it, because
+#     a5 is the one exception - the breadcrumb and renewal rules read it, because
 #     "the pin came from the park" is not derivable from work= alone. The line
 #     exists because a released pin left no
 #     durable trace at all, which cost a multi-hour forensic dig to reconstruct
