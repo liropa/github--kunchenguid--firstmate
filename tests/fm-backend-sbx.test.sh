@@ -110,6 +110,19 @@ test_state_probe_classifies() {
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
   [ "$out" = error ] || fail "an unrecognized status vocabulary should read ERROR (ambiguous), got '$out'"
 
+  # sbx before v0.48.0 wrapped the array; a host still on one keeps working.
+  sbx_ls_json_legacy fm-x stopped > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = stopped ] || fail "the pre-v0.48.0 wrapped listing should still read stopped, got '$out'"
+
+  printf '%s\n' "$SBX_LS_EMPTY_LEGACY" > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = absent ] || fail "a parse-clean pre-v0.48.0 listing lacking the name should read ABSENT, got '$out'"
+
+  printf '{}\n' > "$w/ls.json"
+  out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+  [ "$out" = error ] || fail "an object with no sandbox list should read ERROR, never absent, got '$out'"
+
   pass "fm_backend_sbx_state: running/stopped/absent vs error classification"
 }
 
@@ -3283,7 +3296,7 @@ test_export_private_stops_writers_before_tar_and_host_verification() {
   cat > "$fb/tar" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = -tzf ]; then
-  [ "$(jq -r '.sandboxes[0].status' "$FM_FAKE_SBX_LS_FILE")" = stopped ] || exit 91
+  [ "$(jq -r '.[0].status' "$FM_FAKE_SBX_LS_FILE")" = stopped ] || exit 91
 fi
 exec "$FM_TEST_REAL_TAR" "$@"
 SH

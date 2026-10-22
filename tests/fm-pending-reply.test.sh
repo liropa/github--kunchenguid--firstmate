@@ -1346,9 +1346,9 @@ make_sbx_stub() {  # <dir> <ls-rc> <running|stopped|absent> -> fakebin
   fb=$(fm_fakebin "$dir")
   ln -sf "$(command -v jq)" "$fb/jq"
   if [ "$status" = absent ]; then
-    body='{"sandboxes":[]}'
+    body='[]'
   else
-    body='{"sandboxes":[{"name":"fm-hibit","id":"fake","agent":"shell","status":"'$status'","workspaces":["/w"]}]}'
+    body='[{"name":"fm-hibit","id":"fake","agent":"shell","status":"'$status'","workspaces":["/w"]}]'
   fi
   cat > "$fb/sbx" <<SH
 #!/usr/bin/env bash

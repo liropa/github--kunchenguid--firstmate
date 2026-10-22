@@ -224,8 +224,11 @@ fm_backend_sbx_state() {  # <name>
   command -v sbx >/dev/null 2>&1 || { printf 'error'; return 0; }
   command -v jq >/dev/null 2>&1 || { printf 'error'; return 0; }
   out=$(sbx ls --json 2>/dev/null) || { printf 'error'; return 0; }
+  # sbx v0.48.0 and later print the sandbox array itself. Earlier releases wrap
+  # it as {"sandboxes": [...]}. Any other shape makes the iteration fail, so the
+  # state is error.
   st=$(printf '%s' "$out" | jq -r --arg n "$name" \
-    '.sandboxes[] | select(.name == $n) | .status' 2>/dev/null) || { printf 'error'; return 0; }
+    '(if type == "array" then . else .sandboxes end)[] | select(.name == $n) | .status' 2>/dev/null) || { printf 'error'; return 0; }
   case "$st" in
     running) printf 'running' ;;
     stopped) printf 'stopped' ;;
