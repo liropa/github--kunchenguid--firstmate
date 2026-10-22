@@ -206,7 +206,7 @@ case "$cmd" in
     printf '%s\n' "$stop_count" > "$fake_state.stop-count"
     [ "$stop_count" != "${FM_FAKE_SBX_STOP_FAIL_ON:-0}" ] || exit 1
     [ "$stop_count" != "${FM_FAKE_SBX_STOP_SILENT_ON:-0}" ] || exit 0
-    inventory=$(jq --arg name "$1" '.sandboxes |= map(if .name == $name then .status = "stopped" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+    inventory=$(jq --arg name "$1" 'map(if .name == $name then .status = "stopped" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
     printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
     touch "$fake_state.stopped-$1"
     [ -z "${FM_FAKE_SBX_WRITER_ACTIVE:-}" ] || rm -f "$FM_FAKE_SBX_WRITER_ACTIVE"
@@ -254,7 +254,7 @@ case "$cmd" in
         ;;
       "tmux new-session"*)
         [ "${FM_FAKE_SBX_NEW_SESSION_RC:-0}" = 0 ] || exit "${FM_FAKE_SBX_NEW_SESSION_RC}"
-        inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+        inventory=$(jq --arg name "$sandbox" 'map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
         printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
         rm -f "$fake_state.stopped-$sandbox"
         exit 0
@@ -389,7 +389,7 @@ case "$cmd" in
         exit "${FM_FAKE_SBX_KEEPALIVE_RC:-0}"
         ;;
       "sh -c "*"fm-sbx-export-private"*)
-        inventory=$(jq --arg name "$sandbox" '.sandboxes |= map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
+        inventory=$(jq --arg name "$sandbox" 'map(if .name == $name then .status = "running" else . end)' "$FM_FAKE_SBX_LS_FILE") || exit 1
         printf '%s\n' "$inventory" > "$FM_FAKE_SBX_LS_FILE"
         # The private-record export (fm_backend_sbx_export_private). Executed
         # for real, with the home argument remapped onto the guest-clone
@@ -713,12 +713,21 @@ agent_child_var() {  # <guest-user-home> <mode> [var]
 }
 
 # sbx_ls_json <name> <status>: one-sandbox inventory JSON in the REAL
-# `sbx ls --json` shape (verified 2026-07-19; docs/sbx-backend.md).
+# `sbx ls --json` shape of sbx v0.48.0 and later (verified on v0.49.2,
+# 2026-10-22; docs/sbx-backend.md).
 sbx_ls_json() {  # <name> <status>
+  printf '[{"name":"%s","id":"fake-id","agent":"shell","status":"%s","last_used_at":"2026-10-22T00:00:00Z","workspaces":["/w"],"memory":"4g","memory_mib":4096,"created_at":"2026-10-22T00:00:00Z"}]\n' "$1" "$2"
+}
+
+# sbx_ls_json_legacy <name> <status>: the same inventory in the shape sbx
+# printed before v0.48.0 (verified 2026-07-19).
+sbx_ls_json_legacy() {  # <name> <status>
   printf '{"sandboxes":[{"name":"%s","id":"fake-id","agent":"shell","status":"%s","workspaces":["/w"]}]}\n' "$1" "$2"
 }
 
-# Consumed by the sourcing suites, not by this library, so it reads as
+# Consumed by the sourcing suites, not by this library, so they read as
 # "unused" here - the same pattern as lib.sh's ROOT.
 # shellcheck disable=SC2034
-SBX_LS_EMPTY='{"sandboxes":[]}'
+SBX_LS_EMPTY='[]'
+# shellcheck disable=SC2034
+SBX_LS_EMPTY_LEGACY='{"sandboxes":[]}'
