@@ -17,7 +17,9 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
   Observed `status` values: `running`, `stopped`.
   From sbx v0.48.0 it prints the array itself, `[{"name","id","agent","status","last_used_at","workspaces":[...],"memory","memory_mib","created_at"}]` (verified on v0.49.2, 2026-10-22, against a stopped codex sandbox, status `stopped`).
   The adapter reads both shapes; any other shape reads as `error`.
-  An absent name is simply missing from a parse-clean listing - that is the adapter's **confirmed absent**, distinct from a CLI failure.
+  Every entry must be an object with a string name.
+  A missing name is the adapter's **confirmed absent**, distinct from a CLI failure.
+  Empty output, duplicate matching names, and missing, empty, or unknown matching statuses read as `error`.
 - `sbx exec <name> -- ...` **auto-starts a stopped sandbox** (observed: "Sandbox ... started successfully", ~1.9 s to first command).
   This is why routine supervision reads (presence, capture, busy) are state-gated in the adapter: routine probes must use `sbx ls`, never `exec`; explicit teardown is the one exception because it must inspect the disk before destruction.
 - `sbx exec`'s default working directory is the workspace path, at the **same absolute path** as on the host; the guest user is `agent`.

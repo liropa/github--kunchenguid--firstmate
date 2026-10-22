@@ -80,7 +80,7 @@ new_sbx_world() {  # <name>
 # --- unit level: fm_backend_sbx_state ---------------------------------------
 
 test_state_probe_classifies() {
-  local w fb out
+  local w fb out payload
   w=$(new_sbx_world state-probe); fb=$(make_fake_sbx "$w")
 
   sbx_ls_json fm-x running > "$w/ls.json"
@@ -122,6 +122,17 @@ test_state_probe_classifies() {
   printf '{}\n' > "$w/ls.json"
   out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
   [ "$out" = error ] || fail "an object with no sandbox list should read ERROR, never absent, got '$out'"
+
+  for payload in '' '   ' '{"sandboxes":{}}' \
+    '[{"name":"fm-x","status":""}]' '[{"status":"running"}]' \
+    '[{"name":"fm-x","status":"running"},{"name":"fm-x","status":"running"}]' \
+    '[{"name":"fm-x"}]' '[{"name":"fm-x","status":"absent"}]' \
+    '[{"name":"fm-x","status":42}]' '[null]' '[{"name":42}]' \
+    '[] []' '[{"name":"fm-x","status":"running\n"}]'; do
+    printf '%s' "$payload" > "$w/ls.json"
+    out=$(run_adapter "$fb" "$w" 'fm_backend_sbx_state fm-x')
+    [ "$out" = error ] || fail "invalid inventory must read ERROR, got '$out' for '$payload'"
+  done
 
   pass "fm_backend_sbx_state: running/stopped/absent vs error classification"
 }

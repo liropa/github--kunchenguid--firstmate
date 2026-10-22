@@ -224,16 +224,26 @@ fm_backend_sbx_state() {  # <name>
   command -v sbx >/dev/null 2>&1 || { printf 'error'; return 0; }
   command -v jq >/dev/null 2>&1 || { printf 'error'; return 0; }
   out=$(sbx ls --json 2>/dev/null) || { printf 'error'; return 0; }
-  # sbx v0.48.0 and later print the sandbox array itself. Earlier releases wrap
-  # it as {"sandboxes": [...]}. Any other shape makes the iteration fail, so the
-  # state is error.
-  st=$(printf '%s' "$out" | jq -r --arg n "$name" \
-    '(if type == "array" then . else .sandboxes end)[] | select(.name == $n) | .status' 2>/dev/null) || { printf 'error'; return 0; }
+  st=$(printf '%s' "$out" | jq -s -r --arg n "$name" '
+    if length != 1 then error("expected one inventory") else .[0] end
+    | if type == "array" then .
+      elif type == "object" then .sandboxes
+      else error("invalid inventory") end
+    | if type != "array" then error("expected array") else . end
+    | if all(.[]; type == "object" and (.name | type == "string"))
+      then . else error("invalid entry") end
+    | map(select(.name == $n))
+    | if length == 0 then "absent"
+      elif length != 1 then error("duplicate name")
+      elif (.[0].status | type != "string" or length == 0)
+      then error("invalid status")
+      else (.[0].status | tojson) end
+  ' 2>/dev/null) || { printf 'error'; return 0; }
   case "$st" in
-    running) printf 'running' ;;
-    stopped) printf 'stopped' ;;
-    '')      printf 'absent' ;;
-    *)       printf 'error' ;;
+    '"running"') printf 'running' ;;
+    '"stopped"') printf 'stopped' ;;
+    absent)      printf 'absent' ;;
+    *)           printf 'error' ;;
   esac
 }
 
