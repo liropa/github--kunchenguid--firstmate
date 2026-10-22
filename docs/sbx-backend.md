@@ -13,12 +13,13 @@ Tests: `tests/fm-backend-sbx.test.sh`, `tests/fm-spawn-sbx.test.sh`, `tests/fm-s
 
 ## Empirical CLI facts (verified 2026-07-19, sbx CLI against a real shell-agent sandbox)
 
-- `sbx ls --json` prints `{"sandboxes":[{"name","id","agent","status","workspaces":[...]}]}`.
+- Before sbx v0.48.0, `sbx ls --json` prints `{"sandboxes":[{"name","id","agent","status","workspaces":[...]}]}`.
   Observed `status` values: `running`, `stopped`.
-  From sbx v0.48.0 it prints the array itself, `[{"name","id","agent","status","last_used_at","workspaces":[...],"memory","memory_mib","created_at"}]` (verified on v0.49.2, 2026-10-22, against a stopped codex sandbox, status `stopped`).
+  From sbx v0.48.0 it prints the array itself, `[{"name","id","agent","status","last_used_at","workspaces":[...],"memory","memory_mib","created_at"}]`.
+  Measured on the captain's Mac with `sbx ls --json`, v0.49.2, 2026-10-22, against the stopped codex sandbox `fm-agent-dotfiles`.
   The adapter reads both shapes; any other shape reads as `error`.
   Every entry must be an object with a string name.
-  A missing name is the adapter's **confirmed absent**, distinct from a CLI failure.
+  No entry matching the requested name is the adapter's **confirmed absent**, distinct from a CLI failure.
   Empty output, duplicate matching names, and missing, empty, or unknown matching statuses read as `error`.
 - `sbx exec <name> -- ...` **auto-starts a stopped sandbox** (observed: "Sandbox ... started successfully", ~1.9 s to first command).
   This is why routine supervision reads (presence, capture, busy) are state-gated in the adapter: routine probes must use `sbx ls`, never `exec`; explicit teardown is the one exception because it must inspect the disk before destruction.
